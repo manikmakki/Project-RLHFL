@@ -1,0 +1,43 @@
+memory:
+  batch_size: 32
+  embedding_model: all-MiniLM-L6-v2
+  golden_examples_count: 20
+  max_memory_age_days: 90
+  similarity_threshold: 0.7
+  rag_enabled: true
+  rag_top_k: 5
+  # Memory management settings
+  max_db_size_gb: 10                # Maximum database size before auto-cleanup
+  auto_cleanup_threshold: 0.9       # Trigger cleanup at 90% of max size
+  auto_cleanup_percentage: 0.1      # Remove bottom 10% by weight during auto-cleanup
+  min_weight_threshold: 0.5         # Remove entries below this weight during pre-training cleanup
+model:
+  base_model_hf_path: /models/mistral-7b-instruct-base
+  base_model_path: /models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+  context_length: 16384
+  max_tokens: 4096
+  model_id: mistral-7b-instruct
+  n_batch: 2048
+  n_gpu_layers: -1
+  n_threads: 48
+  temperature: 0.7
+  top_p: 0.9
+sentiment:
+  continuation_baseline: 0.1
+  explicit_instruction_boost: 3.0
+  negative_threshold: -0.3
+  positive_threshold: 0.3
+training:
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  inactivity_threshold_hours: 24
+  learning_rate: 5.0e-05
+  lora_alpha: 32
+  lora_rank: 16
+  max_days_between_training: 7
+  max_grad_norm: 1.0
+  min_interactions_threshold: 50
+  num_epochs: 3
+  validation_split: 0.1
+  warmup_steps: 100
+  weight_decay: 0.01

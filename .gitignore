@@ -1,0 +1,4 @@
+volumes/models/*
+volumes/checkpoints/*
+volumes/data/*
+.env

@@ -1,0 +1,61 @@
+FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
+    git \
+    wget \
+    cmake \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip
+RUN python3 -m pip install --upgrade pip
+
+# Install NumPy < 2.0 (compatibility)
+RUN pip install --no-cache-dir "numpy<2.0"
+
+# Install PyTorch with CUDA 11.8 (supports CC 6.1)
+RUN pip install --no-cache-dir \
+    torch==2.0.1 \
+    torchvision==0.15.2 \
+    --index-url https://download.pytorch.org/whl/cu118
+
+# Install training dependencies
+RUN pip install --no-cache-dir \
+    transformers==4.36.0 \
+    tokenizers==0.15.2 \
+    peft==0.7.1 \
+    trl==0.7.4 \
+    bitsandbytes==0.41.3 \
+    accelerate==0.25.0 \
+    datasets==2.15.0 \
+    chromadb==0.4.18 \
+    sentence-transformers==2.3.1 \
+    apscheduler==3.10.4 \
+    pydantic==2.5.0 \
+    pydantic-settings==2.1.0 \
+    PyYAML==6.0.1 \
+    scipy==1.11.4
+
+# Install llama-cpp-python with CUDA support for CC 6.1
+RUN CMAKE_ARGS="-DLLAMA_CUBLAS=on -DCMAKE_CUDA_ARCHITECTURES=61" pip install --no-cache-dir llama-cpp-python==0.2.27
+
+WORKDIR /app
+
+# Copy application code - INCLUDE API for MemoryManager access
+COPY services/api /app/api
+COPY services/trainer /app/trainer
+COPY services/shared /app/shared
+
+# Create necessary directories
+RUN mkdir -p /data /models /checkpoints /config
+
+# Set environment to disable telemetry
+ENV ANONYMIZED_TELEMETRY=False
+
+CMD ["python3", "-m", "trainer.trainer_worker"]
