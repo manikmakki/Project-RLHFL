@@ -216,7 +216,7 @@ See [FOR_NERDS.md](FOR_NERDS.md) for architecture diagrams, data flow details, t
 
 ## License
 
-MIT
+[GNU Affero General Public License v3.0 (AGPL-3.0) ](LICENSE.md)
 
 ## Acknowledgments
 
