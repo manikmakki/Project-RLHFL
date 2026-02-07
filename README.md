@@ -1,4 +1,4 @@
-# Project RLHFL
+# Project RLHFL - Reinforcement Learning from Human Feedback Loop
 
 A fully local, self-improving language model that learns from your conversations automatically. It runs entirely on your hardware, keeps your data private, and exposes an API that works as a drop-in replacement for OpenAI -- so any app or tool that speaks the OpenAI protocol can talk to it without changes.
 
