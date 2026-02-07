@@ -1,0 +1,155 @@
+import logging
+import random
+from typing import List, Dict, Any
+from datetime import datetime
+from shared.models import Interaction, TrainingDatasetSample
+from shared.config import SystemConfig
+
+logger = logging.getLogger(__name__)
+
+
+class DatasetBuilder:
+    """Build training datasets from interactions with proper weighting."""
+    
+    def __init__(self, config: SystemConfig):
+        self.config = config
+    
+    def build_training_dataset(
+        self,
+        interactions: List[Interaction],
+        golden_examples: List[Interaction]
+    ) -> List[Dict[str, Any]]:
+        """
+        Build a training dataset from interactions and golden examples.
+        
+        Returns DPO-style dataset with chosen/rejected pairs.
+        """
+        logger.info(
+            f"Building dataset from {len(interactions)} interactions "
+            f"and {len(golden_examples)} golden examples"
+        )
+        
+        # Separate by sentiment
+        positive = [i for i in interactions if i.sentiment > self.config.sentiment.positive_threshold]
+        negative = [i for i in interactions if i.sentiment < self.config.sentiment.negative_threshold]
+        neutral = [
+            i for i in interactions
+            if abs(i.sentiment) <= max(
+                self.config.sentiment.positive_threshold,
+                abs(self.config.sentiment.negative_threshold)
+            )
+        ]
+        
+        logger.info(
+            f"Sentiment distribution - Positive: {len(positive)}, "
+            f"Negative: {len(negative)}, Neutral: {len(neutral)}"
+        )
+        
+        dataset = []
+        
+        # Add positive examples (chosen responses)
+        for interaction in positive:
+            dataset.append({
+                "prompt": interaction.user_message,
+                "chosen": interaction.assistant_response,
+                "rejected": None,  # Will be handled during training
+                "weight": interaction.weight,
+                "sentiment": interaction.sentiment,
+                "type": "positive"
+            })
+        
+        # Add negative examples (rejected responses)
+        # These are responses that received negative feedback
+        for interaction in negative:
+            dataset.append({
+                "prompt": interaction.user_message,
+                "chosen": None,  # Will need to generate or use alternative
+                "rejected": interaction.assistant_response,
+                "weight": interaction.weight * 2.0,  # Higher weight for corrections
+                "sentiment": interaction.sentiment,
+                "type": "negative"
+            })
+        
+        # Sample neutral examples to maintain base capabilities
+        # Include about half as many neutral as positive examples
+        neutral_sample_size = min(len(neutral), max(len(positive) // 2, 10))
+        neutral_sample = random.sample(neutral, min(len(neutral), neutral_sample_size))
+        
+        for interaction in neutral_sample:
+            dataset.append({
+                "prompt": interaction.user_message,
+                "chosen": interaction.assistant_response,
+                "rejected": None,
+                "weight": interaction.weight * 0.5,  # Lower weight
+                "sentiment": interaction.sentiment,
+                "type": "neutral"
+            })
+        
+        # Add golden examples (high importance)
+        for example in golden_examples:
+            dataset.append({
+                "prompt": example.user_message,
+                "chosen": example.assistant_response,
+                "rejected": None,
+                "weight": example.weight,
+                "sentiment": example.sentiment,
+                "type": "golden"
+            })
+        
+        logger.info(f"Built dataset with {len(dataset)} total samples")
+        
+        # Log dataset composition
+        type_counts = {}
+        for sample in dataset:
+            sample_type = sample['type']
+            type_counts[sample_type] = type_counts.get(sample_type, 0) + 1
+        
+        logger.info(f"Dataset composition: {type_counts}")
+        
+        return dataset
+    
+    def create_validation_split(
+        self,
+        dataset: List[Dict[str, Any]],
+        validation_split: float = 0.1
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Split dataset into training and validation sets."""
+        
+        # Shuffle dataset
+        shuffled = dataset.copy()
+        random.shuffle(shuffled)
+        
+        # Split
+        split_idx = int(len(shuffled) * (1 - validation_split))
+        train_data = shuffled[:split_idx]
+        val_data = shuffled[split_idx:]
+        
+        logger.info(
+            f"Split dataset: {len(train_data)} training, {len(val_data)} validation"
+        )
+        
+        return train_data, val_data
+    
+    def format_for_training(
+        self,
+        dataset: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Format dataset for training framework.
+        
+        For supervised fine-tuning, we'll use the chosen responses.
+        For DPO, we need chosen/rejected pairs.
+        """
+        formatted = []
+        
+        for sample in dataset:
+            # For now, use supervised fine-tuning format
+            # (Can be extended to full DPO with rejection sampling)
+            if sample['chosen'] is not None:
+                formatted.append({
+                    "prompt": sample['prompt'],
+                    "completion": sample['chosen'],
+                    "weight": sample['weight']
+                })
+        
+        return formatted

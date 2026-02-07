@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: llm-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./volumes/models:/models
+      - ./volumes/data:/data
+      - ./volumes/config:/config
+      - ./volumes/checkpoints:/checkpoints
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+      - BASE_MODEL_PATH=/models/mistral-7b-instruct-base
+      - CONFIG_PATH=/config/system_config.yaml
+      - DATA_PATH=/data
+      - CHECKPOINTS_PATH=/checkpoints
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - llm-network
+
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.trainer
+    container_name: llm-trainer
+    volumes:
+      - ./volumes/models:/models
+      - ./volumes/data:/data
+      - ./volumes/checkpoints:/checkpoints
+      - ./volumes/config:/config
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - BASE_MODEL_PATH=/models/mistral-7b-instruct-base
+      - CONFIG_PATH=/config/system_config.yaml
+      - DATA_PATH=/data
+      - CHECKPOINTS_PATH=/checkpoints
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - llm-network
+
+networks:
+  llm-network:
+    driver: bridge
+
+volumes:
+  models:
+  data:
+  checkpoints:
+  config:

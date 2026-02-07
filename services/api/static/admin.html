@@ -1,0 +1,1246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project RLHFL - Admin Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        
+        .status-text {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .card h2 {
+            font-size: 18px;
+            margin-bottom: 15px;
+            color: #667eea;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+        
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .stat-row:last-child {
+            border-bottom: none;
+        }
+        
+        .stat-label {
+            font-weight: 500;
+            color: #666;
+        }
+        
+        .stat-value {
+            font-weight: 700;
+            color: #333;
+        }
+        
+        .stat-value.positive {
+            color: #27ae60;
+        }
+
+        .stat-value.negative {
+            color: #e74c3c;
+        }
+
+        .stat-value.neutral {
+            color: #95a5a6;
+        }
+
+        .stat-value.warning {
+            color: #f39c12;
+        }
+        
+        .error {
+            background: #fee;
+            border-left: 4px solid #e74c3c;
+            padding: 15px;
+            border-radius: 4px;
+            color: #c0392b;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .refreshed {
+            font-size: 12px;
+            color: #999;
+            margin-top: 10px;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #667eea;
+        }
+
+        .tab {
+            padding: 12px 24px;
+            background: white;
+            border: none;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            color: #666;
+            transition: all 0.3s;
+        }
+
+        .tab.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .tab:hover:not(.active) {
+            background: #f0f0f0;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .memory-item {
+            background: #f9f9f9;
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-left: 4px solid #667eea;
+        }
+
+        .memory-item.golden {
+            border-left-color: #f39c12;
+            background: #fffbf0;
+        }
+
+        .memory-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .memory-id {
+            font-size: 11px;
+            color: #999;
+            font-family: monospace;
+        }
+
+        .memory-meta {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 8px;
+        }
+
+        .memory-text {
+            background: white;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 8px;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .memory-text.collapsed {
+            max-height: 60px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .memory-text.collapsed::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 30px;
+            background: linear-gradient(transparent, white);
+        }
+
+        .memory-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        button.primary {
+            background: #667eea;
+            color: white;
+        }
+
+        button.primary:hover {
+            background: #5568d3;
+        }
+
+        button.warning {
+            background: #f39c12;
+            color: white;
+        }
+
+        button.warning:hover {
+            background: #e67e22;
+        }
+
+        button.danger {
+            background: #e74c3c;
+            color: white;
+        }
+
+        button.danger:hover {
+            background: #c0392b;
+        }
+
+        button.success {
+            background: #27ae60;
+            color: white;
+        }
+
+        button.success:hover {
+            background: #229954;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .pagination {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .json-viewer {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            overflow-x: auto;
+            margin-bottom: 15px;
+        }
+
+        .json-key {
+            color: #9cdcfe;
+        }
+
+        .json-string {
+            color: #ce9178;
+        }
+
+        .json-number {
+            color: #b5cea8;
+        }
+
+        .json-boolean {
+            color: #569cd6;
+        }
+
+        .json-null {
+            color: #569cd6;
+        }
+
+        .json-toggle {
+            cursor: pointer;
+            user-select: none;
+            color: #808080;
+        }
+
+        .json-toggle:hover {
+            color: #ffffff;
+        }
+
+        .json-collapsed {
+            display: none;
+        }
+
+        .filters {
+            background: white;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .filter-group label {
+            font-size: 12px;
+            color: #666;
+            font-weight: 500;
+        }
+
+        select, input[type="number"] {
+            padding: 6px 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .badge.golden {
+            background: #f39c12;
+            color: white;
+        }
+
+        .badge.positive {
+            background: #27ae60;
+            color: white;
+        }
+
+        .badge.negative {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .badge.neutral {
+            background: #95a5a6;
+            color: white;
+        }
+
+        .charts-section {
+            margin-top: 30px;
+        }
+
+        .chart-container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        .chart-container h3 {
+            margin-bottom: 15px;
+            color: #667eea;
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: 300px;
+        }
+
+        .no-data-message {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 Project RLHFL - Admin Dashboard</h1>
+            <p class="status-text">Real-time monitoring and statistics</p>
+        </header>
+
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('stats')">📊 Stats</button>
+            <button class="tab" onclick="switchTab('memories')">💾 Vector DB</button>
+            <button class="tab" onclick="switchTab('debug')">🐛 Debug</button>
+        </div>
+
+        <div id="stats-tab" class="tab-content active">
+            <div class="charts-section">
+                <h2 style="margin-bottom: 20px; color: #667eea;">📈 Training Progress Over Time</h2>
+                <div id="charts-content">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <p>Loading training history...</p>
+                    </div>
+                </div>
+            </div>
+
+            <div id="stats-content">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading stats...</p>
+                </div>
+            </div>
+        </div>
+
+        <div id="memories-tab" class="tab-content">
+            <div class="card" style="margin-bottom: 20px;">
+                <h2>🗂️ Database Management</h2>
+                <p style="margin-bottom: 15px; color: #666;">Manually trigger cleanup operations to manage database size and quality.</p>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="warning" onclick="cleanupByAge()">🕒 Cleanup Old Entries (default: 90 days)</button>
+                    <button class="warning" onclick="cleanupByWeight()">⚖️ Cleanup Low Weight (default: 0.5)</button>
+                    <button class="danger" onclick="cleanupLowest()">🗑️ Cleanup Lowest Weight (default: 10%)</button>
+                </div>
+            </div>
+
+            <div class="filters">
+                <div class="filter-group">
+                    <label>Filter by Sentiment</label>
+                    <select id="sentiment-filter" onchange="loadMemories()">
+                        <option value="">All</option>
+                        <option value="positive">Positive</option>
+                        <option value="negative">Negative</option>
+                        <option value="neutral">Neutral</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>Filter by Golden</label>
+                    <select id="golden-filter" onchange="loadMemories()">
+                        <option value="">All</option>
+                        <option value="true">Golden Only</option>
+                        <option value="false">Non-Golden</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>Filter by Time</label>
+                    <select id="time-filter" onchange="loadMemories()">
+                        <option value="">All Time</option>
+                        <option value="24">Last 24 Hours</option>
+                        <option value="168">Last 7 Days</option>
+                        <option value="720">Last 30 Days</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>Items per page</label>
+                    <input type="number" id="page-limit" value="20" min="10" max="100" step="10" onchange="loadMemories()">
+                </div>
+                <button class="primary" onclick="loadMemories()">🔄 Refresh</button>
+            </div>
+            <div id="memories-content">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading memories...</p>
+                </div>
+            </div>
+            <div id="memories-pagination" class="pagination"></div>
+        </div>
+
+        <div id="debug-tab" class="tab-content">
+            <div class="card">
+                <h2>🔌 Recent API Requests</h2>
+                <button class="primary" onclick="loadApiRequests()" style="margin-bottom: 10px;">🔄 Refresh</button>
+                <div id="api-requests-content">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <p>Loading API requests...</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card" style="margin-top: 20px;">
+                <h2>💬 Recent Interactions</h2>
+                <div class="filters">
+                    <div class="filter-group">
+                        <label>Number of interactions</label>
+                        <input type="number" id="debug-limit" value="10" min="1" max="50" step="1">
+                    </div>
+                    <button class="primary" onclick="loadDebugData()">🔄 Refresh</button>
+                </div>
+                <div id="debug-content">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <p>Loading debug data...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let currentPage = 0;
+        let currentFilter = '';
+        let trainingCharts = {};  // Store chart instances
+
+        // Helper function to format UTC timestamp to local timezone
+        function formatLocalTime(utcTimestamp) {
+            if (!utcTimestamp) return 'Never';
+            try {
+                // Ensure UTC parsing by appending 'Z' if not present
+                let timestamp = utcTimestamp;
+                if (typeof timestamp === 'string' && !timestamp.endsWith('Z') && !timestamp.includes('+')) {
+                    timestamp = timestamp + 'Z';
+                }
+                const date = new Date(timestamp);
+                return date.toLocaleString();
+            } catch (e) {
+                return utcTimestamp;
+            }
+        }
+
+        // Helper function to format date for chart axis
+        function formatChartDate(utcTimestamp) {
+            if (!utcTimestamp) return '';
+            try {
+                const date = new Date(utcTimestamp);
+                return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            } catch (e) {
+                return utcTimestamp;
+            }
+        }
+
+        function switchTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+
+            // Show selected tab
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+            event.target.classList.add('active');
+
+            // Load data for the tab
+            if (tabName === 'stats') {
+                loadStats();
+                loadTrainingCharts();
+            } else if (tabName === 'memories') {
+                loadMemories();
+            } else if (tabName === 'debug') {
+                loadApiRequests();
+                loadDebugData();
+            }
+        }
+
+        async function loadStats() {
+            try {
+                const response = await fetch('/admin/api/stats');
+                const data = await response.json();
+
+                if (data.error) {
+                    document.getElementById('stats-content').innerHTML = `<div class="error">API Error: ${data.error}</div>`;
+                    return;
+                }
+
+                renderDashboard(data);
+            } catch (error) {
+                document.getElementById('stats-content').innerHTML = `<div class="error">Failed to load stats: ${error.message}</div>`;
+            }
+        }
+
+        async function renderDashboard(stats) {
+            // Load database info
+            let dbHtml = '';
+            try {
+                const dbResponse = await fetch('/admin/api/database/info');
+                const dbData = await dbResponse.json();
+
+                const usageClass = dbData.usage_percentage >= 90 ? 'negative' : (dbData.usage_percentage >= 75 ? 'warning' : 'positive');
+                dbHtml = `
+                    <div class="card">
+                        <h2>💾 Database Size</h2>
+                        <div class="stat-row">
+                            <span class="stat-label">Current Size</span>
+                            <span class="stat-value">${dbData.size_gb} GB</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Max Size</span>
+                            <span class="stat-value">${dbData.max_size_gb} GB</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Usage</span>
+                            <span class="stat-value ${usageClass}">${dbData.usage_percentage}%</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Auto-Cleanup Threshold</span>
+                            <span class="stat-value">${dbData.threshold_size_gb} GB (${dbData.auto_cleanup_percentage}%)</span>
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                dbHtml = `
+                    <div class="card">
+                        <h2>💾 Database Size</h2>
+                        <div class="error">Failed to load database info</div>
+                    </div>
+                `;
+            }
+
+            const html = `
+                <div class="grid">
+                    <div class="card">
+                        <h2>🧠 Training Stats</h2>
+                        <div class="stat-row">
+                            <span class="stat-label">Total Interactions</span>
+                            <span class="stat-value">${stats.training.total_interactions || 0}</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">New Since Training</span>
+                            <span class="stat-value">${stats.training.new_since_training || 0}</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Hours Since Interaction</span>
+                            <span class="stat-value">${stats.training.hours_since_interaction || 0}</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Days Since Training</span>
+                            <span class="stat-value">${stats.training.days_since_training || 0}</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Last Training</span>
+                            <span class="stat-value">${formatLocalTime(stats.training.last_training)}</span>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h2>💾 Memory Stats</h2>
+                        <div class="stat-row">
+                            <span class="stat-label">Total Interactions</span>
+                            <span class="stat-value">${stats.memory.total_interactions || 0}</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Golden Examples</span>
+                            <span class="stat-value">${stats.memory.golden_examples || 0}</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Positive Sentiment</span>
+                            <span class="stat-value positive">${stats.memory.sentiment_distribution.positive || 0}</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Negative Sentiment</span>
+                            <span class="stat-value negative">${stats.memory.sentiment_distribution.negative || 0}</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Neutral Sentiment</span>
+                            <span class="stat-value neutral">${stats.memory.sentiment_distribution.neutral || 0}</span>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h2>⚙️ System Stats</h2>
+                        <div class="stat-row">
+                            <span class="stat-label">Model Status</span>
+                            <span class="stat-value ${stats.system.model_loaded ? 'positive' : 'negative'}">
+                                ${stats.system.model_loaded ? '✓ Loaded' : '✗ Not Loaded'}
+                            </span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Current Checkpoint</span>
+                            <span class="stat-value">${stats.system.current_checkpoint || 'None'}</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Memory Usage</span>
+                            <span class="stat-value">${stats.system.memory_usage_mb} MB</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">CPU Usage</span>
+                            <span class="stat-value">${stats.system.cpu_percent}%</span>
+                        </div>
+                    </div>
+
+                    ${dbHtml}
+                </div>
+
+                <div class="refreshed">
+                    Last refreshed: ${new Date().toLocaleTimeString()}
+                </div>
+            `;
+
+            document.getElementById('stats-content').innerHTML = html;
+        }
+
+        async function loadTrainingCharts() {
+            try {
+                const response = await fetch('/admin/api/training/history');
+                const data = await response.json();
+
+                if (!data.success || data.history.length === 0) {
+                    document.getElementById('charts-content').innerHTML = '<div class="no-data-message">No training history available yet. Train your model to see progress charts here.</div>';
+                    return;
+                }
+
+                renderTrainingCharts(data.history);
+            } catch (error) {
+                document.getElementById('charts-content').innerHTML = `<div class="error">Failed to load training history: ${error.message}</div>`;
+            }
+        }
+
+        function renderTrainingCharts(history) {
+            // Extract data
+            const timestamps = history.map(h => formatChartDate(h.timestamp));
+            const trainLoss = history.map(h => h.train_loss);
+            const evalLoss = history.map(h => h.eval_loss);
+            const trainSamples = history.map(h => h.train_samples);
+
+            // Destroy existing charts
+            Object.values(trainingCharts).forEach(chart => chart.destroy());
+            trainingCharts = {};
+
+            const html = `
+                <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));">
+                    <div class="chart-container">
+                        <h3>📉 Training Loss</h3>
+                        <div class="chart-wrapper">
+                            <canvas id="trainLossChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="chart-container">
+                        <h3>📊 Evaluation Loss</h3>
+                        <div class="chart-wrapper">
+                            <canvas id="evalLossChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="chart-container">
+                        <h3>📈 Training Samples</h3>
+                        <div class="chart-wrapper">
+                            <canvas id="samplesChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            document.getElementById('charts-content').innerHTML = html;
+
+            // Create charts
+            const chartConfig = {
+                type: 'line',
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: false
+                        }
+                    }
+                }
+            };
+
+            // Training Loss Chart
+            const trainLossCtx = document.getElementById('trainLossChart').getContext('2d');
+            trainingCharts.trainLoss = new Chart(trainLossCtx, {
+                ...chartConfig,
+                data: {
+                    labels: timestamps,
+                    datasets: [{
+                        label: 'Training Loss',
+                        data: trainLoss,
+                        borderColor: '#667eea',
+                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                        tension: 0.4,
+                        fill: true
+                    }]
+                }
+            });
+
+            // Evaluation Loss Chart
+            const evalLossCtx = document.getElementById('evalLossChart').getContext('2d');
+            trainingCharts.evalLoss = new Chart(evalLossCtx, {
+                ...chartConfig,
+                data: {
+                    labels: timestamps,
+                    datasets: [{
+                        label: 'Evaluation Loss',
+                        data: evalLoss,
+                        borderColor: '#f39c12',
+                        backgroundColor: 'rgba(243, 156, 18, 0.1)',
+                        tension: 0.4,
+                        fill: true
+                    }]
+                }
+            });
+
+            // Training Samples Chart
+            const samplesCtx = document.getElementById('samplesChart').getContext('2d');
+            trainingCharts.samples = new Chart(samplesCtx, {
+                ...chartConfig,
+                data: {
+                    labels: timestamps,
+                    datasets: [{
+                        label: 'Training Samples',
+                        data: trainSamples,
+                        borderColor: '#27ae60',
+                        backgroundColor: 'rgba(39, 174, 96, 0.1)',
+                        tension: 0.4,
+                        fill: true
+                    }]
+                },
+                options: {
+                    ...chartConfig.options,
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+
+        async function loadMemories() {
+            const limit = parseInt(document.getElementById('page-limit').value);
+            const filter = document.getElementById('sentiment-filter').value;
+            const goldenFilter = document.getElementById('golden-filter').value;
+            const timeFilter = document.getElementById('time-filter').value;
+            const skip = currentPage * limit;
+
+            try {
+                let url = `/admin/api/memories?skip=${skip}&limit=${limit}`;
+                if (filter) {
+                    url += `&sentiment_filter=${filter}`;
+                }
+                if (goldenFilter) {
+                    url += `&is_golden=${goldenFilter}`;
+                }
+                if (timeFilter) {
+                    url += `&hours=${timeFilter}`;
+                }
+
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (data.error) {
+                    document.getElementById('memories-content').innerHTML = `<div class="error">API Error: ${data.error}</div>`;
+                    return;
+                }
+
+                renderMemories(data);
+            } catch (error) {
+                document.getElementById('memories-content').innerHTML = `<div class="error">Failed to load memories: ${error.message}</div>`;
+            }
+        }
+
+        function renderMemories(data) {
+            if (data.items.length === 0) {
+                document.getElementById('memories-content').innerHTML = '<p style="text-align: center; color: #999;">No memories found.</p>';
+                document.getElementById('memories-pagination').innerHTML = '';
+                return;
+            }
+
+            let html = data.items.map(item => {
+                const sentimentClass = item.sentiment > 0.3 ? 'positive' : (item.sentiment < -0.3 ? 'negative' : 'neutral');
+                return `
+                    <div class="memory-item ${item.is_golden ? 'golden' : ''}" id="memory-${item.id}">
+                        <div class="memory-header">
+                            <div>
+                                <span class="memory-id">${item.id}</span>
+                                ${item.is_golden ? '<span class="badge golden">⭐ Golden</span>' : ''}
+                                <span class="badge ${sentimentClass}">Sentiment: ${item.sentiment}</span>
+                            </div>
+                            <div>
+                                <span style="font-size: 12px; color: #999;">${formatLocalTime(item.timestamp)}</span>
+                            </div>
+                        </div>
+                        <div class="memory-meta">
+                            <strong>Conversation:</strong> ${item.conversation_id} | <strong>Weight:</strong> ${item.weight}
+                        </div>
+                        <div class="memory-text collapsed" id="user-${item.id}">
+                            <strong>User:</strong> ${escapeHtml(item.user_message)}
+                        </div>
+                        <div class="memory-text collapsed" id="assistant-${item.id}">
+                            <strong>Assistant:</strong> ${escapeHtml(item.assistant_response)}
+                        </div>
+                        <div class="memory-actions">
+                            <button class="primary" onclick="toggleExpand('${item.id}')">📖 Expand/Collapse</button>
+                            <button class="warning" onclick="toggleGolden('${item.id}', ${item.is_golden})">
+                                ${item.is_golden ? '⭐ Unmark Golden' : '☆ Mark Golden'}
+                            </button>
+                            <button class="danger" onclick="deleteMemory('${item.id}')">🗑️ Delete</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            document.getElementById('memories-content').innerHTML = html;
+
+            // Render pagination
+            const totalPages = Math.ceil(data.total / parseInt(document.getElementById('page-limit').value));
+            let paginationHtml = '';
+
+            if (currentPage > 0) {
+                paginationHtml += '<button class="primary" onclick="changePage(-1)">← Previous</button>';
+            }
+
+            paginationHtml += `<span style="padding: 8px;">Page ${currentPage + 1} of ${totalPages} (${data.total} total)</span>`;
+
+            if ((currentPage + 1) * parseInt(document.getElementById('page-limit').value) < data.total) {
+                paginationHtml += '<button class="primary" onclick="changePage(1)">Next →</button>';
+            }
+
+            document.getElementById('memories-pagination').innerHTML = paginationHtml;
+        }
+
+        function toggleExpand(id) {
+            document.getElementById(`user-${id}`).classList.toggle('collapsed');
+            document.getElementById(`assistant-${id}`).classList.toggle('collapsed');
+        }
+
+        async function toggleGolden(id, currentGolden) {
+            if (!confirm(`Are you sure you want to ${currentGolden ? 'unmark' : 'mark'} this as a golden example?`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/admin/api/memories/${id}/toggle-golden`, {
+                    method: 'POST'
+                });
+
+                if (response.ok) {
+                    loadMemories(); // Reload the list
+                } else {
+                    alert('Failed to toggle golden status');
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        async function deleteMemory(id) {
+            if (!confirm('Are you sure you want to delete this memory? This action cannot be undone.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/admin/api/memories/${id}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    loadMemories(); // Reload the list
+                } else {
+                    alert('Failed to delete memory');
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        function changePage(delta) {
+            currentPage += delta;
+            if (currentPage < 0) currentPage = 0;
+            loadMemories();
+        }
+
+        async function loadApiRequests() {
+            try {
+                const response = await fetch('/admin/api/recent-requests');
+                const data = await response.json();
+
+                if (data.error) {
+                    document.getElementById('api-requests-content').innerHTML = `<div class="error">API Error: ${data.error}</div>`;
+                    return;
+                }
+
+                renderApiRequests(data);
+            } catch (error) {
+                document.getElementById('api-requests-content').innerHTML = `<div class="error">Failed to load API requests: ${error.message}</div>`;
+            }
+        }
+
+        function renderApiRequests(data) {
+            if (data.items.length === 0) {
+                document.getElementById('api-requests-content').innerHTML = '<p style="text-align: center; color: #999;">No API requests logged yet.</p>';
+                return;
+            }
+
+            let html = '<p style="margin-bottom: 15px;"><strong>Showing ' + data.total + ' most recent API requests</strong></p>';
+
+            data.items.forEach((item, index) => {
+                const jsonStr = JSON.stringify(item, null, 2);
+                html += `
+                    <div style="background: #f9f9f9; border-radius: 6px; padding: 12px; margin-bottom: 12px; border-left: 4px solid #667eea;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <div>
+                                <strong style="font-size: 13px;">#${index + 1} ${item.endpoint}</strong>
+                                <span style="font-size: 11px; color: #999; margin-left: 10px;">${formatLocalTime(item.timestamp)}</span>
+                            </div>
+                            <button class="primary" onclick="toggleApiJson(${index})">Toggle JSON</button>
+                        </div>
+                        <div id="api-json-${index}" class="json-viewer" style="display: none;">
+                            <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">${syntaxHighlight(jsonStr)}</pre>
+                        </div>
+                    </div>
+                `;
+            });
+
+            document.getElementById('api-requests-content').innerHTML = html;
+        }
+
+        function toggleApiJson(index) {
+            const el = document.getElementById(`api-json-${index}`);
+            el.style.display = el.style.display === 'none' ? 'block' : 'none';
+        }
+
+        async function loadDebugData() {
+            const limit = parseInt(document.getElementById('debug-limit').value);
+
+            try {
+                const response = await fetch(`/admin/api/recent-interactions?limit=${limit}`);
+                const data = await response.json();
+
+                if (data.error) {
+                    document.getElementById('debug-content').innerHTML = `<div class="error">API Error: ${data.error}</div>`;
+                    return;
+                }
+
+                renderDebugData(data);
+            } catch (error) {
+                document.getElementById('debug-content').innerHTML = `<div class="error">Failed to load debug data: ${error.message}</div>`;
+            }
+        }
+
+        function renderDebugData(data) {
+            if (data.items.length === 0) {
+                document.getElementById('debug-content').innerHTML = '<p style="text-align: center; color: #999;">No interactions found.</p>';
+                return;
+            }
+
+            let html = '<p style="margin-bottom: 15px;"><strong>Showing ' + data.returned + ' of ' + data.total + ' interactions</strong></p>';
+
+            data.items.forEach((item, index) => {
+                const jsonStr = JSON.stringify(item, null, 2);
+                html += `
+                    <div class="card">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                            <h3 style="margin: 0; font-size: 14px;">#${index + 1} - ${formatLocalTime(item.timestamp)}</h3>
+                            <button class="primary" onclick="toggleJson(${index})">Toggle JSON</button>
+                        </div>
+                        <div id="json-${index}" class="json-viewer" style="display: block;">
+                            <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">${syntaxHighlight(jsonStr)}</pre>
+                        </div>
+                    </div>
+                `;
+            });
+
+            document.getElementById('debug-content').innerHTML = html;
+        }
+
+        function toggleJson(index) {
+            const el = document.getElementById(`json-${index}`);
+            el.style.display = el.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function syntaxHighlight(json) {
+            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+                let cls = 'json-number';
+                if (/^"/.test(match)) {
+                    if (/:$/.test(match)) {
+                        cls = 'json-key';
+                    } else {
+                        cls = 'json-string';
+                    }
+                } else if (/true|false/.test(match)) {
+                    cls = 'json-boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'json-null';
+                }
+                return '<span class="' + cls + '">' + match + '</span>';
+            });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Database cleanup functions
+        async function cleanupByAge() {
+            const days = prompt('Enter age threshold in days (entries older than this will be deleted):', '90');
+            if (days === null) return;
+
+            const daysNum = parseInt(days);
+            if (isNaN(daysNum) || daysNum < 1 || daysNum > 3650) {
+                alert('Invalid number of days. Please enter a number between 1 and 3650 (10 years).');
+                return;
+            }
+
+            if (!confirm(`Remove all entries older than ${daysNum} days?\n\nGolden examples will be preserved.\nThis action cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/admin/api/database/cleanup/age?days=${daysNum}`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    alert(`✓ Cleanup complete!\n\nDeleted: ${data.deleted_count} entries\nNew size: ${data.new_size_gb} GB\nRemaining entries: ${data.remaining_interactions}`);
+                    loadStats();
+                    loadMemories();
+                } else {
+                    alert('Cleanup failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function cleanupByWeight() {
+            const threshold = prompt('Enter weight threshold (entries below this will be deleted):', '0.5');
+            if (threshold === null) return;
+
+            const thresholdNum = parseFloat(threshold);
+            if (isNaN(thresholdNum) || thresholdNum < 0 || thresholdNum > 5) {
+                alert('Invalid threshold. Please enter a number between 0 and 5.');
+                return;
+            }
+
+            if (!confirm(`Remove all entries with weight < ${thresholdNum}?\n\nGolden examples will be preserved.\nThis action cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/admin/api/database/cleanup/weight?threshold=${thresholdNum}`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    alert(`✓ Cleanup complete!\n\nDeleted: ${data.deleted_count} entries\nNew size: ${data.new_size_gb} GB\nRemaining entries: ${data.remaining_interactions}`);
+                    loadStats();
+                    loadMemories();
+                } else {
+                    alert('Cleanup failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function cleanupLowest() {
+            const percentage = prompt('Enter percentage to remove (e.g., 10 for bottom 10%):', '10');
+            if (percentage === null) return;
+
+            const percentNum = parseFloat(percentage);
+            if (isNaN(percentNum) || percentNum <= 0 || percentNum > 50) {
+                alert('Invalid percentage. Please enter a number between 1 and 50.');
+                return;
+            }
+
+            const percentDecimal = percentNum / 100;
+
+            if (!confirm(`Remove the bottom ${percentNum}% of entries by weight?\n\nThis will delete the ${percentNum}% lowest-weight entries.\nGolden examples will be preserved.\n\nThis action cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/admin/api/database/cleanup/lowest?percentage=${percentDecimal}`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    alert(`✓ Cleanup complete!\n\nDeleted: ${data.deleted_count} entries\nNew size: ${data.new_size_gb} GB\nRemaining entries: ${data.remaining_interactions}`);
+                    loadStats();
+                    loadMemories();
+                } else {
+                    alert('Cleanup failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        // Load stats on page load
+        loadStats();
+        loadTrainingCharts();
+
+        // Refresh stats every 10 seconds
+        setInterval(() => {
+            if (document.getElementById('stats-tab').classList.contains('active')) {
+                loadStats();
+                loadTrainingCharts();
+            }
+        }, 10000);
+    </script>
+</body>
+</html>
