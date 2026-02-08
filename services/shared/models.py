@@ -309,7 +309,7 @@ class CheckpointMetadata(BaseModel):
 class ModelReloadRequest(BaseModel):
     """Request to reload the model with a new GGUF file."""
     gguf_model_path: str
-    checkpoint_id: str
+    checkpoint_id: Optional[str] = None
     metrics: Optional[Dict[str, float]] = None
 
 

@@ -86,8 +86,7 @@ MISTRAL_V3_CHAT_TEMPLATE = (
     "{{- raise_exception(\"Tool call IDs should be alphanumeric strings with length 9!\") }}"
     "{%- endif %}"
     "{{- '\"call_id\": \"' + message.tool_call_id + '\"}[/TOOL_RESULTS]' }}"
-    "{%- else %}"
-    "{{- raise_exception(\"Only user and assistant roles are supported, with the exception of an initial optional system message!\") }}"
+    "{%- elif message[\"role\"] == \"system\" %}"
     "{%- endif %}"
     "{%- endfor %}"
 )
@@ -172,7 +171,7 @@ class LLMEngine:
             )
             return False
 
-        if new_model_path == self.model_path:
+        if new_model_path == self.model_path and self.llm is not None:
             logger.info("Reload skipped: same model path already loaded")
             return True
 
@@ -531,6 +530,32 @@ class LLMEngine:
         except Exception as e:
             logger.error(f"Streaming generation failed: {e}")
             raise
+
+    def unload_model(self) -> bool:
+        """
+        Unload the current model to free GPU vRAM.
+
+        Used before training starts so the trainer gets full GPU access.
+        The model can be reloaded afterwards via reload_model().
+
+        Returns:
+            True if model was unloaded, False if already unloaded or error.
+        """
+        with self._model_lock:
+            if self.llm is None:
+                logger.info("Unload requested but no model is loaded")
+                return True
+
+            logger.info("Unloading model to free GPU vRAM for training...")
+            try:
+                del self.llm
+                self.llm = None
+                gc.collect()
+                logger.info("Model unloaded, GPU vRAM freed")
+                return True
+            except Exception as e:
+                logger.error(f"Error unloading model: {e}", exc_info=True)
+                return False
 
     def is_loaded(self) -> bool:
         """Check if model is loaded and not mid-reload."""

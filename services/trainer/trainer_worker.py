@@ -100,15 +100,62 @@ class TrainerWorker:
         except Exception as e:
             logger.error(f"Error in training check: {e}", exc_info=True)
     
+    def _request_api_reload_previous(self):
+        """Tell the API to reload its previous model (after training didn't produce a new deployment)."""
+        try:
+            checkpoint_file = Path("/data/current_checkpoint.json")
+            if checkpoint_file.exists():
+                import json
+                data = json.loads(checkpoint_file.read_text())
+                gguf_path = data.get("gguf_model_path")
+                cp_id = data.get("checkpoint_id")
+                if gguf_path and Path(gguf_path).exists():
+                    logger.info(f"Reloading previous model: {gguf_path}")
+                    self._notify_api_reload(gguf_path, cp_id, {})
+                    return
+            # Fallback: reload base GGUF model from config
+            base_model = settings.model_path
+            if Path(base_model).exists():
+                logger.info(f"Reloading base model: {base_model}")
+                self._notify_api_reload(base_model, None, {})
+            else:
+                logger.warning(f"No model found to reload after training (tried {base_model})")
+        except Exception as e:
+            logger.warning(f"Failed to reload previous model (poller will recover): {e}")
+
+    def _request_api_unload(self):
+        """Ask the API to unload its model so the trainer gets full GPU vRAM."""
+        try:
+            response = requests.post(
+                "http://api:8000/v1/model/unload",
+                timeout=30,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success"):
+                    logger.info("API model unloaded, full GPU vRAM available for training")
+                    return True
+                else:
+                    logger.warning(f"API unload returned failure: {data.get('message')}")
+            else:
+                logger.warning(f"API unload returned {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Could not reach API for model unload: {e}")
+        return False
+
     def _execute_training(self):
         """Execute the complete training pipeline."""
         logger.info("=" * 80)
         logger.info("STARTING TRAINING PIPELINE")
         logger.info("=" * 80)
-        
+
         start_time = time.time()
-        
+
         try:
+            # Step 0: Free GPU vRAM by unloading the API's llama-cpp model
+            logger.info("Step 0: Requesting API model unload to free GPU vRAM...")
+            self._request_api_unload()
+
             # Step 1: Prepare dataset
             logger.info("Step 1: Preparing training dataset...")
             
@@ -179,9 +226,11 @@ class TrainerWorker:
                         exc_info=True,
                     )
                     logger.info("Keeping current model; adapter saved for retry")
+                    self._request_api_reload_previous()
             else:
                 logger.warning("Checkpoint failed validation, not deployed")
                 logger.info(f"Metrics: {metadata.metrics}")
+                self._request_api_reload_previous()
             
             # Step 6: Mark training complete
             self.memory_manager.mark_training_complete()
@@ -200,6 +249,8 @@ class TrainerWorker:
             logger.info("=" * 80)
             logger.info("TRAINING PIPELINE FAILED")
             logger.info("=" * 80)
+            # Ensure the API model is reloaded even if training crashed
+            self._request_api_reload_previous()
     
     def _convert_and_deploy(self, adapter_path, checkpoint_id, checkpoint_dir, metadata):
         """

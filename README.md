@@ -216,6 +216,13 @@ Checkpoints track perplexity, sentiment alignment, training sample count, and li
 
 See [FOR_NERDS.md](FOR_NERDS.md) for architecture diagrams, data flow details, training pipeline internals, and the full API reference.
 
+## Transparency statement from the author
+I feel the need to add this statement: 
+* Nobody asked for this, it is not sponsored, I am not being paid to develop this project.
+* This is purely a "for fun" project that I didn't see any existing solution for that works for _my_ needs. I liked it enough to publish.
+* The project was designed and intended to work within _my_ home lab environment, with _my_ hardware on hand. 
+* If you want to modify anything to better fit your needs, please fork and submit a PR noting the Cuda Compute Capability level and reference hardware. This will help other folks to find something that works for them or serves as a starting point.
+
 ## License
 
 [GNU Affero General Public License v3.0 (AGPL-3.0) ](LICENSE.md)
@@ -223,3 +230,4 @@ See [FOR_NERDS.md](FOR_NERDS.md) for architecture diagrams, data flow details, t
 ## Acknowledgments
 
 Built on [llama.cpp](https://github.com/ggerganov/llama.cpp), [PyTorch](https://pytorch.org/), [PEFT](https://github.com/huggingface/peft), [ChromaDB](https://www.trychroma.com/), and [Mistral AI](https://mistral.ai/)'s Mistral 7B Instruct model. GGUF quantizations by [TheBloke](https://huggingface.co/TheBloke).
+
