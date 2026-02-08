@@ -58,24 +58,22 @@ class DatasetBuilder:
                 "type": "positive"
             })
         
-        # Add negative examples (rejected responses)
-        # These are responses that received negative feedback
+        # Negative examples: stored as anti-patterns (rejected responses).
+        # For SFT these are filtered out in format_for_training (chosen=None).
+        # Retained in the dataset for future DPO support.
         for interaction in negative:
             dataset.append({
                 "prompt": interaction.user_message,
-                "chosen": None,  # Will need to generate or use alternative
+                "chosen": None,
                 "rejected": interaction.assistant_response,
-                "weight": interaction.weight * 2.0,  # Higher weight for corrections
+                "weight": interaction.weight * 2.0,
                 "sentiment": interaction.sentiment,
                 "type": "negative"
             })
         
-        # Sample neutral examples to maintain base capabilities
-        # Include about half as many neutral as positive examples
-        neutral_sample_size = min(len(neutral), max(len(positive) // 2, 10))
-        neutral_sample = random.sample(neutral, min(len(neutral), neutral_sample_size))
-        
-        for interaction in neutral_sample:
+        # Include neutral examples to maintain breadth and allow emergent traits.
+        # Interactions are already curated (top-N by weight), so include all neutral.
+        for interaction in neutral:
             dataset.append({
                 "prompt": interaction.user_message,
                 "chosen": interaction.assistant_response,
@@ -97,14 +95,15 @@ class DatasetBuilder:
             })
         
         logger.info(f"Built dataset with {len(dataset)} total samples")
-        
+
         # Log dataset composition
         type_counts = {}
         for sample in dataset:
             sample_type = sample['type']
             type_counts[sample_type] = type_counts.get(sample_type, 0) + 1
-        
-        logger.info(f"Dataset composition: {type_counts}")
+
+        sft_usable = sum(1 for s in dataset if s['chosen'] is not None)
+        logger.info(f"Dataset composition: {type_counts} (SFT-usable: {sft_usable}, negative reserved for DPO: {type_counts.get('negative', 0)})")
         
         return dataset
     

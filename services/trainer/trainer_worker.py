@@ -158,15 +158,15 @@ class TrainerWorker:
 
             # Step 1: Prepare dataset
             logger.info("Step 1: Preparing training dataset...")
-            
-            last_training = self.memory_manager._load_training_state()
-            interactions = self.memory_manager.get_interactions_since(last_training)
+
+            top_n = self.config.memory.top_n_weighted_interactions
+            interactions = self.memory_manager.get_top_interactions_by_weight(top_n)
             golden_examples = self.memory_manager.get_golden_examples()
-            
+
             if not interactions and not golden_examples:
                 logger.warning("No training data available, skipping training")
                 return
-            
+
             dataset = self.dataset_builder.build_training_dataset(
                 interactions,
                 golden_examples
