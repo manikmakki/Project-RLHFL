@@ -24,14 +24,16 @@ admin_router = APIRouter(prefix="/admin", tags=["admin"])
 memory_manager = None
 llm_engine = None
 api_request_log = None
+prompt_interceptor = None
 
 
-def set_dependencies(mm, engine, request_log=None):
+def set_dependencies(mm, engine, request_log=None, interceptor=None):
     """Set global dependencies from main.py."""
-    global memory_manager, llm_engine, api_request_log
+    global memory_manager, llm_engine, api_request_log, prompt_interceptor
     memory_manager = mm
     llm_engine = engine
     api_request_log = request_log
+    prompt_interceptor = interceptor
 
 
 @admin_router.get("/", response_class=HTMLResponse)
@@ -855,3 +857,80 @@ async def reload_base_model():
     except Exception as e:
         logger.error(f"Error reloading base model: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------------------------------------------ #
+#  Prompt Interceptor Rules
+# ------------------------------------------------------------------ #
+
+@admin_router.get("/api/prompt-rules")
+async def list_prompt_rules():
+    """List all prompt interceptor rules."""
+    if not prompt_interceptor:
+        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
+    return {"rules": prompt_interceptor.get_rules()}
+
+
+@admin_router.post("/api/prompt-rules")
+async def add_prompt_rule(body: dict):
+    """Add a new prompt interceptor rule."""
+    if not prompt_interceptor:
+        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
+    try:
+        rule = prompt_interceptor.add_rule(
+            pattern=body.get("pattern", ""),
+            replacement=body.get("replacement", ""),
+            description=body.get("description", ""),
+            target_roles=body.get("target_roles", ["system"]),
+            enabled=body.get("enabled", True),
+            priority=body.get("priority", 50),
+        )
+        return {"success": True, "rule": rule}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@admin_router.put("/api/prompt-rules/{rule_id}")
+async def update_prompt_rule(rule_id: str, body: dict):
+    """Update an existing prompt interceptor rule."""
+    if not prompt_interceptor:
+        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
+    try:
+        rule = prompt_interceptor.update_rule(rule_id, body)
+        if rule is None:
+            raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
+        return {"success": True, "rule": rule}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@admin_router.delete("/api/prompt-rules/{rule_id}")
+async def delete_prompt_rule(rule_id: str):
+    """Delete a prompt interceptor rule."""
+    if not prompt_interceptor:
+        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
+    if not prompt_interceptor.delete_rule(rule_id):
+        raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
+    return {"success": True}
+
+
+@admin_router.post("/api/prompt-rules/{rule_id}/toggle")
+async def toggle_prompt_rule(rule_id: str):
+    """Toggle a prompt interceptor rule's enabled state."""
+    if not prompt_interceptor:
+        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
+    rule = prompt_interceptor.toggle_rule(rule_id)
+    if rule is None:
+        raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
+    return {"success": True, "rule": rule}
+
+
+@admin_router.post("/api/prompt-rules/test")
+async def test_prompt_rules(body: dict):
+    """Test all enabled rules against sample text."""
+    if not prompt_interceptor:
+        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
+    text = body.get("text", "")
+    if not text:
+        raise HTTPException(status_code=400, detail="'text' field is required")
+    return prompt_interceptor.test(text)

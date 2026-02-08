@@ -424,6 +424,31 @@
             padding: 40px;
             color: #999;
         }
+
+        /* Prompt Rules tab */
+        .rules-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        .rules-table th, .rules-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
+        .rules-table th { font-weight: 600; color: #667eea; font-size: 13px; }
+        .rules-table td { font-size: 13px; }
+        .rules-table .pattern-cell { font-family: monospace; font-size: 12px; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .rules-table .actions-cell { white-space: nowrap; }
+        .rules-table .actions-cell button { margin-right: 4px; padding: 4px 10px; font-size: 12px; }
+        .rule-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+        .rule-form .full-width { grid-column: 1 / -1; }
+        .rule-form label { font-size: 13px; font-weight: 500; margin-bottom: 2px; display: block; }
+        .rule-form input, .rule-form textarea, .rule-form select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+        .rule-form textarea { font-family: monospace; min-height: 60px; resize: vertical; }
+        .rule-form .checkbox-group { display: flex; gap: 12px; align-items: center; }
+        .rule-form .checkbox-group label { font-weight: normal; display: inline; }
+        .toggle-switch { cursor: pointer; font-size: 18px; }
+        .toggle-switch.enabled { color: #22c55e; }
+        .toggle-switch.disabled { color: #ccc; }
+        .rule-tester { margin-top: 10px; }
+        .rule-tester textarea { width: 100%; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; resize: vertical; }
+        .rule-tester-output { background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; padding: 10px; margin-top: 10px; font-family: monospace; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+        .rule-tester-matches { margin-top: 8px; font-size: 12px; color: #666; }
+        .rule-tester-matches .matched { color: #22c55e; font-weight: 500; }
+        .rule-tester-matches .not-matched { color: #999; }
     </style>
 </head>
 <body>
@@ -437,6 +462,7 @@
             <button class="tab active" onclick="switchTab('stats')">📊 Stats</button>
             <button class="tab" onclick="switchTab('memories')">💾 Vector DB</button>
             <button class="tab" onclick="switchTab('debug')">🐛 Debug</button>
+            <button class="tab" onclick="switchTab('rules')">📝 Rules</button>
         </div>
 
         <div id="stats-tab" class="tab-content active">
@@ -554,8 +580,70 @@
                 </div>
             </div>
         </div>
+
+        <div id="rules-tab" class="tab-content">
+            <div class="card">
+                <h2>📝 Prompt Interceptor Rules</h2>
+                <p style="color:#666;font-size:13px;margin-bottom:12px;">Regex search-and-replace rules applied to incoming messages before RAG and LLM processing.</p>
+                <button class="primary" onclick="showRuleForm()">+ Add Rule</button>
+                <button onclick="loadPromptRules()" style="margin-left:6px;">🔄 Refresh</button>
+                <div id="rule-form-container" style="display:none;margin-top:15px;">
+                    <div class="card" style="background:#f9f9ff;border:1px solid #667eea;">
+                        <h2 id="rule-form-title">Add Rule</h2>
+                        <div class="rule-form">
+                            <input type="hidden" id="rule-edit-id">
+                            <div>
+                                <label>Description</label>
+                                <input type="text" id="rule-description" placeholder="e.g. Strip verbose Cursor preamble">
+                            </div>
+                            <div>
+                                <label>Priority (lower = runs first)</label>
+                                <input type="number" id="rule-priority" value="50" min="1" max="999">
+                            </div>
+                            <div class="full-width">
+                                <label>Regex Pattern</label>
+                                <textarea id="rule-pattern" placeholder="e.g. (?s)You are a helpful assistant.*?END OF PROMPT"></textarea>
+                            </div>
+                            <div class="full-width">
+                                <label>Replacement</label>
+                                <textarea id="rule-replacement" placeholder="Replacement text (leave empty to delete matched text)"></textarea>
+                            </div>
+                            <div>
+                                <label>Target Roles</label>
+                                <div style="display:flex;flex-direction:column;gap:6px;margin-top:4px;">
+                                    <label style="font-weight:normal;display:flex;align-items:left;gap:6px;"><input type="checkbox" id="role-system" value="system" checked> system</label>
+                                    <label style="font-weight:normal;display:flex;align-items:left;gap:6px;"><input type="checkbox" id="role-user" value="user"> user</label>
+                                    <label style="font-weight:normal;display:flex;align-items:left;gap:6px;"><input type="checkbox" id="role-assistant" value="assistant"> assistant</label>
+                                </div>
+                            </div>
+                            <div style="display:flex;align-items:end;gap:8px;">
+                                <button class="primary" onclick="saveRule()">Save</button>
+                                <button onclick="hideRuleForm()">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div id="rules-list-content" style="margin-top:15px;">
+                    <div class="loading"><div class="spinner"></div><p>Loading rules...</p></div>
+                </div>
+            </div>
+
+            <div class="card" style="margin-top:20px;">
+                <h2>🧪 Rule Tester</h2>
+                <div class="rule-tester">
+                    <label style="font-size:13px;font-weight:500;">Input Text</label>
+                    <textarea id="rule-test-input" rows="5" placeholder="Paste a system prompt or message here to test against all enabled rules..."></textarea>
+                    <button class="primary" onclick="testRules()" style="margin-top:8px;">Test Rules</button>
+                    <div id="rule-test-output" style="display:none;margin-top:12px;">
+                        <label style="font-size:13px;font-weight:500;">Output</label>
+                        <div id="rule-test-result" class="rule-tester-output"></div>
+                        <div id="rule-test-matches" class="rule-tester-matches"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
-    
+
     <script>
         let currentPage = 0;
         let currentFilter = '';
@@ -608,6 +696,8 @@
             } else if (tabName === 'debug') {
                 loadApiRequests();
                 loadDebugData();
+            } else if (tabName === 'rules') {
+                loadPromptRules();
             }
         }
 
@@ -1049,20 +1139,49 @@
                 return;
             }
 
-            let html = '<p style="margin-bottom: 15px;"><strong>Showing ' + data.total + ' most recent API requests</strong></p>';
+            let html = '<p style="margin-bottom: 15px;"><strong>Showing ' + data.total + ' most recent API requests (post-processed: after interception + RAG)</strong></p>';
 
             data.items.forEach((item, index) => {
                 const jsonStr = JSON.stringify(item, null, 2);
+                const messages = item.messages || [];
+                const msgCount = messages.length;
+                const meta = [
+                    item.model || 'N/A',
+                    item.stream ? 'stream' : 'sync',
+                    item.has_tools ? 'tools' : 'no-tools'
+                ].join(' | ');
+
+                // Build message previews
+                let msgHtml = '';
+                messages.forEach(msg => {
+                    const role = msg.role || '?';
+                    const roleColor = role === 'system' ? '#e74c3c' : role === 'user' ? '#3498db' : '#27ae60';
+                    let preview = '';
+                    if (typeof msg.content === 'string') {
+                        preview = msg.content.length > 150 ? msg.content.substring(0, 150) + '...' : msg.content;
+                    } else if (msg.content === null || msg.content === undefined) {
+                        preview = '(null)';
+                    } else {
+                        preview = JSON.stringify(msg.content).substring(0, 150);
+                    }
+                    msgHtml += `<div style="margin: 4px 0; font-size: 12px;"><span style="display: inline-block; width: 70px; font-weight: bold; color: ${roleColor};">[${role}]</span><span style="color: #555;">${escapeHtml(preview)}</span></div>`;
+                });
+
                 html += `
                     <div style="background: #f9f9f9; border-radius: 6px; padding: 12px; margin-bottom: 12px; border-left: 4px solid #667eea;">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                             <div>
-                                <strong style="font-size: 13px;">#${index + 1} ${item.endpoint}</strong>
+                                <strong style="font-size: 13px;">#${index + 1}</strong>
                                 <span style="font-size: 11px; color: #999; margin-left: 10px;">${formatLocalTime(item.timestamp)}</span>
+                                <span style="font-size: 11px; color: #666; margin-left: 10px;">${meta}</span>
+                                <span style="font-size: 11px; color: #888; margin-left: 10px;">${msgCount} msg(s)</span>
                             </div>
-                            <button class="primary" onclick="toggleApiJson(${index})">Toggle JSON</button>
+                            <button class="primary" onclick="toggleApiJson(${index})">Full JSON</button>
                         </div>
-                        <div id="api-json-${index}" class="json-viewer" style="display: none;">
+                        <div style="background: #fff; border-radius: 4px; padding: 8px; font-family: monospace;">
+                            ${msgHtml}
+                        </div>
+                        <div id="api-json-${index}" class="json-viewer" style="display: none; margin-top: 8px;">
                             <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">${syntaxHighlight(jsonStr)}</pre>
                         </div>
                     </div>
@@ -1463,6 +1582,165 @@
                 loadModelControls();
             }
         }, 10000);
+
+        // ----------------------------------------------------------------
+        // Prompt Interceptor Rules
+        // ----------------------------------------------------------------
+
+        async function loadPromptRules() {
+            const container = document.getElementById('rules-list-content');
+            try {
+                const resp = await fetch('/admin/api/prompt-rules');
+                const data = await resp.json();
+                const rules = data.rules || [];
+
+                if (rules.length === 0) {
+                    container.innerHTML = '<div class="no-data-message">No rules defined yet. Click "+ Add Rule" to create one.</div>';
+                    return;
+                }
+
+                let html = '<table class="rules-table"><thead><tr>';
+                html += '<th>Pri</th><th>Description</th><th>Pattern</th><th>Replacement</th><th>Targets</th><th>Enabled</th><th>Actions</th>';
+                html += '</tr></thead><tbody>';
+
+                for (const rule of rules) {
+                    const enabledClass = rule.enabled ? 'enabled' : 'disabled';
+                    const enabledIcon = rule.enabled ? '&#9679;' : '&#9675;';
+                    const patternDisplay = escapeHtml(rule.pattern.length > 50 ? rule.pattern.substring(0, 50) + '...' : rule.pattern);
+                    const replacementDisplay = escapeHtml((rule.replacement || '(empty)').length > 30 ? rule.replacement.substring(0, 30) + '...' : (rule.replacement || '(empty)'));
+                    const targets = (rule.target_roles || []).join(', ');
+
+                    html += '<tr>';
+                    html += `<td>${rule.priority}</td>`;
+                    html += `<td>${escapeHtml(rule.description || '(unnamed)')}</td>`;
+                    html += `<td class="pattern-cell" title="${escapeHtml(rule.pattern)}">${patternDisplay}</td>`;
+                    html += `<td class="pattern-cell">${replacementDisplay}</td>`;
+                    html += `<td>${targets}</td>`;
+                    html += `<td><span class="toggle-switch ${enabledClass}" onclick="toggleRule('${rule.id}')" title="Click to toggle">${enabledIcon}</span></td>`;
+                    html += `<td class="actions-cell">`;
+                    html += `<button onclick="editRule('${rule.id}')">Edit</button>`;
+                    html += `<button class="danger" onclick="deleteRule('${rule.id}')">Delete</button>`;
+                    html += `</td></tr>`;
+                }
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<div class="error">Failed to load rules: ${e.message}</div>`;
+            }
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function showRuleForm(rule = null) {
+            document.getElementById('rule-form-container').style.display = 'block';
+            document.getElementById('rule-form-title').textContent = rule ? 'Edit Rule' : 'Add Rule';
+            document.getElementById('rule-edit-id').value = rule ? rule.id : '';
+            document.getElementById('rule-description').value = rule ? rule.description : '';
+            document.getElementById('rule-priority').value = rule ? rule.priority : 50;
+            document.getElementById('rule-pattern').value = rule ? rule.pattern : '';
+            document.getElementById('rule-replacement').value = rule ? (rule.replacement || '') : '';
+
+            const targets = rule ? (rule.target_roles || ['system']) : ['system'];
+            document.getElementById('role-system').checked = targets.includes('system');
+            document.getElementById('role-user').checked = targets.includes('user');
+            document.getElementById('role-assistant').checked = targets.includes('assistant');
+        }
+
+        function hideRuleForm() {
+            document.getElementById('rule-form-container').style.display = 'none';
+        }
+
+        async function editRule(ruleId) {
+            try {
+                const resp = await fetch('/admin/api/prompt-rules');
+                const data = await resp.json();
+                const rule = (data.rules || []).find(r => r.id === ruleId);
+                if (rule) showRuleForm(rule);
+            } catch (e) {
+                alert('Failed to load rule: ' + e.message);
+            }
+        }
+
+        async function saveRule() {
+            const editId = document.getElementById('rule-edit-id').value;
+            const targets = [];
+            if (document.getElementById('role-system').checked) targets.push('system');
+            if (document.getElementById('role-user').checked) targets.push('user');
+            if (document.getElementById('role-assistant').checked) targets.push('assistant');
+            if (targets.length === 0) targets.push('system');
+
+            const body = {
+                description: document.getElementById('rule-description').value,
+                pattern: document.getElementById('rule-pattern').value,
+                replacement: document.getElementById('rule-replacement').value,
+                target_roles: targets,
+                priority: parseInt(document.getElementById('rule-priority').value) || 50,
+                enabled: true,
+            };
+
+            if (!body.pattern) { alert('Pattern is required'); return; }
+
+            try {
+                const url = editId ? `/admin/api/prompt-rules/${editId}` : '/admin/api/prompt-rules';
+                const method = editId ? 'PUT' : 'POST';
+                const resp = await fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+                const data = await resp.json();
+                if (!resp.ok) { alert('Error: ' + (data.detail || 'Unknown error')); return; }
+                hideRuleForm();
+                loadPromptRules();
+            } catch (e) {
+                alert('Failed to save rule: ' + e.message);
+            }
+        }
+
+        async function deleteRule(ruleId) {
+            if (!confirm('Delete this rule?')) return;
+            try {
+                await fetch(`/admin/api/prompt-rules/${ruleId}`, { method: 'DELETE' });
+                loadPromptRules();
+            } catch (e) {
+                alert('Failed to delete rule: ' + e.message);
+            }
+        }
+
+        async function toggleRule(ruleId) {
+            try {
+                await fetch(`/admin/api/prompt-rules/${ruleId}/toggle`, { method: 'POST' });
+                loadPromptRules();
+            } catch (e) {
+                alert('Failed to toggle rule: ' + e.message);
+            }
+        }
+
+        async function testRules() {
+            const text = document.getElementById('rule-test-input').value;
+            if (!text) { alert('Enter some text to test'); return; }
+
+            try {
+                const resp = await fetch('/admin/api/prompt-rules/test', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ text })
+                });
+                const data = await resp.json();
+                document.getElementById('rule-test-output').style.display = 'block';
+                document.getElementById('rule-test-result').textContent = data.output;
+
+                let matchHtml = '';
+                for (const r of (data.rules_applied || [])) {
+                    const cls = r.matched ? 'matched' : 'not-matched';
+                    const icon = r.matched ? '&#10003;' : '&#10007;';
+                    matchHtml += `<span class="${cls}">${icon} ${escapeHtml(r.description || r.id)}</span>&nbsp;&nbsp;`;
+                }
+                document.getElementById('rule-test-matches').innerHTML = matchHtml || '<span class="not-matched">No rules to apply</span>';
+            } catch (e) {
+                alert('Test failed: ' + e.message);
+            }
+        }
     </script>
 </body>
 </html>

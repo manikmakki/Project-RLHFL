@@ -46,6 +46,7 @@ from shared.models import (
 from api.llm_engine import LLMEngine
 from api.memory_manager import MemoryManager
 from api.sentiment_analyzer import SentimentAnalyzer
+from api.prompt_interceptor import PromptInterceptor
 from api.admin_ui import admin_router
 
 # Configure logging
@@ -60,13 +61,14 @@ config = None
 llm_engine = None
 memory_manager = None
 sentiment_analyzer = None
+prompt_interceptor = None
 recent_api_requests = deque(maxlen=20)  # Rolling buffer of last 20 API requests
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager for FastAPI app."""
-    global config, llm_engine, memory_manager, sentiment_analyzer
+    global config, llm_engine, memory_manager, sentiment_analyzer, prompt_interceptor
 
     # Startup
     logger.info("Starting LLM API service...")
@@ -94,14 +96,19 @@ async def lifespan(app: FastAPI):
     # Initialize sentiment analyzer
     sentiment_analyzer = SentimentAnalyzer(config)
     logger.info("Sentiment analyzer initialized")
-    
+
+    # Initialize prompt interceptor
+    rules_path = str(Path(settings.config_path).parent / "prompt_rules.yaml")
+    prompt_interceptor = PromptInterceptor(rules_path)
+    logger.info("Prompt interceptor initialized")
+
     # Initialize LLM engine
     llm_engine = LLMEngine(config, settings.model_path)
     logger.info("LLM engine initialized")
     # Wire admin UI dependencies now that managers are initialized
     try:
         from api import admin_ui
-        admin_ui.set_dependencies(memory_manager, llm_engine, recent_api_requests)
+        admin_ui.set_dependencies(memory_manager, llm_engine, recent_api_requests, prompt_interceptor)
     except Exception:
         logger.warning("Failed to set admin UI dependencies at startup")
     
@@ -263,13 +270,6 @@ async def chat_completions(request: ChatCompletionRequest):
     Create a chat completion (OpenAI-compatible).
     Supports both streaming and non-streaming responses.
     """
-    # Log the API request for debugging
-    recent_api_requests.append({
-        "timestamp": datetime.now().isoformat(),
-        "endpoint": "/v1/chat/completions",
-        "request": request.model_dump()
-    })
-
     if not llm_engine or not llm_engine.is_loaded():
         raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -319,6 +319,16 @@ async def chat_completions(request: ChatCompletionRequest):
         user_message_text = user_message.get_text_content()
         messages_with_context = list(request.messages)
 
+        # Apply prompt interceptor rules before RAG or LLM processing
+        if prompt_interceptor:
+            messages_with_context = prompt_interceptor.apply(messages_with_context)
+            # Re-extract user_message_text in case it was transformed
+            user_message_text = next(
+                (msg.get_text_content() for msg in reversed(messages_with_context)
+                 if msg.role == MessageRole.USER),
+                user_message_text
+            )
+
         if config.memory.rag_enabled and not request.tools:
             # Skip RAG when tools are present — the Mistral template merges
             # the system message into the last [INST] block, and lengthy RAG
@@ -357,6 +367,17 @@ async def chat_completions(request: ChatCompletionRequest):
             logger.debug("RAG: Skipped — tools present in request")
         else:
             logger.debug("RAG: Disabled in configuration")
+
+        # Log post-processed request (after interception + RAG) so the admin
+        # UI shows exactly what the LLM will receive.
+        recent_api_requests.append({
+            "timestamp": datetime.now().isoformat(),
+            "endpoint": "/v1/chat/completions",
+            "model": request_model,
+            "stream": request.stream,
+            "has_tools": bool(request.tools),
+            "messages": [msg.model_dump(exclude_none=True) for msg in messages_with_context],
+        })
 
         # Handle streaming
         # Note: chatml-function-calling does not support streaming with auto tool_choice.
@@ -402,6 +423,11 @@ async def chat_completions(request: ChatCompletionRequest):
         # Only analyze sentiment and store if this is a final response (not a tool call)
         # Store user prompt paired with previous LLM response (n-1) to capture
         # user behavior — skip if no prior assistant message in history.
+        logger.debug(
+            f"Storage gate: finish_reason={finish_reason!r}, "
+            f"has_response_text={bool(response_text)}, "
+            f"has_prev_assistant={bool(prev_assistant_text)}"
+        )
         if finish_reason == "stop" and response_text and prev_assistant_text:
             # Infer sentiment (only uses USER message text, not system prompts or context)
             # Run sentiment analysis in thread pool to avoid blocking
