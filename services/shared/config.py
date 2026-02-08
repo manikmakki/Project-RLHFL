@@ -72,6 +72,7 @@ class MemoryConfig(BaseModel):
     auto_cleanup_threshold: float = 0.9  # Trigger cleanup at 90% of max size
     auto_cleanup_percentage: float = 0.1  # Remove bottom 10% by weight during auto-cleanup
     min_weight_threshold: float = 0.5  # Remove entries below this weight during pre-training cleanup
+    top_n_weighted_interactions: int = 30  # Top N non-golden interactions by weight to include in training
 
 
 class SentimentConfig(BaseModel):

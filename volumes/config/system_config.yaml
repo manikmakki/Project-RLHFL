@@ -11,6 +11,7 @@ memory:
   auto_cleanup_threshold: 0.9       # Trigger cleanup at 90% of max size
   auto_cleanup_percentage: 0.1      # Remove bottom 10% by weight during auto-cleanup
   min_weight_threshold: 0.5         # Remove entries below this weight during pre-training cleanup
+  top_n_weighted_interactions: 30   # Top N non-golden interactions by weight to include in training
 model:
   base_model_hf_path: /models/mistral-7b-instruct-base
   base_model_path: /models/mistral-7b-instruct-v0.3.Q4_K_M.gguf

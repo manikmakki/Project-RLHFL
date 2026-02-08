@@ -149,6 +149,38 @@ class MemoryManager:
             logger.error(f"Failed to retrieve interactions: {e}")
             return []
     
+    def get_top_interactions_by_weight(self, n: int, exclude_golden: bool = True) -> List[Interaction]:
+        """Get top N interactions ranked by weight (from all history, not time-gated)."""
+        try:
+            results = self.collection.get(
+                include=["metadatas", "documents"]
+            )
+
+            interactions = []
+            for i, metadata in enumerate(results['metadatas']):
+                if exclude_golden and metadata.get('is_golden', False):
+                    continue
+
+                interaction = Interaction(
+                    id=results['ids'][i],
+                    conversation_id=metadata['conversation_id'],
+                    timestamp=datetime.fromisoformat(metadata['timestamp']),
+                    user_message=metadata['user_message'],
+                    assistant_response=metadata['assistant_response'],
+                    sentiment=metadata.get('sentiment', 0.0),
+                    weight=metadata.get('weight', 1.0),
+                    metadata=metadata
+                )
+                interactions.append(interaction)
+
+            # Sort by weight descending, return top N
+            interactions.sort(key=lambda x: x.weight, reverse=True)
+            return interactions[:n]
+
+        except Exception as e:
+            logger.error(f"Failed to retrieve top interactions by weight: {e}")
+            return []
+
     def get_golden_examples(self) -> List[Interaction]:
         """Get all golden examples from the replay buffer."""
         try:
