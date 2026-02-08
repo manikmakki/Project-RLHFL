@@ -14,9 +14,10 @@ No cloud services. No manual labeling. No thumbs-up buttons. Just natural conver
 - **OpenAI-compatible API** -- Point any OpenAI client at `localhost:8000` and it just works.
 - **Automatic learning** -- Infers feedback from conversation patterns (praise, corrections, instructions) without any manual labeling.
 - **Safe training** -- Every training run is validated against the previous checkpoint. If performance degrades, the system rolls back automatically.
+- **Hot model reload** -- After training, the fine-tuned model is converted to GGUF and hot-swapped into the running API with automatic rollback on failure. No restart required.
 - **RAG-powered context** -- Retrieves relevant past interactions to inform responses using ChromaDB and semantic search.
 - **Checkpoint management** -- Full version history of model adapters with rollback support.
-- **Admin dashboard** -- Web UI at `/admin` for monitoring interactions, sentiment distribution, training history, and database health.
+- **Admin dashboard** -- Web UI at `/admin` for monitoring, triggering training, rolling back checkpoints, and managing the database.
 - **Memory management** -- Automatic cleanup of low-value data, age-based pruning, and database size limits.
 
 ## Requirements
@@ -161,7 +162,8 @@ project-rlhfl/
 │   │   ├── training_scheduler.py  # Trigger evaluation logic
 │   │   ├── dataset_builder.py     # Builds weighted training datasets
 │   │   ├── lora_trainer.py   # QLoRA fine-tuning with PEFT
-│   │   └── model_evaluator.py    # Validation and deployment decisions
+│   │   ├── model_evaluator.py    # Validation and deployment decisions
+│   │   └── gguf_converter.py # LoRA → GGUF conversion pipeline
 │   └── shared/               # Shared config and data models
 ├── volumes/
 │   ├── models/               # Model weights (GGUF + HuggingFace)

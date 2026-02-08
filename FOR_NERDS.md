@@ -59,9 +59,9 @@ graph TB
 | Container | Base Image | Purpose | Key Dependencies |
 |-----------|-----------|---------|-----------------|
 | `llm-api` | `nvidia/cuda:11.8.0-devel-ubuntu22.04` | Serves inference, stores interactions | llama-cpp-python, FastAPI, ChromaDB, sentence-transformers |
-| `llm-trainer` | `nvidia/cuda:11.8.0-devel-ubuntu22.04` | Runs training pipeline on schedule | PyTorch 2.0.1, PEFT, Transformers, BitsAndBytes, TRL |
+| `llm-trainer` | `nvidia/cuda:11.8.0-devel-ubuntu22.04` | Runs training pipeline on schedule | PyTorch 2.0.1, PEFT, Transformers, BitsAndBytes, TRL, llama.cpp (quantize) |
 
-Both containers mount the same volumes, so the trainer can read interactions from ChromaDB and write checkpoints that the API service can pick up.
+Both containers mount the same volumes, so the trainer can read interactions from ChromaDB, write checkpoints, and produce GGUF files that the API service hot-swaps into the running inference engine.
 
 ## Inference Flow
 
@@ -199,11 +199,21 @@ flowchart TD
     end
 
     SAVE --> VALIDATE{Validate}
-    VALIDATE -->|"perplexity <= baseline x 1.05<br/>AND sentiment_align >= baseline - 0.05"| DEPLOY[Deploy Checkpoint]
-    VALIDATE -->|"metrics degraded"| ROLLBACK[Rollback to Previous]
+    VALIDATE -->|"perplexity <= baseline x 1.05<br/>AND sentiment_align >= baseline - 0.05"| CONVERT[GGUF Conversion]
+    VALIDATE -->|"metrics degraded"| ROLLBACK[Keep Current Model]
 
-    DEPLOY --> DONE[Update metadata<br/>+ notify]
-    ROLLBACK --> DONE
+    subgraph "GGUF Conversion & Deploy"
+        CONVERT --> MERGE[Merge LoRA + base<br/>into HF model]
+        MERGE --> FP16[Convert HF → FP16 GGUF<br/>via convert_hf_to_gguf.py]
+        FP16 --> QUANT[Quantize → Q4_K_M<br/>via llama-quantize]
+        QUANT --> CLEANUP[Cleanup intermediates<br/>~28 GB freed]
+        CLEANUP --> VRAM[Free trainer GPU VRAM<br/>torch.cuda.empty_cache]
+        VRAM --> NOTIFY[Notify API to reload]
+    end
+
+    NOTIFY --> RELOAD[API: unload current model<br/>→ load new GGUF<br/>→ serve fine-tuned model]
+    ROLLBACK --> DONE[Log metrics + continue]
+    RELOAD --> DONE
 ```
 
 ### QLoRA Configuration
@@ -248,7 +258,16 @@ After training, the evaluator runs the validation set through the new checkpoint
 
 **Sentiment alignment** -- Measures whether the model's outputs match the expected sentiment direction from the training data. The system allows up to 0.05 absolute degradation.
 
-If both metrics pass, the new checkpoint is deployed. If either fails, the system rolls back to the previous checkpoint and logs the regression.
+If both metrics pass, the adapter goes through the **GGUF conversion pipeline**:
+
+1. **Merge**: LoRA adapter is merged into the base HuggingFace model
+2. **Convert**: Merged model is converted to FP16 GGUF via `convert_hf_to_gguf.py`
+3. **Quantize**: FP16 GGUF is quantized to Q4_K_M via `llama-quantize` (~4 GB output)
+4. **Cleanup**: Intermediate files (~28 GB) are removed
+5. **GPU handoff**: Trainer calls `torch.cuda.empty_cache()` to free all VRAM
+6. **Hot reload**: API is notified via HTTP POST; it unloads the current model, loads the new GGUF, and resumes serving. A background poller (30s interval) acts as a safety net if the HTTP notification fails.
+
+If validation fails, the current model is kept and the regression is logged. If the new GGUF fails to load, the API automatically rolls back to the previous model.
 
 ### Checkpoint Structure
 
@@ -270,13 +289,13 @@ Each metadata file tracks:
     "timestamp": "2026-02-06T22:54:55",
     "metrics": {
         "perplexity": 2.34,
-        "sentiment_alignment": 0.85,
-        "eval_samples": 20
+        "sentiment_alignment": 0.85
     },
     "parent_checkpoint": "checkpoint_20260205_120000",
     "training_samples": 156,
     "deployed": true,
-    "can_rollback": true
+    "can_rollback": true,
+    "gguf_model_path": "/models/model-checkpoint_20260206_225455.Q4_K_M.gguf"
 }
 ```
 
@@ -317,13 +336,14 @@ Golden examples are **never** removed by any cleanup mechanism.
 
 The web UI at `/admin` provides:
 
+- **Model & Training Controls** -- current model status, trigger training, rollback to any checkpoint, revert to base model
+- **Checkpoint table** -- all training checkpoints with metrics, GGUF status, and one-click rollback
 - Training statistics (interaction counts, time since last training)
-- Sentiment distribution chart (positive / negative / neutral)
+- Training progress charts (loss, evaluation loss, samples over time)
+- Sentiment distribution (positive / negative / neutral)
 - Memory browser with filtering and pagination
 - Golden example management (toggle any interaction)
-- Database size monitoring
-- Checkpoint history with training metrics
-- Manual cleanup triggers (by age, weight, or lowest-weight percentage)
+- Database size monitoring with manual cleanup triggers
 - Recent API request log for debugging
 
 ## API Reference
@@ -332,13 +352,18 @@ The web UI at `/admin` provides:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/health` | System health status |
+| `GET` | `/health` | System health status (includes reload state) |
 | `GET` | `/v1/models` | List available models |
 | `POST` | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
 | `POST` | `/v1/training/trigger` | Manually trigger a training run |
 | `GET` | `/v1/training/stats` | Training statistics |
+| `POST` | `/v1/model/reload` | Hot-reload model from a new GGUF file |
 | `GET` | `/admin` | Admin dashboard (HTML) |
 | `GET` | `/admin/api/stats` | System statistics (JSON) |
+| `GET` | `/admin/api/model/status` | Current model status, checkpoint, metrics |
+| `POST` | `/admin/api/training/trigger` | Trigger training from admin UI |
+| `POST` | `/admin/api/model/rollback` | Rollback to a specific checkpoint |
+| `POST` | `/admin/api/model/reload-base` | Revert to base model (undo fine-tuning) |
 | `GET` | `/admin/api/memories` | Paginated interaction list |
 | `GET` | `/admin/api/memories/{id}` | Interaction detail |
 | `PUT` | `/admin/api/memories/{id}` | Update interaction metadata |
@@ -398,11 +423,11 @@ The web UI at `/admin` provides:
 
 | Feature | Supported |
 |---------|-----------|
-| `messages` (system, user, assistant) | Yes |
+| `messages` (system, user, assistant, tool) | Yes |
 | `temperature`, `top_p`, `max_tokens` | Yes |
 | `stream` (SSE) | Yes |
 | `user` (used as conversation ID) | Yes |
-| `functions` / `tools` | No |
+| `tools` / `tool_choice` | Yes |
 | `response_format` (JSON mode) | No |
 | `n` (multiple completions) | No |
 | `logprobs` | No |
@@ -447,11 +472,9 @@ graph LR
 
 ## Known Limitations
 
-1. **Single GPU** -- Inference and training share the same GPU. Training blocks inference while running.
+1. **Single GPU** -- Inference and training share the same GPU. Training blocks inference while running. During model hot-reload (~5-15s), requests receive HTTP 503.
 2. **Rule-based sentiment** -- Pattern matching is simpler than ML-based sentiment analysis; nuanced feedback may be misclassified.
 3. **No multi-turn training context** -- Each interaction is trained as an independent sample, not as part of a conversation chain.
-4. **GGUF adapter gap** -- LoRA adapters are trained against the HuggingFace model but inference runs on the GGUF quantized model. The adapter doesn't directly load into the GGUF runtime.
-5. **No function calling** -- The OpenAI `tools`/`functions` API is not implemented.
 
 ## Further Reading
 

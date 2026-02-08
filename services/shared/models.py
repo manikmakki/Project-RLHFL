@@ -303,6 +303,23 @@ class CheckpointMetadata(BaseModel):
     training_samples: int
     can_rollback: bool = True
     deployed: bool = False
+    gguf_model_path: Optional[str] = None
+
+
+class ModelReloadRequest(BaseModel):
+    """Request to reload the model with a new GGUF file."""
+    gguf_model_path: str
+    checkpoint_id: str
+    metrics: Optional[Dict[str, float]] = None
+
+
+class ModelReloadResponse(BaseModel):
+    """Response from a model reload request."""
+    success: bool
+    message: str
+    previous_model_path: Optional[str] = None
+    new_model_path: Optional[str] = None
+    checkpoint_id: Optional[str] = None
 
 
 class HealthStatus(BaseModel):

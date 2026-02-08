@@ -1,6 +1,8 @@
 import logging
 import json
 import uuid
+import gc
+import threading
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from llama_cpp import Llama
@@ -103,7 +105,10 @@ class LLMEngine:
         self.config = config
         self.model_path = model_path
         self.current_adapter_path: Optional[str] = None
+        self.current_checkpoint_id: Optional[str] = None
         self.llm: Optional[Llama] = None
+        self._model_lock = threading.RLock()
+        self._is_reloading = False
 
         # Initialize Jinja2 environment with Mistral v0.3 chat template
         env = jinja2.Environment()
@@ -124,6 +129,9 @@ class LLMEngine:
                 n_gpu_layers=self.config.model.n_gpu_layers,
                 n_batch=self.config.model.n_batch,
                 n_threads=self.config.model.n_threads,
+                kv_cache_type=self.config.model.kv_cache_type,
+                use_mmap=self.config.model.use_mmap,
+                use_mlock=self.config.model.use_mlock,
                 verbose=True  # Temporarily enable to check GPU offloading
             )
 
@@ -133,16 +141,89 @@ class LLMEngine:
             logger.error(f"Failed to load model: {e}")
             raise
 
-    def reload_with_adapter(self, adapter_path: str):
+    def reload_model(self, new_model_path: str, checkpoint_id: str = None) -> bool:
         """
-        Reload model with a LoRA adapter.
-        Note: llama.cpp GGUF doesn't directly support LoRA adapters.
-        This would require converting the adapted model back to GGUF.
-        For simplicity, we'll track the adapter path for the training service.
+        Reload the model from a new GGUF file with automatic rollback on failure.
+
+        Strategy: unload current model first to free GPU memory (two 7B models
+        cannot coexist), then load the new one. If the new load fails, attempt
+        to restore the previous model.
+
+        During the brief reload window (~5-15s), self.llm is None and requests
+        will get RuntimeError("Model not loaded") → HTTP 503.
+
+        Args:
+            new_model_path: Absolute path to the new GGUF file.
+            checkpoint_id: Optional checkpoint identifier for tracking.
+
+        Returns:
+            True if reload succeeded, False if failed (previous model restored).
         """
-        self.current_adapter_path = adapter_path
-        logger.info(f"Adapter path updated to: {adapter_path}")
-        # In production, you'd convert the HF model + adapter to GGUF and reload
+        new_path = Path(new_model_path)
+
+        if not new_path.exists():
+            logger.error(f"Reload failed: GGUF file not found: {new_model_path}")
+            return False
+
+        if new_path.stat().st_size < 100_000_000:
+            logger.error(
+                f"Reload failed: GGUF file suspiciously small "
+                f"({new_path.stat().st_size} bytes): {new_model_path}"
+            )
+            return False
+
+        if new_model_path == self.model_path:
+            logger.info("Reload skipped: same model path already loaded")
+            return True
+
+        logger.info(f"Model reload initiated: {self.model_path} -> {new_model_path}")
+
+        with self._model_lock:
+            self._is_reloading = True
+            old_model_path = self.model_path
+            old_checkpoint_id = self.current_checkpoint_id
+
+            try:
+                # Step 1: Unload current model to free GPU memory
+                logger.info("Unloading current model to free GPU memory...")
+                if self.llm is not None:
+                    del self.llm
+                    self.llm = None
+                    gc.collect()
+
+                # Step 2: Load new model
+                logger.info(f"Loading new model from {new_model_path}")
+                self.model_path = new_model_path
+                self._load_model()
+
+                # Step 3: Update tracking
+                self.current_checkpoint_id = checkpoint_id
+                self._is_reloading = False
+
+                logger.info(
+                    f"Model reload successful: now serving {new_model_path} "
+                    f"(checkpoint: {checkpoint_id})"
+                )
+                return True
+
+            except Exception as e:
+                logger.error(f"Model reload FAILED: {e}", exc_info=True)
+
+                # Recovery: try to reload the previous model
+                logger.info(f"Attempting recovery: reloading previous model {old_model_path}")
+                try:
+                    self.model_path = old_model_path
+                    self._load_model()
+                    self.current_checkpoint_id = old_checkpoint_id
+                    logger.info("Recovery successful: previous model restored")
+                except Exception as recovery_err:
+                    logger.critical(
+                        f"CRITICAL: Recovery failed, no model available: {recovery_err}"
+                    )
+                    self.llm = None
+
+                self._is_reloading = False
+                return False
 
     def _convert_messages_to_dict(self, messages: List[ChatMessage]) -> List[Dict[str, Any]]:
         """
@@ -452,8 +533,12 @@ class LLMEngine:
             raise
 
     def is_loaded(self) -> bool:
-        """Check if model is loaded."""
-        return self.llm is not None
+        """Check if model is loaded and not mid-reload."""
+        return self.llm is not None and not self._is_reloading
+
+    def is_reloading(self) -> bool:
+        """Check if model is currently being reloaded."""
+        return self._is_reloading
 
     def get_current_adapter(self) -> Optional[str]:
         """Get the current adapter path."""

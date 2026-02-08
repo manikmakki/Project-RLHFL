@@ -2,6 +2,8 @@ FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
+ENV PATH=/usr/local/cuda-11.8/compat/:$PATH
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -44,6 +46,20 @@ RUN pip install --no-cache-dir \
 
 # Install llama-cpp-python with CUDA support for CC 6.1
 RUN CMAKE_ARGS="-DLLAMA_CUBLAS=on -DCMAKE_CUDA_ARCHITECTURES=61" pip install --no-cache-dir llama-cpp-python==0.2.27
+
+# Install GGUF conversion dependencies
+RUN pip install --no-cache-dir gguf sentencepiece requests
+
+# Build llama-quantize binary and grab convert script from llama.cpp source
+RUN mkdir -p /app/bin /app/scripts && \
+    git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama.cpp && \
+    cp /tmp/llama.cpp/convert_hf_to_gguf.py /app/scripts/convert_hf_to_gguf.py && \
+    cd /tmp/llama.cpp && \
+    mkdir build && cd build && \
+    cmake .. -DLLAMA_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61 && \
+    cmake --build . --target llama-quantize -j$(nproc) && \
+    cp bin/llama-quantize /app/bin/llama-quantize && \
+    cd / && rm -rf /tmp/llama.cpp
 
 WORKDIR /app
 

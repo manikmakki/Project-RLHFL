@@ -1,5 +1,6 @@
 import logging
 import json
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import chromadb
@@ -252,29 +253,29 @@ class MemoryManager:
                     days_since_last_training=999.0,
                     total_interactions=0,
                     last_training_timestamp=None,
-                    user_requested_training=self.user_training_request
+                    user_requested_training=self._is_training_requested()
                 )
-            
+
             # Calculate stats
             now = datetime.now()
             latest_interaction = max(all_interactions, key=lambda x: x.timestamp)
-            
+
             hours_since_last = (now - latest_interaction.timestamp).total_seconds() / 3600
-            
+
             if last_training:
                 new_interactions = sum(1 for i in all_interactions if i.timestamp > last_training)
                 days_since_training = (now - last_training).total_seconds() / 86400
             else:
                 new_interactions = len(all_interactions)
                 days_since_training = 999.0
-            
+
             return TrainingStats(
                 new_interactions_since_last_training=new_interactions,
                 hours_since_last_interaction=hours_since_last,
                 days_since_last_training=days_since_training,
                 total_interactions=len(all_interactions),
                 last_training_timestamp=last_training,
-                user_requested_training=self.user_training_request
+                user_requested_training=self._is_training_requested()
             )
             
         except Exception as e:
@@ -291,11 +292,37 @@ class MemoryManager:
         """Mark that training has completed."""
         self._save_training_state(datetime.now())
         self.user_training_request = False
-    
+        self._clear_training_request_file()
+
     def request_training(self):
-        """User explicitly requests training."""
+        """User explicitly requests training. Persists to shared volume so trainer container sees it."""
         self.user_training_request = True
-        logger.info("User requested training")
+        self._write_training_request_file()
+        logger.info("User requested training (written to shared volume)")
+
+    def _is_training_requested(self) -> bool:
+        """Check both in-memory flag and shared trigger file."""
+        if self.user_training_request:
+            return True
+        trigger_file = Path(self.data_path) / "training_requested"
+        return trigger_file.exists()
+
+    def _write_training_request_file(self):
+        """Write a trigger file to the shared data volume."""
+        try:
+            trigger_file = Path(self.data_path) / "training_requested"
+            trigger_file.write_text(datetime.now().isoformat())
+        except Exception as e:
+            logger.warning(f"Failed to write training request file: {e}")
+
+    def _clear_training_request_file(self):
+        """Remove the trigger file after training completes."""
+        try:
+            trigger_file = Path(self.data_path) / "training_requested"
+            if trigger_file.exists():
+                trigger_file.unlink()
+        except Exception as e:
+            logger.warning(f"Failed to clear training request file: {e}")
     
     def _load_training_state(self) -> Optional[datetime]:
         """Load the last training timestamp."""
