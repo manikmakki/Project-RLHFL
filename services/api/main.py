@@ -273,6 +273,15 @@ async def chat_completions(request: ChatCompletionRequest):
         if not user_message:
             raise HTTPException(status_code=400, detail="No user message found in messages")
 
+        # Get previous assistant response (n-1) for storage pairing.
+        # Storing user prompt + prior LLM response captures user behavior
+        # (what the user said in reaction to the last assistant output).
+        prev_assistant_message = next(
+            (msg for msg in reversed(request.messages) if msg.role == MessageRole.ASSISTANT),
+            None
+        )
+        prev_assistant_text = prev_assistant_message.get_text_content() if prev_assistant_message else None
+
         # Retrieve relevant context from memory using RAG (if enabled)
         user_message_text = user_message.get_text_content()
         messages_with_context = list(request.messages)
@@ -329,7 +338,7 @@ async def chat_completions(request: ChatCompletionRequest):
         if use_streaming:
             return StreamingResponse(
                 stream_chat_completion(
-                    request, conversation_id, user_message_text, request_model, messages_with_context
+                    request, conversation_id, user_message_text, request_model, messages_with_context, prev_assistant_text
                 ),
                 media_type="text/event-stream"
             )
@@ -358,13 +367,15 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.debug(f"Parsed response - finish_reason={finish_reason}, has_content={bool(response_text)}, tool_calls={tool_calls}")
 
         # Only analyze sentiment and store if this is a final response (not a tool call)
-        if finish_reason == "stop" and response_text:
+        # Store user prompt paired with previous LLM response (n-1) to capture
+        # user behavior — skip if no prior assistant message in history.
+        if finish_reason == "stop" and response_text and prev_assistant_text:
             # Infer sentiment (only uses USER message text, not system prompts or context)
             # Run sentiment analysis in thread pool to avoid blocking
             sentiment = await asyncio.to_thread(
                 sentiment_analyzer.analyze,
                 user_message=user_message_text,
-                assistant_response=response_text,
+                assistant_response=prev_assistant_text,
                 conversation_continuing=True
             )
 
@@ -384,13 +395,13 @@ async def chat_completions(request: ChatCompletionRequest):
                 weight=weight
             )
 
-            # Store interaction in memory (only stores USER message text for analysis)
+            # Store interaction: user prompt + previous assistant response (n-1)
             # Run embedding generation and DB storage in thread pool
             await asyncio.to_thread(
                 memory_manager.store_interaction,
                 conversation_id=conversation_id,
                 user_message=user_message_text,
-                assistant_response=response_text,
+                assistant_response=prev_assistant_text,
                 sentiment=sentiment,
                 weight=weight,
                 is_golden=is_golden
@@ -448,7 +459,8 @@ async def stream_chat_completion(
     conversation_id: str,
     user_message: str,
     model_id: str,
-    messages_with_context: list[ChatMessage]
+    messages_with_context: list[ChatMessage],
+    prev_assistant_text: str | None = None
 ) -> AsyncGenerator[str, None]:
     """Stream chat completion responses in OpenAI format with RAG context."""
     try:
@@ -550,13 +562,14 @@ async def stream_chat_completion(
 
         yield "data: [DONE]\n\n"
 
-        # Only store interaction if this was a final response (not a tool call)
-        if finish_reason == "stop" and full_response:
+        # Store user prompt paired with previous LLM response (n-1) to capture
+        # user behavior — skip if no prior assistant message in history.
+        if finish_reason == "stop" and full_response and prev_assistant_text:
             # Run in thread pool to avoid blocking event loop
             sentiment = await asyncio.to_thread(
                 sentiment_analyzer.analyze,
                 user_message=user_message,
-                assistant_response=full_response,
+                assistant_response=prev_assistant_text,
                 conversation_continuing=True
             )
 
@@ -577,7 +590,7 @@ async def stream_chat_completion(
                 memory_manager.store_interaction,
                 conversation_id=conversation_id,
                 user_message=user_message,
-                assistant_response=full_response,
+                assistant_response=prev_assistant_text,
                 sentiment=sentiment,
                 weight=weight,
                 is_golden=is_golden
