@@ -258,16 +258,18 @@ After training, the evaluator runs the validation set through the new checkpoint
 
 **Sentiment alignment** -- Measures whether the model's outputs match the expected sentiment direction from the training data. The system allows up to 0.05 absolute degradation.
 
+Before training begins, the trainer requests the API to **unload its model** (`POST /v1/model/unload`), freeing GPU vRAM so the trainer gets full access to the GPU. The API returns 503 to inference requests during this window.
+
 If both metrics pass, the adapter goes through the **GGUF conversion pipeline**:
 
-1. **Merge**: LoRA adapter is merged into the base HuggingFace model
+1. **Merge**: LoRA adapter is merged into the base HuggingFace model (on CPU to avoid vRAM pressure)
 2. **Convert**: Merged model is converted to FP16 GGUF via `convert_hf_to_gguf.py`
 3. **Quantize**: FP16 GGUF is quantized to Q4_K_M via `llama-quantize` (~4 GB output)
 4. **Cleanup**: Intermediate files (~28 GB) are removed
 5. **GPU handoff**: Trainer calls `torch.cuda.empty_cache()` to free all VRAM
-6. **Hot reload**: API is notified via HTTP POST; it unloads the current model, loads the new GGUF, and resumes serving. A background poller (30s interval) acts as a safety net if the HTTP notification fails.
+6. **Hot reload**: API is notified via HTTP POST; it loads the new GGUF and resumes serving. A background poller (30s interval) acts as a safety net if the HTTP notification fails.
 
-If validation fails, the current model is kept and the regression is logged. If the new GGUF fails to load, the API automatically rolls back to the previous model.
+If validation fails or conversion errors occur, the trainer tells the API to reload its previous model. If the new GGUF fails to load, the API automatically rolls back to the previous model.
 
 ### Checkpoint Structure
 
@@ -357,6 +359,7 @@ The web UI at `/admin` provides:
 | `POST` | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
 | `POST` | `/v1/training/trigger` | Manually trigger a training run |
 | `GET` | `/v1/training/stats` | Training statistics |
+| `POST` | `/v1/model/unload` | Unload model to free GPU vRAM (pre-training) |
 | `POST` | `/v1/model/reload` | Hot-reload model from a new GGUF file |
 | `GET` | `/admin` | Admin dashboard (HTML) |
 | `GET` | `/admin/api/stats` | System statistics (JSON) |

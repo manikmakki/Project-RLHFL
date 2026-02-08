@@ -17,6 +17,7 @@ import uuid
 import json
 import asyncio
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 from contextlib import asynccontextmanager
@@ -167,6 +168,16 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                 "details": error_details
             }
         }
+    )
+
+
+@app.exception_handler(503)
+async def service_unavailable_handler(request: Request, exc: HTTPException):
+    """Add Retry-After header to all 503 responses."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": exc.detail},
+        headers={"Retry-After": "120"},
     )
 
 
@@ -660,6 +671,25 @@ async def get_training_stats():
 
     stats = memory_manager.get_training_stats()
     return stats
+
+
+@app.post("/v1/model/unload")
+async def unload_model():
+    """
+    Unload the current LLM to free GPU vRAM.
+    Called by the trainer before training starts so it gets full GPU access.
+    The model should be reloaded via /v1/model/reload after training completes.
+    """
+    if not llm_engine:
+        raise HTTPException(status_code=503, detail="LLM engine not initialized")
+
+    logger.info("Model unload requested (pre-training GPU release)")
+    success = await asyncio.to_thread(llm_engine.unload_model)
+
+    if success:
+        return {"success": True, "message": "Model unloaded, GPU vRAM freed for training"}
+    else:
+        return {"success": False, "message": "Failed to unload model (check API logs)"}
 
 
 @app.post("/v1/model/reload")

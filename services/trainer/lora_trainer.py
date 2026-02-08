@@ -284,10 +284,12 @@ class LoRATrainer:
         model = None
         tokenizer = None
         try:
-            # Load base model
+            # Load base model on CPU for merge (avoids meta-tensor errors
+            # that occur with device_map="auto" when GPU memory is tight)
             model = AutoModelForCausalLM.from_pretrained(
                 self.base_model_path,
-                device_map="auto",
+                device_map="cpu",
+                torch_dtype="auto",
                 use_cache=False
             )
 

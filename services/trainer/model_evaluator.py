@@ -1,3 +1,4 @@
+import gc
 import logging
 import json
 import torch
@@ -97,41 +98,43 @@ class ModelEvaluator:
         """Calculate validation metrics for the model."""
         logger.info("Calculating validation metrics...")
         
+        model = None
+        tokenizer = None
         try:
             # Load model with adapter
             tokenizer = AutoTokenizer.from_pretrained(adapter_path)
-            
+
             model = AutoModelForCausalLM.from_pretrained(
                 self.base_model_path,
                 load_in_4bit=True,
                 device_map="auto",
                 torch_dtype=torch.float16
             )
-            
+
             model = PeftModel.from_pretrained(model, adapter_path)
             model.eval()
-            
+
             # Calculate perplexity on validation set
             perplexities = []
-            
+
             # Sample subset for evaluation (to save time)
             eval_samples = val_dataset[:min(len(val_dataset), 20)]
-            
+
             for sample in eval_samples:
                 prompt = sample['prompt']
                 completion = sample['completion']
                 text = f"[INST] {prompt} [/INST] {completion}"
-                
+
                 inputs = tokenizer(text, return_tensors="pt").to(model.device)
-                
+
                 with torch.no_grad():
                     outputs = model(**inputs, labels=inputs["input_ids"])
                     loss = outputs.loss.item()
                     perplexity = np.exp(loss)
                     perplexities.append(perplexity)
-            
+
             avg_perplexity = np.mean(perplexities)
-            
+
             # Calculate sentiment alignment (how well responses match expected sentiment)
             sentiment_scores = []
             for sample in eval_samples:
@@ -142,24 +145,32 @@ class ModelEvaluator:
                     else:
                         score = 0.5  # Neutral for negative examples
                     sentiment_scores.append(score)
-            
+
             sentiment_alignment = np.mean(sentiment_scores) if sentiment_scores else 0.5
-            
+
             metrics = {
                 "perplexity": float(avg_perplexity),
                 "sentiment_alignment": float(sentiment_alignment)
             }
-            
+
             logger.info(f"Metrics: {metrics}")
-            
+
             return metrics
-            
+
         except Exception as e:
             logger.error(f"Failed to calculate metrics: {e}")
             return {
                 "perplexity": 999.0,
                 "sentiment_alignment": 0.0
             }
+        finally:
+            # Free GPU vRAM used by evaluation model
+            del model
+            del tokenizer
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info("Evaluator GPU memory freed")
     
     def _should_deploy(
         self,

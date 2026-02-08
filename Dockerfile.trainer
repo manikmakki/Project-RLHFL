@@ -2,7 +2,7 @@ FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
+#ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib/python3.10/dist-packages/llama_cpp
 ENV PATH=/usr/local/cuda-11.8/compat/:$PATH
 
 # Install system dependencies
@@ -48,18 +48,23 @@ RUN pip install --no-cache-dir \
 RUN CMAKE_ARGS="-DLLAMA_CUBLAS=on -DCMAKE_CUDA_ARCHITECTURES=61" pip install --no-cache-dir llama-cpp-python==0.2.27
 
 # Install GGUF conversion dependencies
-RUN pip install --no-cache-dir gguf sentencepiece requests
+RUN pip install --no-cache-dir sentencepiece requests
 
-# Build llama-quantize binary and grab convert script from llama.cpp source
+# Build llama-quantize binary and grab convert script from llama.cpp b3400.
+# Pinned tag ensures compatibility with PyTorch 2.0.1 (no torch.uint64/float8).
+# Install the gguf Python package from the SAME tag so script + lib stay in sync.
 RUN mkdir -p /app/bin /app/scripts && \
-    git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama.cpp && \
+    git clone --depth 1 --branch b3400 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp && \
     cp /tmp/llama.cpp/convert_hf_to_gguf.py /app/scripts/convert_hf_to_gguf.py && \
+    pip install --no-cache-dir /tmp/llama.cpp/gguf-py && \
     cd /tmp/llama.cpp && \
     mkdir build && cd build && \
-    cmake .. -DLLAMA_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61 && \
+    cmake .. -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61 -DBUILD_SHARED_LIBS=OFF && \
     cmake --build . --target llama-quantize -j$(nproc) && \
     cp bin/llama-quantize /app/bin/llama-quantize && \
     cd / && rm -rf /tmp/llama.cpp
+
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
 
 WORKDIR /app
 
