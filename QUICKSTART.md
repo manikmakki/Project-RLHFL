@@ -143,7 +143,7 @@ ls -lh volumes/models/
 
 You should see:
 ```
-mistral-7b-instruct-v0.2.Q4_K_M.gguf    (~4.4 GB)
+mistral-7b-instruct-v0.3.Q4_K_M.gguf    (~4.4 GB)
 mistral-7b-instruct-base/                 (directory, ~14 GB)
 ```
 
@@ -405,8 +405,8 @@ git lfs install
 ./scripts/download_models.sh
 
 # Or download the GGUF model directly
-wget -O volumes/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf \
-  "https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
+wget -O volumes/models/mistral-7b-instruct-v0.3.Q4_K_M.gguf \
+  "https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/mistral-7b-instruct-v0.3.Q4_K_M.gguf"
 ```
 
 ### Containers keep restarting

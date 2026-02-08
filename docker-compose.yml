@@ -15,7 +15,7 @@ services:
       - ./volumes/checkpoints:/checkpoints
     environment:
       - CUDA_VISIBLE_DEVICES=0
-      - MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+      - MODEL_PATH=/models/mistral-7b-instruct-v0.3.Q4_K_M.gguf
       - BASE_MODEL_PATH=/models/mistral-7b-instruct-base
       - CONFIG_PATH=/config/system_config.yaml
       - DATA_PATH=/data
