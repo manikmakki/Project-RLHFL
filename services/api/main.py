@@ -17,8 +17,8 @@ import uuid
 import json
 import asyncio
 import os
-from datetime import datetime
-from typing import AsyncGenerator
+from pathlib import Path
+from typing import AsyncGenerator, Optional
 from contextlib import asynccontextmanager
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -38,7 +38,9 @@ from shared.models import (
     Usage,
     ModelsResponse,
     ModelInfo,
-    HealthStatus
+    HealthStatus,
+    ModelReloadRequest,
+    ModelReloadResponse,
 )
 from api.llm_engine import LLMEngine
 from api.memory_manager import MemoryManager
@@ -109,11 +111,23 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("No GPU detected, running on CPU")
     
+    # Start background checkpoint poller
+    poll_interval = config.model.checkpoint_poll_interval_seconds
+    checkpoint_poller_task = asyncio.create_task(
+        _poll_for_new_checkpoints(llm_engine, settings.checkpoints_path, poll_interval)
+    )
+    logger.info(f"Background checkpoint poller started ({poll_interval}s interval)")
+
     logger.info("LLM API service ready!")
-    
+
     yield
-    
+
     # Shutdown
+    checkpoint_poller_task.cancel()
+    try:
+        await checkpoint_poller_task
+    except asyncio.CancelledError:
+        pass
     logger.info("Shutting down LLM API service...")
 
 
@@ -195,15 +209,23 @@ for route in app.routes:
 async def health_check():
     """Health check endpoint."""
     gpu_available = torch.cuda.is_available()
-    
+
+    is_reloading = llm_engine.is_reloading() if llm_engine else False
+    if is_reloading:
+        status_str = "reloading"
+    elif llm_engine and llm_engine.is_loaded():
+        status_str = "healthy"
+    else:
+        status_str = "degraded"
+
     status = HealthStatus(
-        status="healthy" if llm_engine and llm_engine.is_loaded() else "degraded",
+        status=status_str,
         model_loaded=llm_engine.is_loaded() if llm_engine else False,
         memory_connected=memory_manager.is_connected() if memory_manager else False,
         gpu_available=gpu_available,
-        current_checkpoint=llm_engine.get_current_adapter() if llm_engine else None
+        current_checkpoint=llm_engine.current_checkpoint_id if llm_engine else None
     )
-    
+
     return status
 
 
@@ -635,9 +657,113 @@ async def get_training_stats():
     """Get current training statistics."""
     if not memory_manager:
         raise HTTPException(status_code=503, detail="Memory manager not initialized")
-    
+
     stats = memory_manager.get_training_stats()
     return stats
+
+
+@app.post("/v1/model/reload")
+async def reload_model(request_body: ModelReloadRequest):
+    """
+    Reload the LLM with a new GGUF model file.
+    Called by the trainer after GGUF conversion, or manually for rollback.
+    """
+    if not llm_engine:
+        raise HTTPException(status_code=503, detail="LLM engine not initialized")
+
+    logger.info(
+        f"Model reload requested: checkpoint={request_body.checkpoint_id}, "
+        f"path={request_body.gguf_model_path}"
+    )
+
+    success = await asyncio.to_thread(
+        llm_engine.reload_model,
+        new_model_path=request_body.gguf_model_path,
+        checkpoint_id=request_body.checkpoint_id,
+    )
+
+    if success:
+        return ModelReloadResponse(
+            success=True,
+            message=f"Model reloaded with checkpoint {request_body.checkpoint_id}",
+            new_model_path=request_body.gguf_model_path,
+            checkpoint_id=request_body.checkpoint_id,
+        )
+    else:
+        return ModelReloadResponse(
+            success=False,
+            message="Model reload failed; previous model restored (check API logs)",
+            checkpoint_id=request_body.checkpoint_id,
+        )
+
+
+def _read_checkpoint_json(checkpoint_file: Path) -> Optional[dict]:
+    """Read and parse checkpoint JSON file. Returns None on error."""
+    try:
+        with open(checkpoint_file, 'r') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        logger.warning(f"Failed to read checkpoint file: {e}")
+        return None
+
+
+async def _poll_for_new_checkpoints(
+    engine,
+    checkpoints_path: str,
+    interval_seconds: int = 30,
+):
+    """
+    Background task that checks current_checkpoint.json for a new GGUF model
+    path and triggers reload if needed. Safety net for when HTTP notification fails.
+    """
+    checkpoint_file = Path(checkpoints_path) / "current_checkpoint.json"
+
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+
+            if not checkpoint_file.exists():
+                continue
+
+            data = await asyncio.to_thread(_read_checkpoint_json, checkpoint_file)
+            if data is None:
+                continue
+
+            new_checkpoint_id = data.get("checkpoint_id")
+            new_gguf_path = data.get("gguf_model_path")
+
+            if not new_gguf_path:
+                continue
+
+            if new_checkpoint_id == engine.current_checkpoint_id:
+                continue
+
+            if not Path(new_gguf_path).exists():
+                logger.debug(f"Poller: GGUF not yet available: {new_gguf_path}")
+                continue
+
+            logger.info(
+                f"Poller detected new checkpoint: {new_checkpoint_id} "
+                f"(current: {engine.current_checkpoint_id})"
+            )
+
+            success = await asyncio.to_thread(
+                engine.reload_model,
+                new_model_path=new_gguf_path,
+                checkpoint_id=new_checkpoint_id,
+            )
+
+            if success:
+                logger.info(f"Poller: Model reloaded to {new_checkpoint_id}")
+            else:
+                logger.warning(f"Poller: Model reload failed for {new_checkpoint_id}")
+
+        except asyncio.CancelledError:
+            logger.info("Checkpoint poller cancelled, shutting down")
+            break
+        except Exception as e:
+            logger.error(f"Checkpoint poller error: {e}", exc_info=True)
+            await asyncio.sleep(interval_seconds)
 
 
 if __name__ == "__main__":

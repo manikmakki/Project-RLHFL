@@ -274,11 +274,15 @@ class LoRATrainer:
     ) -> str:
         """
         Merge LoRA adapter with base model.
-        
+
         This creates a single merged model that can be converted to GGUF.
+        GPU memory is explicitly freed after saving so the API container
+        has VRAM available to load the resulting GGUF.
         """
         logger.info(f"Merging adapter {adapter_path} with base model")
-        
+
+        model = None
+        tokenizer = None
         try:
             # Load base model
             model = AutoModelForCausalLM.from_pretrained(
@@ -286,24 +290,39 @@ class LoRATrainer:
                 device_map="auto",
                 use_cache=False
             )
-            
+
             # Load adapter
             model = PeftModel.from_pretrained(model, adapter_path)
-            
+
             # Merge
             model = model.merge_and_unload()
-            
+
             # Save merged model
             os.makedirs(output_path, exist_ok=True)
             model.save_pretrained(output_path)
-            
+
             # Save tokenizer
             tokenizer = AutoTokenizer.from_pretrained(adapter_path)
             tokenizer.save_pretrained(output_path)
-            
+
             logger.info(f"Merged model saved to {output_path}")
             return output_path
-            
+
         except Exception as e:
             logger.error(f"Failed to merge adapter: {e}", exc_info=True)
             raise
+        finally:
+            # Explicitly free GPU memory so the API container can load the new GGUF
+            self._unload_models(model, tokenizer)
+
+    @staticmethod
+    def _unload_models(*objects):
+        """Force-free GPU VRAM by deleting model objects and clearing CUDA cache."""
+        import gc
+        for obj in objects:
+            if obj is not None:
+                del obj
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("Trainer GPU memory freed (torch.cuda.empty_cache)")

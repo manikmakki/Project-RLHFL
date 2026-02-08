@@ -15,11 +15,14 @@ model:
   base_model_hf_path: /models/mistral-7b-instruct-base
   base_model_path: /models/mistral-7b-instruct-v0.3.Q4_K_M.gguf
   context_length: 16384
-  max_tokens: 4096
+  max_tokens: 1024
   model_id: mistral-7b-instruct
-  n_batch: 2048
+  n_batch: 512
   n_gpu_layers: -1
   n_threads: 48
+  kv_cache_type: q8_0
+  use_mmap: true
+  use_mlock: true
   temperature: 0.7
   top_p: 0.9
 sentiment:

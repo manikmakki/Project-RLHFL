@@ -34,6 +34,11 @@ class ModelConfig(BaseModel):
     n_gpu_layers: int = -1  # Use all GPU layers
     n_batch: int = 512
     n_threads: int = 4
+    kv_cache_type: str = "q8_0"
+    use_mmap: bool = True
+    use_mlock: bool = True
+    checkpoint_poll_interval_seconds: int = 30
+    max_old_gguf_files: int = 2
 
 
 class TrainingConfig(BaseModel):

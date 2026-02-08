@@ -440,6 +440,13 @@
         </div>
 
         <div id="stats-tab" class="tab-content active">
+            <div id="model-controls-content">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading model status...</p>
+                </div>
+            </div>
+
             <div class="charts-section">
                 <h2 style="margin-bottom: 20px; color: #667eea;">📈 Training Progress Over Time</h2>
                 <div id="charts-content">
@@ -454,6 +461,13 @@
                 <div class="loading">
                     <div class="spinner"></div>
                     <p>Loading stats...</p>
+                </div>
+            </div>
+
+            <div id="checkpoints-content">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading checkpoints...</p>
                 </div>
             </div>
         </div>
@@ -587,6 +601,8 @@
             if (tabName === 'stats') {
                 loadStats();
                 loadTrainingCharts();
+                loadModelControls();
+                loadCheckpointsList();
             } else if (tabName === 'memories') {
                 loadMemories();
             } else if (tabName === 'debug') {
@@ -703,13 +719,17 @@
                         <h2>⚙️ System Stats</h2>
                         <div class="stat-row">
                             <span class="stat-label">Model Status</span>
-                            <span class="stat-value ${stats.system.model_loaded ? 'positive' : 'negative'}">
-                                ${stats.system.model_loaded ? '✓ Loaded' : '✗ Not Loaded'}
+                            <span class="stat-value ${stats.system.is_reloading ? 'warning' : (stats.system.model_loaded ? 'positive' : 'negative')}">
+                                ${stats.system.is_reloading ? '⟳ Reloading...' : (stats.system.model_loaded ? '✓ Loaded' : '✗ Not Loaded')}
                             </span>
                         </div>
                         <div class="stat-row">
-                            <span class="stat-label">Current Checkpoint</span>
-                            <span class="stat-value">${stats.system.current_checkpoint || 'None'}</span>
+                            <span class="stat-label">Active Checkpoint</span>
+                            <span class="stat-value">${stats.system.current_checkpoint || 'Base model'}</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Model Path</span>
+                            <span class="stat-value" style="font-size: 11px; word-break: break-all;">${stats.system.model_path || 'N/A'}</span>
                         </div>
                         <div class="stat-row">
                             <span class="stat-label">Memory Usage</span>
@@ -1230,15 +1250,217 @@
             }
         }
 
+        // Model & Training controls
+        async function loadModelControls() {
+            try {
+                const response = await fetch('/admin/api/model/status');
+                const data = await response.json();
+                renderModelControls(data);
+            } catch (error) {
+                document.getElementById('model-controls-content').innerHTML = `<div class="error">Failed to load model status: ${error.message}</div>`;
+            }
+        }
+
+        function renderModelControls(status) {
+            const statusClass = status.is_reloading ? 'warning' : (status.model_loaded ? 'positive' : 'negative');
+            const statusText = status.is_reloading ? '⟳ Reloading...' : (status.model_loaded ? '✓ Serving' : '✗ Unavailable');
+
+            let metricsHtml = '';
+            if (status.deployed_metrics) {
+                const m = status.deployed_metrics;
+                metricsHtml = Object.entries(m).map(([k, v]) =>
+                    `<span class="badge" style="background:#667eea;color:white;margin-right:6px;">${k}: ${typeof v === 'number' ? v.toFixed(3) : v}</span>`
+                ).join('');
+            }
+
+            const html = `
+                <div class="card" style="margin-bottom: 20px;">
+                    <h2>🤖 Model & Training Controls</h2>
+                    <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start;">
+                        <div style="flex: 1; min-width: 280px;">
+                            <div class="stat-row">
+                                <span class="stat-label">Model Status</span>
+                                <span class="stat-value ${statusClass}">${statusText}</span>
+                            </div>
+                            <div class="stat-row">
+                                <span class="stat-label">Active Checkpoint</span>
+                                <span class="stat-value">${status.current_checkpoint_id || 'Base model (no fine-tuning)'}</span>
+                            </div>
+                            ${status.deployed_at ? `<div class="stat-row">
+                                <span class="stat-label">Deployed At</span>
+                                <span class="stat-value">${formatLocalTime(status.deployed_at)}</span>
+                            </div>` : ''}
+                            ${metricsHtml ? `<div class="stat-row">
+                                <span class="stat-label">Metrics</span>
+                                <span class="stat-value">${metricsHtml}</span>
+                            </div>` : ''}
+                        </div>
+                        <div style="display: flex; flex-direction: column; gap: 8px; min-width: 200px;">
+                            <button class="success" onclick="triggerTraining()" ${status.is_reloading ? 'disabled' : ''}>
+                                🚀 Trigger Training Now
+                            </button>
+                            <button class="primary" onclick="reloadBaseModel()" ${status.is_reloading ? 'disabled' : ''}>
+                                ↩️ Revert to Base Model
+                            </button>
+                            <button class="primary" onclick="loadModelControls(); loadCheckpointsList(); loadStats();">
+                                🔄 Refresh
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.getElementById('model-controls-content').innerHTML = html;
+        }
+
+        async function triggerTraining() {
+            if (!confirm('Trigger a training run now?\n\nLow-weight entries will be cleaned up before training begins.\nTraining will start within ~30 seconds.')) return;
+
+            try {
+                const response = await fetch('/admin/api/training/trigger', { method: 'POST' });
+                const data = await response.json();
+                if (data.success) {
+                    alert('✓ Training requested!\n\nPre-training cleanup removed ' + data.pre_training_cleanup_deleted + ' low-weight entries.\nTraining will begin within ~30 seconds.');
+                } else {
+                    alert('Failed to trigger training: ' + (data.message || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function reloadBaseModel() {
+            if (!confirm('Revert to the original base model?\n\nThis will unload the current fine-tuned model and load the base model.\nFine-tuned checkpoints are preserved and can be re-applied later.')) return;
+
+            try {
+                const response = await fetch('/admin/api/model/reload-base', { method: 'POST' });
+                const data = await response.json();
+                if (data.success) {
+                    alert('✓ ' + data.message);
+                    loadModelControls();
+                    loadStats();
+                } else {
+                    alert('Reload failed: ' + data.message);
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function rollbackToCheckpoint(checkpointId) {
+            if (!confirm(`Rollback to checkpoint:\n${checkpointId}\n\nThe API will unload the current model and load this checkpoint's GGUF.\nRequests will briefly return 503 during the swap (~5-15s).`)) return;
+
+            try {
+                const response = await fetch(`/admin/api/model/rollback?checkpoint_id=${encodeURIComponent(checkpointId)}`, { method: 'POST' });
+                const data = await response.json();
+                if (data.success) {
+                    alert('✓ ' + data.message);
+                    loadModelControls();
+                    loadStats();
+                    loadCheckpointsList();
+                } else {
+                    alert('Rollback failed: ' + data.message);
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function loadCheckpointsList() {
+            try {
+                const response = await fetch('/admin/api/checkpoints');
+                const data = await response.json();
+
+                // Also get current active checkpoint for highlighting
+                let currentCpId = null;
+                try {
+                    const statusResp = await fetch('/admin/api/model/status');
+                    const statusData = await statusResp.json();
+                    currentCpId = statusData.current_checkpoint_id;
+                } catch (e) {}
+
+                renderCheckpointsList(data.checkpoints || [], currentCpId);
+            } catch (error) {
+                document.getElementById('checkpoints-content').innerHTML = `<div class="error">Failed to load checkpoints: ${error.message}</div>`;
+            }
+        }
+
+        function renderCheckpointsList(checkpoints, currentCpId) {
+            if (checkpoints.length === 0) {
+                document.getElementById('checkpoints-content').innerHTML = `
+                    <div class="card" style="margin-top: 20px;">
+                        <h2>📦 Training Checkpoints</h2>
+                        <p style="text-align: center; color: #999; padding: 20px;">No checkpoints yet. Train the model to create checkpoints.</p>
+                    </div>`;
+                return;
+            }
+
+            let rows = checkpoints.map(cp => {
+                const cpId = cp.checkpoint_id || 'unknown';
+                const isCurrent = cpId === currentCpId;
+                const hasGguf = !!cp.gguf_model_path;
+                const deployed = cp.deployed;
+                const perplexity = cp.metrics?.perplexity;
+                const alignment = cp.metrics?.sentiment_alignment;
+                const samples = cp.training_samples || 0;
+
+                return `
+                    <tr style="${isCurrent ? 'background: #eef6ff;' : ''}">
+                        <td style="padding: 8px; font-family: monospace; font-size: 12px;">
+                            ${cpId}
+                            ${isCurrent ? '<span class="badge" style="background: #27ae60; color: white; margin-left: 6px;">ACTIVE</span>' : ''}
+                        </td>
+                        <td style="padding: 8px;">${formatLocalTime(cp.timestamp)}</td>
+                        <td style="padding: 8px;">${perplexity !== undefined ? perplexity.toFixed(2) : '-'}</td>
+                        <td style="padding: 8px;">${alignment !== undefined ? alignment.toFixed(3) : '-'}</td>
+                        <td style="padding: 8px;">${samples}</td>
+                        <td style="padding: 8px;">
+                            ${deployed ? '<span class="badge positive">Deployed</span>' : '<span class="badge neutral">Not deployed</span>'}
+                            ${hasGguf ? ' <span class="badge" style="background: #667eea; color: white;">GGUF</span>' : ''}
+                        </td>
+                        <td style="padding: 8px;">
+                            ${hasGguf && !isCurrent ? `<button class="warning" onclick="rollbackToCheckpoint('${cpId}')" style="font-size: 11px;">⏪ Rollback</button>` : ''}
+                            ${isCurrent ? '<span style="color: #999; font-size: 12px;">Current</span>' : ''}
+                            ${!hasGguf ? '<span style="color: #999; font-size: 12px;">No GGUF</span>' : ''}
+                        </td>
+                    </tr>`;
+            }).join('');
+
+            const html = `
+                <div class="card" style="margin-top: 20px;">
+                    <h2>📦 Training Checkpoints</h2>
+                    <div style="overflow-x: auto;">
+                        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                            <thead>
+                                <tr style="border-bottom: 2px solid #667eea; text-align: left;">
+                                    <th style="padding: 8px;">Checkpoint ID</th>
+                                    <th style="padding: 8px;">Timestamp</th>
+                                    <th style="padding: 8px;">Perplexity</th>
+                                    <th style="padding: 8px;">Alignment</th>
+                                    <th style="padding: 8px;">Samples</th>
+                                    <th style="padding: 8px;">Status</th>
+                                    <th style="padding: 8px;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>
+                </div>`;
+
+            document.getElementById('checkpoints-content').innerHTML = html;
+        }
+
         // Load stats on page load
         loadStats();
         loadTrainingCharts();
+        loadModelControls();
+        loadCheckpointsList();
 
         // Refresh stats every 10 seconds
         setInterval(() => {
             if (document.getElementById('stats-tab').classList.contains('active')) {
                 loadStats();
                 loadTrainingCharts();
+                loadModelControls();
             }
         }, 10000);
     </script>

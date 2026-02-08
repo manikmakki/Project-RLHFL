@@ -253,13 +253,14 @@ class ModelEvaluator:
         current_data = {
             "checkpoint_id": checkpoint_id,
             "adapter_path": metadata.adapter_path,
+            "gguf_model_path": metadata.gguf_model_path,
             "metrics": metadata.metrics,
             "deployed_at": datetime.now().isoformat()
         }
-        
+
         with open(self.current_checkpoint_file, 'w') as f:
             json.dump(current_data, f, indent=2)
-        
+
         logger.info(f"Set current checkpoint to: {checkpoint_id}")
     
     def list_checkpoints(self) -> List[CheckpointMetadata]:
@@ -287,29 +288,53 @@ class ModelEvaluator:
         return checkpoints
     
     def rollback_to_checkpoint(self, checkpoint_id: str) -> bool:
-        """Rollback to a previous checkpoint."""
+        """Rollback to a previous checkpoint and notify the API to reload."""
         try:
-            # Find the checkpoint
             metadata_file = Path(self.checkpoints_path) / f"{checkpoint_id}_metadata.json"
-            
+
             if not metadata_file.exists():
                 logger.error(f"Checkpoint not found: {checkpoint_id}")
                 return False
-            
+
             with open(metadata_file, 'r') as f:
                 data = json.load(f)
-            
+
             if isinstance(data.get('timestamp'), str):
                 data['timestamp'] = datetime.fromisoformat(data['timestamp'])
-            
+
             metadata = CheckpointMetadata(**data)
-            
+
+            # Verify GGUF file exists for this checkpoint
+            if metadata.gguf_model_path and not Path(metadata.gguf_model_path).exists():
+                logger.error(
+                    f"GGUF file for checkpoint {checkpoint_id} not found: "
+                    f"{metadata.gguf_model_path}"
+                )
+                return False
+
             # Set as current
             self._set_current_checkpoint(checkpoint_id, metadata)
-            
+
+            # Notify API to reload (best-effort)
+            if metadata.gguf_model_path:
+                try:
+                    import requests
+                    requests.post(
+                        "http://api:8000/v1/model/reload",
+                        json={
+                            "gguf_model_path": metadata.gguf_model_path,
+                            "checkpoint_id": checkpoint_id,
+                            "metrics": metadata.metrics,
+                        },
+                        timeout=30,
+                    )
+                    logger.info("API notified of rollback")
+                except Exception as e:
+                    logger.warning(f"Failed to notify API during rollback: {e}")
+
             logger.info(f"Rolled back to checkpoint: {checkpoint_id}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to rollback to checkpoint: {e}")
             return False

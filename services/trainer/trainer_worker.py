@@ -23,9 +23,12 @@ The worker runs continuously with hourly checks, ensuring the model
 continuously improves based on user interactions without manual intervention.
 """
 
+import gc
 import logging
 import time
 import sys
+import torch
+import requests
 from pathlib import Path
 from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -41,6 +44,7 @@ from trainer.training_scheduler import TrainingScheduler
 from trainer.dataset_builder import DatasetBuilder
 from trainer.lora_trainer import LoRATrainer
 from trainer.model_evaluator import ModelEvaluator
+from trainer.gguf_converter import GGUFConverter, GGUFConversionError
 
 # Configure logging
 logging.basicConfig(
@@ -162,14 +166,19 @@ class TrainerWorker:
             
             # Step 5: Deploy if validation passed
             if should_deploy:
-                logger.info("Step 5: Deploying checkpoint...")
-                
-                # Optionally merge adapter with base model
-                # This would create a merged model that can be converted to GGUF
-                # For now, we just track the adapter path
-                
-                logger.info(f"Checkpoint {checkpoint_id} deployed successfully")
-                logger.info(f"Metrics: {metadata.metrics}")
+                logger.info("Step 5: Converting to GGUF and deploying...")
+                try:
+                    gguf_path = self._convert_and_deploy(
+                        adapter_path, checkpoint_id, checkpoint_dir, metadata
+                    )
+                    logger.info(f"Checkpoint {checkpoint_id} deployed as GGUF: {gguf_path}")
+                    logger.info(f"Metrics: {metadata.metrics}")
+                except Exception as e:
+                    logger.error(
+                        f"GGUF conversion/deploy failed for {checkpoint_id}: {e}",
+                        exc_info=True,
+                    )
+                    logger.info("Keeping current model; adapter saved for retry")
             else:
                 logger.warning("Checkpoint failed validation, not deployed")
                 logger.info(f"Metrics: {metadata.metrics}")
@@ -192,13 +201,129 @@ class TrainerWorker:
             logger.info("TRAINING PIPELINE FAILED")
             logger.info("=" * 80)
     
+    def _convert_and_deploy(self, adapter_path, checkpoint_id, checkpoint_dir, metadata):
+        """
+        Convert adapter to GGUF and notify the API to reload.
+
+        1. Merge adapter + base model → HF model
+        2. Convert HF → FP16 GGUF
+        3. Quantize to Q4_K_M
+        4. Update checkpoint metadata with GGUF path
+        5. Free all trainer GPU memory
+        6. Notify API to reload
+        7. Clean up old GGUF files
+        """
+        converter = GGUFConverter(base_model_path=settings.base_model_path)
+
+        merged_dir = f"{checkpoint_dir}/merged_model"
+        gguf_filename = f"model-{checkpoint_id}.Q4_K_M.gguf"
+        gguf_path = f"/models/{gguf_filename}"
+
+        # Stages 1-3: merge, convert, quantize
+        converter.convert_adapter_to_gguf(
+            adapter_path=adapter_path,
+            merged_model_dir=merged_dir,
+            output_gguf_path=gguf_path,
+            quantization_type="Q4_K_M",
+            lora_trainer=self.lora_trainer,
+        )
+
+        # Verify output
+        gguf_file = Path(gguf_path)
+        if not gguf_file.exists() or gguf_file.stat().st_size < 100_000_000:
+            raise GGUFConversionError(
+                f"GGUF output missing or too small: {gguf_path}"
+            )
+
+        # Update checkpoint metadata with GGUF path
+        metadata.gguf_model_path = gguf_path
+        self.model_evaluator._save_checkpoint_metadata(metadata)
+        self.model_evaluator._set_current_checkpoint(checkpoint_id, metadata)
+
+        # Free all trainer GPU memory before API attempts reload
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("Trainer GPU memory fully cleared before API reload")
+
+        # Notify API to reload (best-effort; poller is the safety net)
+        self._notify_api_reload(gguf_path, checkpoint_id, metadata.metrics)
+
+        # Clean up old GGUF files
+        max_old = self.config.model.max_old_gguf_files
+        self._cleanup_old_gguf_files(keep_count=max_old, current_gguf=gguf_path)
+
+        return gguf_path
+
+    def _notify_api_reload(self, gguf_path, checkpoint_id, metrics):
+        """Send HTTP POST to the API service to trigger model reload."""
+        try:
+            response = requests.post(
+                "http://api:8000/v1/model/reload",
+                json={
+                    "gguf_model_path": gguf_path,
+                    "checkpoint_id": checkpoint_id,
+                    "metrics": metrics,
+                },
+                timeout=60,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success"):
+                    logger.info("API notified successfully, model reload confirmed")
+                else:
+                    logger.warning(f"API reload returned failure: {data.get('message')}")
+            else:
+                logger.warning(
+                    f"API reload notification returned {response.status_code}: "
+                    f"{response.text[:200]}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to notify API of new model (poller will pick it up): {e}"
+            )
+
+    def _cleanup_old_gguf_files(self, keep_count=2, current_gguf=""):
+        """Remove old fine-tuned GGUF files, keeping base model + N most recent."""
+        models_dir = Path("/models")
+
+        # Find all fine-tuned GGUF files (pattern: model-checkpoint_*.gguf)
+        gguf_files = sorted(
+            list(models_dir.glob("model-checkpoint_*.gguf")),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+
+        # Always keep the base model and the current deployment
+        files_to_keep = {current_gguf}
+        for f in gguf_files[:keep_count]:
+            files_to_keep.add(str(f))
+
+        for f in gguf_files:
+            if str(f) not in files_to_keep:
+                try:
+                    f.unlink()
+                    logger.info(f"Cleaned up old GGUF: {f}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up {f}: {e}")
+
+    def check_user_requested_training(self):
+        """Fast-poll check: only runs training if a user explicitly requested it."""
+        try:
+            stats = self.memory_manager.get_training_stats()
+            if stats.user_requested_training:
+                logger.info("User-requested training detected, starting immediately")
+                self._execute_training()
+        except Exception as e:
+            logger.error(f"Error in user-request check: {e}", exc_info=True)
+
     def run(self):
         """Run the training worker with scheduled checks."""
         logger.info("Starting training worker scheduler...")
-        
+
         # Create scheduler
         scheduler = BlockingScheduler()
-        
+
         # Schedule training checks every hour
         scheduler.add_job(
             self.check_and_train,
@@ -207,13 +332,22 @@ class TrainerWorker:
             name='Check training conditions',
             replace_existing=True
         )
-        
+
+        # Fast poll (every 30s) for user-requested training only
+        scheduler.add_job(
+            self.check_user_requested_training,
+            trigger=IntervalTrigger(seconds=30),
+            id='user_request_check',
+            name='Check for user-requested training',
+            replace_existing=True
+        )
+
         # Run an immediate check on startup
         logger.info("Running initial training check...")
         self.check_and_train()
-        
-        logger.info("Training worker running. Checks scheduled every hour.")
-        
+
+        logger.info("Training worker running. Hourly checks + 30s user-request poll.")
+
         try:
             scheduler.start()
         except (KeyboardInterrupt, SystemExit):

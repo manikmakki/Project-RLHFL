@@ -2,6 +2,8 @@
 Admin UI endpoints for Project RLHFL web interface.
 """
 
+import asyncio
+import json
 import logging
 import psutil
 import os
@@ -96,7 +98,9 @@ async def get_admin_stats():
             },
             "system": {
                 "model_loaded": llm_engine.is_loaded(),
-                "current_checkpoint": llm_engine.get_current_adapter(),
+                "is_reloading": llm_engine.is_reloading(),
+                "current_checkpoint": llm_engine.current_checkpoint_id,
+                "model_path": getattr(llm_engine, 'model_path', None),
                 "memory_usage_mb": round(memory_info.rss / 1024 / 1024, 2),
                 "cpu_percent": psutil.cpu_percent(interval=0.1)
             }
@@ -688,4 +692,166 @@ async def cleanup_lowest_weight(percentage: Optional[float] = None):
         raise
     except Exception as e:
         logger.error(f"Error during lowest-weight cleanup: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/api/model/status")
+async def get_model_status():
+    """Get current model and training pipeline status."""
+    try:
+        result = {
+            "model_loaded": False,
+            "is_reloading": False,
+            "current_checkpoint_id": None,
+            "model_path": None,
+        }
+
+        if llm_engine:
+            result["model_loaded"] = llm_engine.is_loaded()
+            result["is_reloading"] = llm_engine.is_reloading()
+            result["current_checkpoint_id"] = llm_engine.current_checkpoint_id
+            result["model_path"] = getattr(llm_engine, "model_path", None)
+
+        # Read current_checkpoint.json for GGUF and metrics info
+        checkpoint_file = Path(settings.checkpoints_path) / "current_checkpoint.json"
+        if checkpoint_file.exists():
+            try:
+                with open(checkpoint_file, "r") as f:
+                    cp_data = json.load(f)
+                result["deployed_gguf"] = cp_data.get("gguf_model_path")
+                result["deployed_metrics"] = cp_data.get("metrics")
+                result["deployed_at"] = cp_data.get("deployed_at")
+            except Exception:
+                pass
+
+        return result
+    except Exception as e:
+        logger.error(f"Error getting model status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/api/training/trigger")
+async def trigger_training():
+    """Trigger a training run from the admin UI."""
+    try:
+        if not memory_manager:
+            raise HTTPException(status_code=503, detail="Memory manager not initialized")
+
+        # Pre-training cleanup
+        deleted_count = await asyncio.to_thread(memory_manager.cleanup_low_weight_entries)
+
+        memory_manager.request_training()
+
+        return {
+            "success": True,
+            "message": "Training requested. It will begin at the next scheduled check.",
+            "pre_training_cleanup_deleted": deleted_count,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error triggering training: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/api/model/rollback")
+async def rollback_model(checkpoint_id: str = Query(..., description="Checkpoint ID to rollback to")):
+    """Rollback to a previous checkpoint and reload the model."""
+    try:
+        if not llm_engine:
+            raise HTTPException(status_code=503, detail="LLM engine not initialized")
+
+        checkpoints_path = Path(settings.checkpoints_path)
+        metadata_file = checkpoints_path / f"{checkpoint_id}_metadata.json"
+
+        if not metadata_file.exists():
+            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {checkpoint_id}")
+
+        with open(metadata_file, "r") as f:
+            data = json.load(f)
+
+        gguf_path = data.get("gguf_model_path")
+        if not gguf_path:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Checkpoint {checkpoint_id} has no GGUF model (adapter-only checkpoint)"
+            )
+
+        if not Path(gguf_path).exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"GGUF file not found on disk: {gguf_path}"
+            )
+
+        # Update current_checkpoint.json
+        current_cp_file = checkpoints_path / "current_checkpoint.json"
+        current_data = {
+            "checkpoint_id": checkpoint_id,
+            "adapter_path": data.get("adapter_path"),
+            "gguf_model_path": gguf_path,
+            "metrics": data.get("metrics", {}),
+            "deployed_at": datetime.now().isoformat(),
+        }
+        with open(current_cp_file, "w") as f:
+            json.dump(current_data, f, indent=2)
+
+        # Trigger model reload
+        success = await asyncio.to_thread(
+            llm_engine.reload_model,
+            new_model_path=gguf_path,
+            checkpoint_id=checkpoint_id,
+        )
+
+        if success:
+            return {
+                "success": True,
+                "message": f"Rolled back to checkpoint {checkpoint_id}",
+                "checkpoint_id": checkpoint_id,
+                "gguf_model_path": gguf_path,
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Rollback failed; previous model restored. Check API logs.",
+                "checkpoint_id": checkpoint_id,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during rollback: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/api/model/reload-base")
+async def reload_base_model():
+    """Reload the original base model (undo all fine-tuning)."""
+    try:
+        if not llm_engine:
+            raise HTTPException(status_code=503, detail="LLM engine not initialized")
+
+        base_path = settings.model_path
+        if not Path(base_path).exists():
+            raise HTTPException(status_code=404, detail=f"Base model not found: {base_path}")
+
+        success = await asyncio.to_thread(
+            llm_engine.reload_model,
+            new_model_path=base_path,
+            checkpoint_id=None,
+        )
+
+        if success:
+            return {
+                "success": True,
+                "message": "Reverted to base model (no fine-tuning)",
+                "model_path": base_path,
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Failed to reload base model; check API logs",
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reloading base model: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
