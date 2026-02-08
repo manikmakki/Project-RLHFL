@@ -1,4 +1,5 @@
 volumes/models/*
 volumes/checkpoints/*
 volumes/data/*
+volumes/config/prompt_rules.yaml
 .env
