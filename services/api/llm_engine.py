@@ -109,6 +109,10 @@ class LLMEngine:
         self._model_lock = threading.RLock()
         self._is_reloading = False
 
+        # Serialize inference calls — only one create_completion at a time.
+        # Concurrent calls would double GPU KV cache allocation and OOM.
+        self._inference_lock = threading.Lock()
+
         # Initialize Jinja2 environment with Mistral v0.3 chat template
         env = jinja2.Environment()
         env.filters['tojson'] = lambda val: json.dumps(val, ensure_ascii=False)
@@ -423,15 +427,42 @@ class LLMEngine:
             # Render prompt using Mistral v0.3 template
             prompt = self._render_chat_prompt(messages_dict, tools=effective_tools)
 
-            logger.debug(f"Calling create_completion (tools={bool(effective_tools)}, temp={temp}, max_tokens={max_tok})")
+            # Guard: count prompt tokens to prevent context overflow crash
+            prompt_tokens = len(self.llm.tokenize(prompt.encode('utf-8')))
+            context_limit = self.config.model.context_length
+            available = context_limit - prompt_tokens
+            if available <= 0:
+                logger.warning(
+                    f"Prompt ({prompt_tokens} tokens) exceeds context "
+                    f"({context_limit}). Rejecting request."
+                )
+                return {
+                    "content": "I'm sorry, but this conversation has become too long for me to process. Please start a new conversation or shorten your message.",
+                    "tool_calls": None,
+                    "finish_reason": "stop"
+                }
+            # Clamp max_tokens so prompt + generation fits in context
+            effective_max_tok = min(max_tok, available)
+            if effective_max_tok < max_tok:
+                logger.info(
+                    f"Clamped max_tokens {max_tok} -> {effective_max_tok} "
+                    f"(prompt={prompt_tokens}, ctx={context_limit})"
+                )
 
-            response = self.llm.create_completion(
-                prompt=prompt,
-                max_tokens=max_tok,
-                temperature=temp,
-                top_p=top_p_val,
-                stop=["</s>"]
+            logger.debug(
+                f"Calling create_completion (tools={bool(effective_tools)}, "
+                f"temp={temp}, max_tokens={effective_max_tok}, "
+                f"prompt_tokens={prompt_tokens})"
             )
+
+            with self._inference_lock:
+                response = self.llm.create_completion(
+                    prompt=prompt,
+                    max_tokens=effective_max_tok,
+                    temperature=temp,
+                    top_p=top_p_val,
+                    stop=["</s>"]
+                )
 
             raw_text = response['choices'][0]['text']
             logger.debug(f"Raw completion text: {raw_text!r}")
@@ -502,30 +533,58 @@ class LLMEngine:
             # Render prompt using Mistral v0.3 template (no tools for streaming)
             prompt = self._render_chat_prompt(messages_dict, tools=None)
 
-            logger.debug(f"Starting streaming completion (temp={temp}, max_tokens={max_tok})")
-
-            stream = self.llm.create_completion(
-                prompt=prompt,
-                max_tokens=max_tok,
-                temperature=temp,
-                top_p=top_p_val,
-                stop=["</s>"],
-                stream=True
-            )
-
-            for chunk in stream:
-                # Convert create_completion chunk format to chat completion chunk format
-                text = chunk['choices'][0].get('text', '')
-                finish_reason = chunk['choices'][0].get('finish_reason')
-
-                chat_chunk = {
+            # Guard: count prompt tokens to prevent context overflow crash
+            prompt_tokens = len(self.llm.tokenize(prompt.encode('utf-8')))
+            context_limit = self.config.model.context_length
+            available = context_limit - prompt_tokens
+            if available <= 0:
+                logger.warning(
+                    f"Streaming: Prompt ({prompt_tokens} tokens) exceeds "
+                    f"context ({context_limit}). Returning error chunk."
+                )
+                yield {
                     'choices': [{
                         'index': 0,
-                        'delta': {'content': text} if text else {},
-                        'finish_reason': finish_reason
+                        'delta': {'content': "I'm sorry, but this conversation has become too long for me to process. Please start a new conversation or shorten your message."},
+                        'finish_reason': 'stop'
                     }]
                 }
-                yield chat_chunk
+                return
+            effective_max_tok = min(max_tok, available)
+            if effective_max_tok < max_tok:
+                logger.info(
+                    f"Streaming: Clamped max_tokens {max_tok} -> "
+                    f"{effective_max_tok} (prompt={prompt_tokens}, ctx={context_limit})"
+                )
+
+            logger.debug(
+                f"Starting streaming completion (temp={temp}, "
+                f"max_tokens={effective_max_tok}, prompt_tokens={prompt_tokens})"
+            )
+
+            with self._inference_lock:
+                stream = self.llm.create_completion(
+                    prompt=prompt,
+                    max_tokens=effective_max_tok,
+                    temperature=temp,
+                    top_p=top_p_val,
+                    stop=["</s>"],
+                    stream=True
+                )
+
+                for chunk in stream:
+                    # Convert create_completion chunk format to chat completion chunk format
+                    text = chunk['choices'][0].get('text', '')
+                    finish_reason = chunk['choices'][0].get('finish_reason')
+
+                    chat_chunk = {
+                        'choices': [{
+                            'index': 0,
+                            'delta': {'content': text} if text else {},
+                            'finish_reason': finish_reason
+                        }]
+                    }
+                    yield chat_chunk
 
         except Exception as e:
             logger.error(f"Streaming generation failed: {e}")
