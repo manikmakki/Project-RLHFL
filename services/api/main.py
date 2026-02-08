@@ -319,6 +319,9 @@ async def chat_completions(request: ChatCompletionRequest):
         user_message_text = user_message.get_text_content()
         messages_with_context = list(request.messages)
 
+        # Normalize content arrays (OpenAI spec: content can be [{type: "text", text: "..."}])
+        messages_with_context = [msg.normalize_content() for msg in messages_with_context]
+
         # Apply prompt interceptor rules before RAG or LLM processing
         if prompt_interceptor:
             messages_with_context = prompt_interceptor.apply(messages_with_context)

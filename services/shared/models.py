@@ -16,10 +16,13 @@ Key model categories:
 - System models: Health status and metadata
 """
 
+import logging
 from typing import List, Optional, Dict, Any, Literal, Union
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from datetime import datetime
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 
 class MessageRole(str, Enum):
@@ -75,6 +78,48 @@ class ChatMessage(BaseModel):
         None,
         description="ID of the tool call this message is responding to (only for tool role)"
     )
+
+    def normalize_content(self) -> "ChatMessage":
+        """Flatten content arrays to plain text string.
+
+        Handles OpenAI spec content parts: extracts text parts,
+        logs unsupported types (image_url, input_audio, etc.).
+        Returns a new ChatMessage (does not mutate self).
+        """
+        if isinstance(self.content, str) or self.content is None:
+            return self
+
+        if isinstance(self.content, list):
+            text_parts = []
+            for part in self.content:
+                if isinstance(part, dict):
+                    part_type = part.get("type", "")
+                    if part_type == "text":
+                        text_parts.append(part.get("text", ""))
+                    elif part_type in ("image_url", "input_audio", "image_file"):
+                        logger.debug(f"Unsupported content type '{part_type}' — skipped")
+                    else:
+                        logger.debug(f"Unknown content part type '{part_type}' — skipped")
+                elif isinstance(part, str):
+                    text_parts.append(part)
+            normalized = "\n".join(text_parts) if text_parts else ""
+        elif isinstance(self.content, dict):
+            part_type = self.content.get("type", "")
+            if part_type == "text":
+                normalized = self.content.get("text", "")
+            else:
+                logger.debug(f"Unsupported content type '{part_type}' — skipped")
+                normalized = ""
+        else:
+            normalized = str(self.content)
+
+        return ChatMessage(
+            role=self.role,
+            content=normalized,
+            name=self.name,
+            tool_calls=self.tool_calls,
+            tool_call_id=self.tool_call_id,
+        )
 
     def get_text_content(self) -> str:
         """Extract text content for sentiment analysis (only called for USER messages)."""

@@ -240,9 +240,22 @@ class LLMEngine:
         """
         result = []
         for msg in messages:
+            # Extract text from content — handles string, array-of-parts, or None
+            if isinstance(msg.content, str):
+                content = msg.content
+            elif isinstance(msg.content, list):
+                content = "\n".join(
+                    part.get("text", "") for part in msg.content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ) or ""
+            elif msg.content is not None:
+                content = str(msg.content)
+            else:
+                content = ""
+
             msg_dict = {
                 "role": msg.role.value if hasattr(msg.role, 'value') else str(msg.role),
-                "content": msg.content if isinstance(msg.content, str) else str(msg.content) if msg.content is not None else ""
+                "content": content
             }
 
             # Add optional name field
