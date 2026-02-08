@@ -258,6 +258,9 @@ async def chat_completions(request: ChatCompletionRequest):
                 detail="Only n=1 is supported. Multiple completions are not supported."
             )
         
+        logger.debug(f"Request tools: {request.tools}")
+        logger.debug(f"Request tool_choice: {request.tool_choice}")
+
         # Extract conversation ID (or generate one)
         conversation_id = request.user or str(uuid.uuid4())
         
@@ -307,7 +310,16 @@ async def chat_completions(request: ChatCompletionRequest):
             logger.debug("RAG: Disabled in configuration")
 
         # Handle streaming
-        if request.stream:
+        # Note: chatml-function-calling does not support streaming with auto tool_choice.
+        # Fall back to non-streaming when tools are present with auto/unset tool_choice.
+        use_streaming = request.stream
+        if use_streaming and request.tools and (not request.tool_choice or request.tool_choice == "auto"):
+            logger.info("Falling back to non-streaming: tools with auto tool_choice does not support streaming")
+            use_streaming = False
+
+        logger.debug(f"use_streaming={use_streaming}, has_tools={bool(request.tools)}, tool_choice={request.tool_choice}")
+
+        if use_streaming:
             return StreamingResponse(
                 stream_chat_completion(
                     request, conversation_id, user_message_text, request_model, messages_with_context
@@ -318,57 +330,83 @@ async def chat_completions(request: ChatCompletionRequest):
         # Generate non-streaming response with context
         # Run LLM inference in thread pool to avoid blocking event loop
         start_time = time.time()
-        response_text = await asyncio.to_thread(
+        response_dict = await asyncio.to_thread(
             llm_engine.generate,
             messages=messages_with_context,
             temperature=request.temperature,
             top_p=request.top_p,
-            max_tokens=request.max_tokens
+            max_tokens=request.max_tokens,
+            tools=request.tools,
+            tool_choice=request.tool_choice
         )
         generation_time = time.time() - start_time
 
-        # Infer sentiment (only uses USER message text, not system prompts or context)
-        # Run sentiment analysis in thread pool to avoid blocking
-        sentiment = await asyncio.to_thread(
-            sentiment_analyzer.analyze,
-            user_message=user_message_text,
-            assistant_response=response_text,
-            conversation_continuing=True
-        )
+        logger.debug(f"Raw LLM response_dict: {response_dict}")
 
-        # Calculate weight (only uses USER message text)
-        weight = await asyncio.to_thread(
-            sentiment_analyzer.calculate_weight,
-            user_message=user_message_text,
-            sentiment=sentiment,
-            conversation_continuing=True
-        )
+        # Extract response components
+        response_text = response_dict.get("content") or ""
+        tool_calls = response_dict.get("tool_calls")
+        finish_reason = response_dict.get("finish_reason", "stop")
 
-        # Check if golden example (only uses USER message text)
-        is_golden = await asyncio.to_thread(
-            sentiment_analyzer.is_golden_example,
-            user_message=user_message_text,
-            sentiment=sentiment,
-            weight=weight
-        )
+        logger.debug(f"Parsed response - finish_reason={finish_reason}, has_content={bool(response_text)}, tool_calls={tool_calls}")
 
-        # Store interaction in memory (only stores USER message text for analysis)
-        # Run embedding generation and DB storage in thread pool
-        await asyncio.to_thread(
-            memory_manager.store_interaction,
-            conversation_id=conversation_id,
-            user_message=user_message_text,
-            assistant_response=response_text,
-            sentiment=sentiment,
-            weight=weight,
-            is_golden=is_golden
+        # Only analyze sentiment and store if this is a final response (not a tool call)
+        if finish_reason == "stop" and response_text:
+            # Infer sentiment (only uses USER message text, not system prompts or context)
+            # Run sentiment analysis in thread pool to avoid blocking
+            sentiment = await asyncio.to_thread(
+                sentiment_analyzer.analyze,
+                user_message=user_message_text,
+                assistant_response=response_text,
+                conversation_continuing=True
+            )
+
+            # Calculate weight (only uses USER message text)
+            weight = await asyncio.to_thread(
+                sentiment_analyzer.calculate_weight,
+                user_message=user_message_text,
+                sentiment=sentiment,
+                conversation_continuing=True
+            )
+
+            # Check if golden example (only uses USER message text)
+            is_golden = await asyncio.to_thread(
+                sentiment_analyzer.is_golden_example,
+                user_message=user_message_text,
+                sentiment=sentiment,
+                weight=weight
+            )
+
+            # Store interaction in memory (only stores USER message text for analysis)
+            # Run embedding generation and DB storage in thread pool
+            await asyncio.to_thread(
+                memory_manager.store_interaction,
+                conversation_id=conversation_id,
+                user_message=user_message_text,
+                assistant_response=response_text,
+                sentiment=sentiment,
+                weight=weight,
+                is_golden=is_golden
+            )
+
+            logger.info(
+                f"Generated response in {generation_time:.2f}s "
+                f"(sentiment: {sentiment:.2f}, weight: {weight:.2f}, golden: {is_golden})"
+            )
+        else:
+            logger.info(
+                f"Generated tool call response in {generation_time:.2f}s "
+                f"(finish_reason: {finish_reason})"
+            )
+
+        # Build assistant message with tool_calls if present
+        assistant_message = ChatMessage(
+            role=MessageRole.ASSISTANT,
+            content=response_text if response_text else None,
+            tool_calls=tool_calls
         )
-        
-        logger.info(
-            f"Generated response in {generation_time:.2f}s "
-            f"(sentiment: {sentiment:.2f}, weight: {weight:.2f}, golden: {is_golden})"
-        )
-        
+        logger.debug(f"Built assistant_message: content={assistant_message.content!r}, tool_calls={assistant_message.tool_calls}")
+
         # Build OpenAI-compatible response
         completion_response = ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4()}",
@@ -378,20 +416,17 @@ async def chat_completions(request: ChatCompletionRequest):
             choices=[
                 ChatCompletionChoice(
                     index=0,
-                    message=ChatMessage(
-                        role=MessageRole.ASSISTANT,
-                        content=response_text
-                    ),
-                    finish_reason="stop"
+                    message=assistant_message,
+                    finish_reason=finish_reason
                 )
             ],
             usage=Usage(
-                prompt_tokens=len(user_message.content.split()),  # Rough estimate
-                completion_tokens=len(response_text.split()),
-                total_tokens=len(user_message.content.split()) + len(response_text.split())
+                prompt_tokens=len(user_message_text.split()) if user_message_text else 0,  # Rough estimate
+                completion_tokens=len(response_text.split()) if response_text else 0,
+                total_tokens=len(user_message_text.split()) + len(response_text.split()) if user_message_text and response_text else 0
             )
         )
-        
+
         return completion_response
         
     except HTTPException:
@@ -430,12 +465,13 @@ async def stream_chat_completion(
         # Stream tokens with context
         # Wrap the synchronous generator to avoid blocking event loop
         full_response = ""
+        finish_reason = "stop"
 
         # Sentinel value for end of stream
         _STREAM_END = object()
 
-        # Create a wrapper that safely gets the next token without raising StopIteration into a future
-        def get_next_token(generator):
+        # Create a wrapper that safely gets the next chunk without raising StopIteration into a future
+        def get_next_chunk(generator):
             try:
                 return next(generator)
             except StopIteration:
@@ -447,81 +483,98 @@ async def stream_chat_completion(
                 messages=messages_with_context,
                 temperature=request.temperature,
                 top_p=request.top_p,
-                max_tokens=request.max_tokens
+                max_tokens=request.max_tokens,
+                tools=request.tools,
+                tool_choice=request.tool_choice
             )
 
         # Get the generator in a thread pool
         stream_gen = await asyncio.to_thread(get_stream_generator)
 
-        # Stream tokens (each next() call is wrapped to avoid blocking)
+        # Stream chunks (each next() call is wrapped to avoid blocking)
         while True:
-            token = await asyncio.to_thread(get_next_token, stream_gen)
+            chunk = await asyncio.to_thread(get_next_chunk, stream_gen)
 
-            if token is _STREAM_END:
+            if chunk is _STREAM_END:
                 break
 
-            full_response += token
+            # Extract delta from chunk
+            if 'choices' in chunk and len(chunk['choices']) > 0:
+                choice = chunk['choices'][0]
+                delta = choice.get('delta', {})
 
-            token_chunk = {
+                # Accumulate content if present
+                if 'content' in delta and delta['content']:
+                    full_response += delta['content']
+
+                # Track finish_reason if present
+                if choice.get('finish_reason'):
+                    finish_reason = choice['finish_reason']
+
+                # Forward the chunk to client (preserving tool_calls if any)
+                chunk_data = {
+                    'id': completion_id,
+                    'object': 'chat.completion.chunk',
+                    'created': created,
+                    'model': model_id,
+                    'choices': [{
+                        'index': 0,
+                        'delta': delta,
+                        'finish_reason': choice.get('finish_reason')
+                    }]
+                }
+                yield f"data: {json.dumps(chunk_data)}\n\n"
+
+        # Send final chunk if not already sent
+        if not finish_reason:
+            final_chunk = {
                 'id': completion_id,
                 'object': 'chat.completion.chunk',
                 'created': created,
                 'model': model_id,
                 'choices': [{
                     'index': 0,
-                    'delta': {'content': token},
-                    'finish_reason': None
+                    'delta': {},
+                    'finish_reason': 'stop'
                 }]
             }
-            yield f"data: {json.dumps(token_chunk)}\n\n"
-        
-        # Send final chunk
-        final_chunk = {
-            'id': completion_id,
-            'object': 'chat.completion.chunk',
-            'created': created,
-            'model': model_id,
-            'choices': [{
-                'index': 0,
-                'delta': {},
-                'finish_reason': 'stop'
-            }]
-        }
-        yield f"data: {json.dumps(final_chunk)}\n\n"
-        
+            yield f"data: {json.dumps(final_chunk)}\n\n"
+            finish_reason = 'stop'
+
         yield "data: [DONE]\n\n"
 
-        # Store interaction after streaming completes
-        # Run in thread pool to avoid blocking event loop
-        sentiment = await asyncio.to_thread(
-            sentiment_analyzer.analyze,
-            user_message=user_message,
-            assistant_response=full_response,
-            conversation_continuing=True
-        )
+        # Only store interaction if this was a final response (not a tool call)
+        if finish_reason == "stop" and full_response:
+            # Run in thread pool to avoid blocking event loop
+            sentiment = await asyncio.to_thread(
+                sentiment_analyzer.analyze,
+                user_message=user_message,
+                assistant_response=full_response,
+                conversation_continuing=True
+            )
 
-        weight = await asyncio.to_thread(
-            sentiment_analyzer.calculate_weight,
-            user_message=user_message,
-            sentiment=sentiment
-        )
+            weight = await asyncio.to_thread(
+                sentiment_analyzer.calculate_weight,
+                user_message=user_message,
+                sentiment=sentiment
+            )
 
-        is_golden = await asyncio.to_thread(
-            sentiment_analyzer.is_golden_example,
-            user_message=user_message,
-            sentiment=sentiment,
-            weight=weight
-        )
+            is_golden = await asyncio.to_thread(
+                sentiment_analyzer.is_golden_example,
+                user_message=user_message,
+                sentiment=sentiment,
+                weight=weight
+            )
 
-        await asyncio.to_thread(
-            memory_manager.store_interaction,
-            conversation_id=conversation_id,
-            user_message=user_message,
-            assistant_response=full_response,
-            sentiment=sentiment,
-            weight=weight,
-            is_golden=is_golden
-        )
+            await asyncio.to_thread(
+                memory_manager.store_interaction,
+                conversation_id=conversation_id,
+                user_message=user_message,
+                assistant_response=full_response,
+                sentiment=sentiment,
+                weight=weight,
+                is_golden=is_golden
+            )
         
     except Exception as e:
         logger.error(f"Error in streaming: {e}", exc_info=True)

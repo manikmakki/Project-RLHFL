@@ -26,17 +26,54 @@ class MessageRole(str, Enum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
+    TOOL = "tool"
+
+
+# Tool/Function calling models
+
+class ToolFunction(BaseModel):
+    """Function definition for a tool."""
+    name: str = Field(..., description="The name of the function to be called")
+    description: str = Field(..., description="A description of what the function does")
+    parameters: Dict[str, Any] = Field(
+        ...,
+        description="The parameters the function accepts, described as a JSON Schema object"
+    )
+
+
+class Tool(BaseModel):
+    """OpenAI-compatible tool definition."""
+    type: Literal["function"] = "function"
+    function: ToolFunction
+
+
+class ToolCall(BaseModel):
+    """A tool call made by the model."""
+    id: str = Field(..., description="Unique identifier for this tool call")
+    type: Literal["function"] = "function"
+    function: Dict[str, Any] = Field(
+        ...,
+        description="The function to call, with 'name' and 'arguments' (JSON string)"
+    )
 
 
 class ChatMessage(BaseModel):
     role: MessageRole
-    content: Union[str, List, Dict, Any] = Field(
-        ...,
-        description="Message content - string or array of content blocks"
+    content: Union[str, List, Dict, Any, None] = Field(
+        None,
+        description="Message content - string or array of content blocks. Can be null when tool_calls is present."
     )
     name: Optional[str] = Field(
         None,
         description="Optional name of the author of this message"
+    )
+    tool_calls: Optional[List[ToolCall]] = Field(
+        None,
+        description="Tool calls made by the assistant (only for assistant role)"
+    )
+    tool_call_id: Optional[str] = Field(
+        None,
+        description="ID of the tool call this message is responding to (only for tool role)"
     )
 
     def get_text_content(self) -> str:

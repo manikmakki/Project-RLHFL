@@ -25,7 +25,7 @@ from pydantic_settings import BaseSettings
 
 class ModelConfig(BaseModel):
     model_id: str = "mistral-7b-instruct"  # Model identifier for API responses
-    base_model_path: str = "/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
+    base_model_path: str = "/models/mistral-7b-instruct-v0.3.Q4_K_M.gguf"
     base_model_hf_path: str = "/models/mistral-7b-instruct-base"
     context_length: int = 8192
     temperature: float = 0.7
@@ -84,7 +84,7 @@ class SystemConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_path: str = os.getenv("MODEL_PATH", "/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf")
+    model_path: str = os.getenv("MODEL_PATH", "/models/mistral-7b-instruct-v0.3.Q4_K_M.gguf")
     base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/mistral-7b-instruct-base")
     config_path: str = os.getenv("CONFIG_PATH", "/config/system_config.yaml")
     data_path: str = os.getenv("DATA_PATH", "/data")

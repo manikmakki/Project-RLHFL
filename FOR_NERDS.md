@@ -433,7 +433,7 @@ graph LR
 | Layer | Technology | Version | Why |
 |-------|-----------|---------|-----|
 | Inference engine | llama.cpp | via llama-cpp-python | Fast GGUF inference with CUDA support |
-| Base model | Mistral 7B Instruct v0.2 | Q4_K_M quantization | Best performance/size ratio at 7B scale |
+| Base model | Mistral 7B Instruct v0.3 | Q4_K_M quantization | Best performance/size ratio at 7B scale |
 | Web framework | FastAPI | 0.104.1 | Async, OpenAPI docs, Pydantic validation |
 | Vector database | ChromaDB | 0.4.18 | Embedded, no server, persistent, cosine search |
 | Embeddings | sentence-transformers | 2.3.1 | `all-MiniLM-L6-v2`, fast 384-dim embeddings |

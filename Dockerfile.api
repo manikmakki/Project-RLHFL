@@ -27,6 +27,8 @@ RUN pip install --no-cache-dir "numpy>=1.24,<2.0"
 # Set CUDA paths to help CMake find CUDA toolkit
 ENV CUDA_PATH=/usr/local/cuda
 ENV CUDACXX=/usr/local/cuda/bin/nvcc
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
+ENV PATH=/usr/local/cuda-11.8/compat/:$PATH
 # FORCE_CMAKE=1 ensures rebuild, CMAKE_ARGS enables CUDA with compute capability 6.1
 ENV CMAKE_ARGS="-DLLAMA_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=61"
 ENV FORCE_CMAKE=1
@@ -42,7 +44,7 @@ ENV FORCE_CMAKE=1
 #     rm -rf /tmp/llama-cpp-python
 
 RUN pip install llama-cpp-python \
-  --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu122
+  --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu118
 
 # Install Python packages with compatible versions
 # Include numpy constraint to prevent upgrades by chromadb/sentence-transformers
