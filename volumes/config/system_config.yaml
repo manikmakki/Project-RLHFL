@@ -4,7 +4,7 @@ memory:
   golden_examples_count: 20
   max_memory_age_days: 90
   similarity_threshold: 0.7
-  rag_enabled: false
+  rag_enabled: true
   rag_top_k: 5
   # Memory management settings
   max_db_size_gb: 10                # Maximum database size before auto-cleanup

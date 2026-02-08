@@ -277,7 +277,12 @@ async def chat_completions(request: ChatCompletionRequest):
         user_message_text = user_message.get_text_content()
         messages_with_context = list(request.messages)
 
-        if config.memory.rag_enabled:
+        if config.memory.rag_enabled and not request.tools:
+            # Skip RAG when tools are present — the Mistral template merges
+            # the system message into the last [INST] block, and lengthy RAG
+            # context between [AVAILABLE_TOOLS] and the user query causes
+            # the model to ignore tools and answer directly instead.
+
             # Run embedding generation in thread pool to avoid blocking event loop
             relevant_context = await asyncio.to_thread(
                 memory_manager.retrieve_relevant_context,
@@ -306,6 +311,8 @@ async def chat_completions(request: ChatCompletionRequest):
                 logger.info(f"RAG: Injected {len(relevant_context)} context items into prompt")
             else:
                 logger.debug("RAG: No relevant context found for this query")
+        elif request.tools:
+            logger.debug("RAG: Skipped — tools present in request")
         else:
             logger.debug("RAG: Disabled in configuration")
 
