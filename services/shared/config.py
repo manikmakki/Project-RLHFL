@@ -39,11 +39,12 @@ class ModelConfig(BaseModel):
     use_mlock: bool = True
     checkpoint_poll_interval_seconds: int = 30
     max_old_gguf_files: int = 2
+    response_format: str = "openai"  # "openai" or "openclaw"
 
 
 class TrainingConfig(BaseModel):
     min_interactions_threshold: int = 50
-    inactivity_threshold_hours: int = 24
+    inactivity_threshold_hours: int = 8
     max_days_between_training: int = 7
     lora_rank: int = 16
     lora_alpha: int = 32

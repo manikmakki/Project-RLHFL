@@ -379,20 +379,17 @@ async def chat_completions(request: ChatCompletionRequest):
             "model": request_model,
             "stream": request.stream,
             "has_tools": bool(request.tools),
+            "tools": request.tools,
+            "tool_choice": request.tool_choice,
             "messages": [msg.model_dump(exclude_none=True) for msg in messages_with_context],
         })
 
         # Handle streaming
         # Note: chatml-function-calling does not support streaming with auto tool_choice.
-        # Fall back to non-streaming when tools are present with auto/unset tool_choice.
-        use_streaming = request.stream
-        if use_streaming and request.tools and (not request.tool_choice or request.tool_choice == "auto"):
-            logger.info("Falling back to non-streaming: tools with auto tool_choice does not support streaming")
-            use_streaming = False
+        # When client requests stream=true, always return SSE format (even if we generate non-streaming internally)
+        logger.debug(f"stream={request.stream}, has_tools={bool(request.tools)}, tool_choice={request.tool_choice}")
 
-        logger.debug(f"use_streaming={use_streaming}, has_tools={bool(request.tools)}, tool_choice={request.tool_choice}")
-
-        if use_streaming:
+        if request.stream:
             return StreamingResponse(
                 stream_chat_completion(
                     request, conversation_id, user_message_text, request_model, messages_with_context, prev_assistant_text
@@ -507,7 +504,17 @@ async def chat_completions(request: ChatCompletionRequest):
             )
         )
 
-        return completion_response
+        # Return in configured response format
+        if config.model.response_format == "openclaw":
+            # OpenClaw native: return message directly with content as array-of-parts
+            msg = assistant_message.model_dump(exclude_none=True)
+            if isinstance(msg.get("content"), str):
+                msg["content"] = [{"type": "text", "text": msg["content"]}]
+            msg["timestamp"] = int(time.time() * 1000)
+            logger.info(f"Returning OpenClaw format: {json.dumps(msg, indent=2)}")
+            return JSONResponse(content=msg)
+
+        return JSONResponse(content=completion_response.model_dump(exclude_none=True))
         
     except HTTPException:
         raise
@@ -529,38 +536,12 @@ async def stream_chat_completion(
         completion_id = f"chatcmpl-{uuid.uuid4()}"
         created = int(time.time())
 
-        # Send initial chunk with role
-        initial_chunk = {
-            'id': completion_id,
-            'object': 'chat.completion.chunk',
-            'created': created,
-            'model': model_id,
-            'choices': [{
-                'index': 0,
-                'delta': {'role': 'assistant', 'content': ''},
-                'finish_reason': None
-            }]
-        }
-        yield f"data: {json.dumps(initial_chunk)}\n\n"
-
-        # Stream tokens with context
-        # Wrap the synchronous generator to avoid blocking event loop
-        full_response = ""
-        finish_reason = "stop"
-
-        # Sentinel value for end of stream
-        _STREAM_END = object()
-
-        # Create a wrapper that safely gets the next chunk without raising StopIteration into a future
-        def get_next_chunk(generator):
-            try:
-                return next(generator)
-            except StopIteration:
-                return _STREAM_END
-
-        # Create the stream generator
-        def get_stream_generator():
-            return llm_engine.generate_stream(
+        # When tools are present, generate complete response then stream as SSE
+        # (llm_engine.generate_stream doesn't support tools properly)
+        if request.tools:
+            logger.debug("Streaming with tools: using generate() then converting to SSE")
+            response_dict = await asyncio.to_thread(
+                llm_engine.generate,
                 messages=messages_with_context,
                 temperature=request.temperature,
                 top_p=request.top_p,
@@ -569,42 +550,133 @@ async def stream_chat_completion(
                 tool_choice=request.tool_choice
             )
 
-        # Get the generator in a thread pool
-        stream_gen = await asyncio.to_thread(get_stream_generator)
+            full_response = response_dict.get("content") or ""
+            tool_calls = response_dict.get("tool_calls")
+            finish_reason = response_dict.get("finish_reason", "stop")
 
-        # Stream chunks (each next() call is wrapped to avoid blocking)
-        while True:
-            chunk = await asyncio.to_thread(get_next_chunk, stream_gen)
+            # Send initial chunk with role
+            initial_chunk = {
+                'id': completion_id,
+                'object': 'chat.completion.chunk',
+                'created': created,
+                'model': model_id,
+                'choices': [{
+                    'index': 0,
+                    'delta': {'role': 'assistant'},
+                    'finish_reason': None
+                }]
+            }
+            yield f"data: {json.dumps(initial_chunk)}\n\n"
 
-            if chunk is _STREAM_END:
-                break
-
-            # Extract delta from chunk
-            if 'choices' in chunk and len(chunk['choices']) > 0:
-                choice = chunk['choices'][0]
-                delta = choice.get('delta', {})
-
-                # Accumulate content if present
-                if 'content' in delta and delta['content']:
-                    full_response += delta['content']
-
-                # Track finish_reason if present
-                if choice.get('finish_reason'):
-                    finish_reason = choice['finish_reason']
-
-                # Forward the chunk to client (preserving tool_calls if any)
-                chunk_data = {
+            # Send content chunk
+            if full_response:
+                content_chunk = {
                     'id': completion_id,
                     'object': 'chat.completion.chunk',
                     'created': created,
                     'model': model_id,
                     'choices': [{
                         'index': 0,
-                        'delta': delta,
-                        'finish_reason': choice.get('finish_reason')
+                        'delta': {'content': full_response},
+                        'finish_reason': None
                     }]
                 }
-                yield f"data: {json.dumps(chunk_data)}\n\n"
+                yield f"data: {json.dumps(content_chunk)}\n\n"
+
+            # Send tool_calls chunk if present
+            if tool_calls:
+                tool_chunk = {
+                    'id': completion_id,
+                    'object': 'chat.completion.chunk',
+                    'created': created,
+                    'model': model_id,
+                    'choices': [{
+                        'index': 0,
+                        'delta': {'tool_calls': tool_calls},
+                        'finish_reason': None
+                    }]
+                }
+                yield f"data: {json.dumps(tool_chunk)}\n\n"
+
+            # Send final chunk for tools path
+            final_chunk = {
+                'id': completion_id,
+                'object': 'chat.completion.chunk',
+                'created': created,
+                'model': model_id,
+                'choices': [{
+                    'index': 0,
+                    'delta': {},
+                    'finish_reason': finish_reason
+                }]
+            }
+            yield f"data: {json.dumps(final_chunk)}\n\n"
+        else:
+            # Normal streaming without tools
+            # Send initial chunk with role
+            initial_chunk = {
+                'id': completion_id,
+                'object': 'chat.completion.chunk',
+                'created': created,
+                'model': model_id,
+                'choices': [{
+                    'index': 0,
+                    'delta': {'role': 'assistant', 'content': ''},
+                    'finish_reason': None
+                }]
+            }
+            yield f"data: {json.dumps(initial_chunk)}\n\n"
+
+            full_response = ""
+            finish_reason = "stop"
+            _STREAM_END = object()
+
+            def get_next_chunk(generator):
+                try:
+                    return next(generator)
+                except StopIteration:
+                    return _STREAM_END
+
+            def get_stream_generator():
+                return llm_engine.generate_stream(
+                    messages=messages_with_context,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    max_tokens=request.max_tokens,
+                    tools=None,
+                    tool_choice=None
+                )
+
+            stream_gen = await asyncio.to_thread(get_stream_generator)
+
+            while True:
+                chunk = await asyncio.to_thread(get_next_chunk, stream_gen)
+
+                if chunk is _STREAM_END:
+                    break
+
+                if 'choices' in chunk and len(chunk['choices']) > 0:
+                    choice = chunk['choices'][0]
+                    delta = choice.get('delta', {})
+
+                    if 'content' in delta and delta['content']:
+                        full_response += delta['content']
+
+                    if choice.get('finish_reason'):
+                        finish_reason = choice['finish_reason']
+
+                    chunk_data = {
+                        'id': completion_id,
+                        'object': 'chat.completion.chunk',
+                        'created': created,
+                        'model': model_id,
+                        'choices': [{
+                            'index': 0,
+                            'delta': delta,
+                            'finish_reason': choice.get('finish_reason')
+                        }]
+                    }
+                    yield f"data: {json.dumps(chunk_data)}\n\n"
 
         # Send final chunk if not already sent
         if not finish_reason:
