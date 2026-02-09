@@ -28,13 +28,13 @@ class TrainingScheduler:
             logger.info("Training trigger: User request")
             return True, "user_request"
         
-        # Trigger 2: Minimum interaction threshold met
-        if stats.new_interactions_since_last_training >= self.min_interactions:
-            logger.info(
-                f"Training trigger: Interaction threshold "
-                f"({stats.new_interactions_since_last_training} >= {self.min_interactions})"
-            )
-            return True, "interaction_threshold"
+        # # Trigger 2: Minimum interaction threshold met
+        # if stats.new_interactions_since_last_training >= self.min_interactions:
+        #     logger.info(
+        #         f"Training trigger: Interaction threshold "
+        #         f"({stats.new_interactions_since_last_training} >= {self.min_interactions})"
+        #     )
+        #     return True, "interaction_threshold"
         
         # Trigger 3: Inactivity period with some new data
         # (consolidate learnings during quiet periods)
@@ -47,14 +47,14 @@ class TrainingScheduler:
                 )
                 return True, "inactivity_consolidation"
         
-        # Trigger 4: Maximum time elapsed (prevent staleness)
-        if stats.days_since_last_training >= self.max_days_between:
-            if stats.new_interactions_since_last_training > 0:
-                logger.info(
-                    f"Training trigger: Maximum time elapsed "
-                    f"({stats.days_since_last_training:.1f} days >= {self.max_days_between} days)"
-                )
-                return True, "time_threshold"
+        # # Trigger 4: Maximum time elapsed (prevent staleness)
+        # if stats.days_since_last_training >= self.max_days_between:
+        #     if stats.new_interactions_since_last_training > 0:
+        #         logger.info(
+        #             f"Training trigger: Maximum time elapsed "
+        #             f"({stats.days_since_last_training:.1f} days >= {self.max_days_between} days)"
+        #         )
+        #         return True, "time_threshold"
         
         # No trigger conditions met
         return False, "none"

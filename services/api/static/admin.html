@@ -1145,10 +1145,21 @@
                 const jsonStr = JSON.stringify(item, null, 2);
                 const messages = item.messages || [];
                 const msgCount = messages.length;
+
+                // Build tools info
+                let toolsInfo = 'no-tools';
+                if (item.tools && item.tools.length > 0) {
+                    toolsInfo = `${item.tools.length} tool(s)`;
+                    if (item.tool_choice) {
+                        const choice = typeof item.tool_choice === 'string' ? item.tool_choice : item.tool_choice.type || 'auto';
+                        toolsInfo += ` [${choice}]`;
+                    }
+                }
+
                 const meta = [
                     item.model || 'N/A',
                     item.stream ? 'stream' : 'sync',
-                    item.has_tools ? 'tools' : 'no-tools'
+                    toolsInfo
                 ].join(' | ');
 
                 // Build message previews

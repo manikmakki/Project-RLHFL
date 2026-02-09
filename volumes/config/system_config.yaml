@@ -15,7 +15,8 @@ memory:
 model:
   base_model_hf_path: /models/mistral-7b-instruct-base
   base_model_path: /models/mistral-7b-instruct-v0.3.Q4_K_M.gguf
-  context_length: 16384
+  response_format: openclaw # Options: openai (default), openclaw
+  context_length: 32768
   max_tokens: 1024
   model_id: mistral-7b-instruct
   n_batch: 512
@@ -34,7 +35,7 @@ sentiment:
 training:
   batch_size: 2
   gradient_accumulation_steps: 4
-  inactivity_threshold_hours: 24
+  inactivity_threshold_hours: 8
   learning_rate: 5.0e-05
   lora_alpha: 32
   lora_rank: 16
