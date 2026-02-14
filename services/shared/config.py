@@ -24,9 +24,9 @@ from pydantic_settings import BaseSettings
 
 
 class ModelConfig(BaseModel):
-    model_id: str = "mistral-7b-instruct"  # Model identifier for API responses
-    base_model_path: str = "/models/mistral-7b-instruct-v0.3.Q4_K_M.gguf"
-    base_model_hf_path: str = "/models/mistral-7b-instruct-base"
+    model_id: str = "gpt-oss-20b"  # Model identifier for API responses
+    base_model_path: str = "/models/jinx-gpt-oss-20b-Q4_K_M.gguf"
+    base_model_hf_path: str = "/models/gpt-oss-20b-base"
     context_length: int = 8192
     temperature: float = 0.7
     top_p: float = 0.9
@@ -91,12 +91,12 @@ class SystemConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_path: str = os.getenv("MODEL_PATH", "/models/mistral-7b-instruct-v0.3.Q4_K_M.gguf")
-    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/mistral-7b-instruct-base")
+    model_path: str = os.getenv("MODEL_PATH", "/models/jinx-gpt-oss-20b-Q4_K_M.gguf")
+    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/jinx-gpt-oss-20b-base")
     config_path: str = os.getenv("CONFIG_PATH", "/config/system_config.yaml")
     data_path: str = os.getenv("DATA_PATH", "/data")
     checkpoints_path: str = os.getenv("CHECKPOINTS_PATH", "/checkpoints")
-    
+
     cuda_visible_devices: str = os.getenv("CUDA_VISIBLE_DEVICES", "0")
     log_level: str = os.getenv("LOG_LEVEL", "DEBUG")
 

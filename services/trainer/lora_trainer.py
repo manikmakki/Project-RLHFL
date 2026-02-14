@@ -2,13 +2,13 @@
 Project RLHFL - LoRA Trainer
 
 This module handles the actual training of LoRA (Low-Rank Adaptation) adapters
-for the base language model. It uses QLoRA (Quantized LoRA) with 4-bit
-quantization to enable training on consumer GPUs with 16GB VRAM.
+for the GPT-OSS base language model. It uses QLoRA (Quantized LoRA) with 4-bit
+quantization to enable training on GPUs with 14GB+ VRAM.
 
 The trainer:
-- Loads the base model with 4-bit quantization
-- Applies LoRA configuration to attention layers
-- Trains on weighted datasets with supervision
+- Loads the GPT-OSS base model with 4-bit quantization
+- Applies LoRA configuration to attention and MLP projection layers
+- Trains on weighted datasets with supervision using Harmony format
 - Saves lightweight adapter weights (~10-20MB)
 - Supports merging adapters back into the base model
 
@@ -53,11 +53,12 @@ class LoRATrainer:
         self.config = config
         self.base_model_path = base_model_path
         
-        # LoRA configuration
+        # LoRA configuration for GPT-OSS architecture
+        # Targets attention (q/k/v/o) and MLP projections (gate/up/down)
         self.lora_config = LoraConfig(
             r=config.training.lora_rank,
             lora_alpha=config.training.lora_alpha,
-            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
             lora_dropout=0.05,
             bias="none",
             task_type="CAUSAL_LM"
@@ -225,12 +226,13 @@ class LoRATrainer:
         """Prepare dataset for training."""
         
         def format_example(example):
-            """Format a single example for training and record prompt length."""
+            """Format a single example for training using GPT-OSS Harmony format."""
             prompt = example['prompt']
             completion = example['completion']
 
-            # Tokenize prompt alone to get prompt length (including INST markers)
-            prompt_text = f"[INST] {prompt} [/INST]"
+            # Use Harmony format for GPT-OSS training
+            # Tokenize prompt alone to get prompt length
+            prompt_text = f"<|start|>user<|message|>{prompt}<|end|><|start|>assistant<|channel|>final<|message|>"
             prompt_tokens = tokenizer(
                 prompt_text,
                 truncation=True,
@@ -240,8 +242,8 @@ class LoRATrainer:
             )
             prompt_len = len(prompt_tokens["input_ids"])
 
-            # Full example (prompt + completion)
-            full_text = f"[INST] {prompt} [/INST] {completion}"
+            # Full example (prompt + completion with harmony format)
+            full_text = f"<|start|>user<|message|>{prompt}<|end|><|start|>assistant<|channel|>final<|message|>{completion}<|return|>"
             tokens = tokenizer(
                 full_text,
                 truncation=True,
