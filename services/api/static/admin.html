@@ -584,7 +584,7 @@
         <div id="rules-tab" class="tab-content">
             <div class="card">
                 <h2>📝 Prompt Interceptor Rules</h2>
-                <p style="color:#666;font-size:13px;margin-bottom:12px;">Regex search-and-replace rules applied to incoming messages before RAG and LLM processing.</p>
+                <p style="color:#666;font-size:13px;margin-bottom:12px;">Regex search-and-replace rules applied to incoming messages before LLM processing.</p>
                 <button class="primary" onclick="showRuleForm()">+ Add Rule</button>
                 <button onclick="loadPromptRules()" style="margin-left:6px;">🔄 Refresh</button>
                 <div id="rule-form-container" style="display:none;margin-top:15px;">
@@ -1066,9 +1066,35 @@
             document.getElementById('memories-pagination').innerHTML = paginationHtml;
         }
 
-        function toggleExpand(id) {
-            document.getElementById(`user-${id}`).classList.toggle('collapsed');
-            document.getElementById(`assistant-${id}`).classList.toggle('collapsed');
+        async function toggleExpand(id) {
+            const userDiv = document.getElementById(`user-${id}`);
+            const assistantDiv = document.getElementById(`assistant-${id}`);
+
+            // Check if we need to fetch full content
+            if (!userDiv.dataset.fullLoaded) {
+                try {
+                    const response = await fetch(`/admin/api/memories/${id}`);
+                    if (!response.ok) throw new Error('Failed to fetch full content');
+
+                    const data = await response.json();
+
+                    // Update with full content
+                    userDiv.innerHTML = `<strong>User:</strong> ${escapeHtml(data.user_message)}`;
+                    assistantDiv.innerHTML = `<strong>Assistant:</strong> ${escapeHtml(data.assistant_response)}`;
+
+                    // Mark as loaded
+                    userDiv.dataset.fullLoaded = 'true';
+                    assistantDiv.dataset.fullLoaded = 'true';
+                } catch (error) {
+                    console.error('Error fetching full content:', error);
+                    alert('Failed to load full content');
+                    return;
+                }
+            }
+
+            // Toggle visibility
+            userDiv.classList.toggle('collapsed');
+            assistantDiv.classList.toggle('collapsed');
         }
 
         async function toggleGolden(id, currentGolden) {
@@ -1139,7 +1165,7 @@
                 return;
             }
 
-            let html = '<p style="margin-bottom: 15px;"><strong>Showing ' + data.total + ' most recent API requests (post-processed: after interception + RAG)</strong></p>';
+            let html = '<p style="margin-bottom: 15px;"><strong>Showing ' + data.total + ' most recent API requests (post-processed: after interception)</strong></p>';
 
             data.items.forEach((item, index) => {
                 const jsonStr = JSON.stringify(item, null, 2);

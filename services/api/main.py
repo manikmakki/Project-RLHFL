@@ -947,8 +947,9 @@ async def ollama_chat(request: Request):
         # Forward request to external Ollama and stream response
         async def transparent_proxy_stream():
             """Stream response from external Ollama unchanged."""
-            accumulated_content = ""
+            accumulated_response = ""
             done = False
+            start_time = time.time()
 
             try:
                 async with llm_proxy.client.stream(
@@ -968,33 +969,57 @@ async def ollama_chat(request: Request):
                         if line.strip():
                             try:
                                 chunk = json.loads(line)
+
+                                # Accumulate content as it streams
+                                if chunk.get("message", {}).get("content"):
+                                    accumulated_response += chunk["message"]["content"]
+
                                 if chunk.get("done"):
                                     done = True
-                                    if chunk.get("message", {}).get("content"):
-                                        accumulated_content = chunk["message"]["content"]
                             except json.JSONDecodeError:
                                 pass
 
+                # Log to Admin UI for debugging
+                elapsed_time = time.time() - start_time
+                recent_api_requests.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "endpoint": "/api/chat",
+                    "model": model_name,
+                    "messages_count": len(messages),
+                    "response_length": len(accumulated_response),
+                    "duration_seconds": round(elapsed_time, 2),
+                    "whitelisted": should_store_interaction(model_name, config)
+                })
+
                 # Background storage (fire-and-forget) after stream completes
-                if done and messages and accumulated_content:
+                if done and messages:
                     # Check model whitelist
                     should_store = should_store_interaction(model_name, config)
 
                     if should_store:
-                        # Extract user message (last user message)
-                        user_message = next(
-                            (msg.get("content", "") for msg in reversed(messages)
-                             if msg.get("role") == "user"),
-                            None
-                        )
+                        # Extract current user message (n) - their question/reaction
+                        # Filter out system prompts masquerading as user messages (start with ###)
+                        user_message = None
+                        for msg in reversed(messages):
+                            if msg.get("role") == "user":
+                                content = msg.get("content", "").strip()
+                                # Skip system prompts (start with ###)
+                                if not content.startswith("###"):
+                                    user_message = content
+                                    break
+                                else:
+                                    logger.debug(f"Filtered system prompt from storage: {content[:100]}...")
 
-                        # Extract previous assistant message (n-1 pairing)
+                        # Extract previous assistant message (n-1) - what they're reacting to
+                        # This is the RLHF pairing: user's reaction to previous assistant response
                         prev_assistant_message = next(
                             (msg.get("content", "") for msg in reversed(messages)
                              if msg.get("role") == "assistant"),
                             None
                         )
 
+                        # Store ONLY when we have proper N:N-1 pair (user reaction + previous assistant)
+                        # This captures the user's sentiment about the previous assistant response
                         if user_message and prev_assistant_message:
                             # Create background task (fire-and-forget)
                             task = asyncio.create_task(
@@ -1008,9 +1033,14 @@ async def ollama_chat(request: Request):
                             )
                             background_tasks.add(task)
                             task.add_done_callback(background_tasks.discard)
-                            logger.debug(f"Stored interaction for model '{model_name}'")
+                            logger.debug(
+                                f"Stored N:N-1 pair for model '{model_name}' "
+                                f"(user_len={len(user_message)}, assistant_len={len(prev_assistant_message)})"
+                            )
+                        elif user_message and not prev_assistant_message:
+                            logger.debug(f"Skipped storage - first turn, no previous assistant (N:N-1 required)")
                         else:
-                            logger.debug(f"Skipped storage - missing user or assistant message")
+                            logger.debug(f"Skipped storage - no valid user message (likely system prompt)")
                     else:
                         logger.debug(f"Model '{model_name}' not whitelisted - skipping storage")
 
@@ -1046,6 +1076,8 @@ async def ollama_proxy_catchall(request: Request, path: str):
         raise HTTPException(status_code=503, detail="Proxy not configured")
 
     try:
+        start_time = time.time()
+
         # Build external Ollama endpoint URL
         endpoint_url = f"{llm_proxy.base_url.rstrip('/')}/api/{path}"
 
@@ -1066,6 +1098,16 @@ async def ollama_proxy_catchall(request: Request, path: str):
             headers=forward_headers,
             params=request.query_params
         )
+
+        # Log to Admin UI for debugging
+        elapsed_time = time.time() - start_time
+        recent_api_requests.append({
+            "timestamp": datetime.now().isoformat(),
+            "endpoint": f"/api/{path}",
+            "method": request.method,
+            "status_code": response.status_code,
+            "duration_seconds": round(elapsed_time, 2)
+        })
 
         # Return response with same status code and content type
         return JSONResponse(
