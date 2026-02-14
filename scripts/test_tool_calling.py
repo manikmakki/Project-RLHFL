@@ -20,7 +20,7 @@ def test_backward_compatibility():
     response = requests.post(
         f"{BASE_URL}/v1/chat/completions",
         json={
-            "model": "mistral-7b-instruct",
+            "model": "jinx-gpt-oss-20b",
             "messages": [
                 {"role": "user", "content": "Hello! How are you?"}
             ]
@@ -52,7 +52,7 @@ def test_tool_calling():
     response = requests.post(
         f"{BASE_URL}/v1/chat/completions",
         json={
-            "model": "mistral-7b-instruct",
+            "model": "jinx-gpt-oss-20b",
             "messages": [
                 {"role": "user", "content": "What's the weather like in San Francisco?"}
             ],
@@ -125,7 +125,7 @@ def test_tool_result_handling(tool_calls):
     response = requests.post(
         f"{BASE_URL}/v1/chat/completions",
         json={
-            "model": "mistral-7b-instruct",
+            "model": "jinx-gpt-oss-20b",
             "messages": [
                 {"role": "user", "content": "What's the weather like in San Francisco?"},
                 {

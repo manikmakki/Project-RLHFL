@@ -4,7 +4,7 @@ memory:
   golden_examples_count: 20
   max_memory_age_days: 90
   similarity_threshold: 0.7
-  rag_enabled: true
+  rag_enabled: false
   rag_top_k: 5
   # Memory management settings
   max_db_size_gb: 10                # Maximum database size before auto-cleanup
@@ -13,12 +13,12 @@ memory:
   min_weight_threshold: 0.5         # Remove entries below this weight during pre-training cleanup
   top_n_weighted_interactions: 30   # Top N non-golden interactions by weight to include in training
 model:
-  base_model_hf_path: /models/mistral-7b-instruct-base
-  base_model_path: /models/mistral-7b-instruct-v0.3.Q4_K_M.gguf
-  response_format: openclaw # Options: openai (default), openclaw
+  base_model_hf_path: /models/jinx-gpt-oss-20b-base
+  base_model_path: /models/jinx-gpt-oss-20b-Q4_K_M.gguf
+  response_format: openai # Options: openai (default), openclaw
   context_length: 32768
   max_tokens: 1024
-  model_id: mistral-7b-instruct
+  model_id: jinx-gpt-oss-20b
   n_batch: 512
   n_gpu_layers: -1
   n_threads: 48

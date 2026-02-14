@@ -13,82 +13,116 @@ import jinja2
 
 logger = logging.getLogger(__name__)
 
-# Mistral Instruct v0.3 chat template with native tool calling support.
-# This replaces chatml-function-calling which uses the wrong token format for Mistral.
-MISTRAL_V3_CHAT_TEMPLATE = (
-    "{%- if messages[0][\"role\"] == \"system\" %}"
-    "{%- set system_message = messages[0][\"content\"] %}"
-    "{%- set loop_messages = messages[1:] %}"
-    "{%- else %}"
-    "{%- set loop_messages = messages %}"
-    "{%- endif %}"
+# GPT-OSS Harmony chat template with native tool calling support.
+# Reference: https://huggingface.co/openai/gpt-oss-20b
+GPT_OSS_HARMONY_CHAT_TEMPLATE = (
     "{%- if not tools is defined %}"
     "{%- set tools = none %}"
     "{%- endif %}"
-    "{%- set user_messages = loop_messages | selectattr(\"role\", \"equalto\", \"user\") | list %}"
-    "{{- bos_token }}"
+    # System message with tool definitions
+    "{%- if messages[0][\"role\"] == \"system\" %}"
+    "{{- \"<|start|>system<|message|>\" }}"
+    "{{- messages[0][\"content\"] }}"
+    "{{- \"\\nReasoning: medium\\n\" }}"
+    "{%- if tools is not none %}"
+    "{{- \"\\n# Tools\\n\\nnamespace functions {\\n\" }}"
+    "{%- for tool in tools %}"
+    "{%- set func = tool.function %}"
+    "{{- \"  type \" + func.name + \" = (_: {\" }}"
+    "{%- if func.parameters and func.parameters.properties %}"
+    "{%- for param_name, param_spec in func.parameters.properties.items() %}"
+    "{{- \"\\n    \" + param_name }}"
+    "{%- if param_name not in (func.parameters.required or []) %}"
+    "{{- \"?\" }}"
+    "{%- endif %}"
+    "{{- \": \" }}"
+    "{%- if param_spec.type == \"string\" and param_spec.get(\"enum\") %}"
+    "{{- '\"' + '\" | \"'.join(param_spec.enum) + '\"' }}"
+    "{%- elif param_spec.type == \"string\" %}"
+    "{{- \"string\" }}"
+    "{%- elif param_spec.type == \"number\" or param_spec.type == \"integer\" %}"
+    "{{- \"number\" }}"
+    "{%- elif param_spec.type == \"boolean\" %}"
+    "{{- \"boolean\" }}"
+    "{%- else %}"
+    "{{- \"any\" }}"
+    "{%- endif %}"
+    "{{- \",\" if not loop.last else \"\" }}"
+    "{%- endfor %}"
+    "{%- endif %}"
+    "{{- \"\\n  }) => any;\\n\" }}"
+    "{%- endfor %}"
+    "{{- \"}\\n\" }}"
+    "{%- endif %}"
+    "{{- \"<|end|>\" }}"
+    "{%- set loop_messages = messages[1:] %}"
+    "{%- else %}"
+    "{{- \"<|start|>system<|message|>You are a helpful AI assistant.\\nReasoning: medium\" }}"
+    "{%- if tools is not none %}"
+    "{{- \"\\n\\n# Tools\\n\\nnamespace functions {\\n\" }}"
+    "{%- for tool in tools %}"
+    "{%- set func = tool.function %}"
+    "{{- \"  type \" + func.name + \" = (_: {\" }}"
+    "{%- if func.parameters and func.parameters.properties %}"
+    "{%- for param_name, param_spec in func.parameters.properties.items() %}"
+    "{{- \"\\n    \" + param_name }}"
+    "{%- if param_name not in (func.parameters.required or []) %}"
+    "{{- \"?\" }}"
+    "{%- endif %}"
+    "{{- \": \" }}"
+    "{%- if param_spec.type == \"string\" and param_spec.get(\"enum\") %}"
+    "{{- '\"' + '\" | \"'.join(param_spec.enum) + '\"' }}"
+    "{%- elif param_spec.type == \"string\" %}"
+    "{{- \"string\" }}"
+    "{%- elif param_spec.type == \"number\" or param_spec.type == \"integer\" %}"
+    "{{- \"number\" }}"
+    "{%- elif param_spec.type == \"boolean\" %}"
+    "{{- \"boolean\" }}"
+    "{%- else %}"
+    "{{- \"any\" }}"
+    "{%- endif %}"
+    "{{- \",\" if not loop.last else \"\" }}"
+    "{%- endfor %}"
+    "{%- endif %}"
+    "{{- \"\\n  }) => any;\\n\" }}"
+    "{%- endfor %}"
+    "{{- \"}\\n\" }}"
+    "{%- endif %}"
+    "{{- \"<|end|>\" }}"
+    "{%- set loop_messages = messages %}"
+    "{%- endif %}"
+    # Message loop
     "{%- for message in loop_messages %}"
     "{%- if message[\"role\"] == \"user\" %}"
-    "{%- if tools is not none and (message == user_messages[-1]) %}"
-    "{{- \"[AVAILABLE_TOOLS] [\" }}"
-    "{%- for tool in tools %}"
-    "{%- set tool = tool.function %}"
-    "{{- '{\"type\": \"function\", \"function\": {' }}"
-    "{%- for key, val in tool.items() if key != \"return\" %}"
-    "{%- if val is string %}"
-    "{{- '\"' + key + '\": \"' + val + '\"' }}"
-    "{%- else %}"
-    "{{- '\"' + key + '\": ' + val|tojson }}"
-    "{%- endif %}"
-    "{%- if not loop.last %}"
-    "{{- \", \" }}"
-    "{%- endif %}"
-    "{%- endfor %}"
-    "{{- \"}}\" }}"
-    "{%- if not loop.last %}"
-    "{{- \", \" }}"
-    "{%- else %}"
-    "{{- \"]\" }}"
-    "{%- endif %}"
-    "{%- endfor %}"
-    "{{- \"[/AVAILABLE_TOOLS]\" }}"
-    "{%- endif %}"
-    "{%- if loop.last and system_message is defined %}"
-    "{{- \"[INST] \" + system_message + \"\\n\\n\" + message[\"content\"] + \"[/INST]\" }}"
-    "{%- else %}"
-    "{{- \"[INST] \" + message[\"content\"] + \"[/INST]\" }}"
-    "{%- endif %}"
-    "{%- elif message.tool_calls is defined and message.tool_calls is not none %}"
-    "{{- \"[TOOL_CALLS] [\" }}"
-    "{%- for tool_call in message.tool_calls %}"
-    "{%- set out = tool_call.function|tojson %}"
-    "{{- out[:-1] }}"
-    "{%- if not tool_call.id is defined or tool_call.id|length != 9 %}"
-    "{{- raise_exception(\"Tool call IDs should be alphanumeric strings with length 9!\") }}"
-    "{%- endif %}"
-    "{{- ', \"id\": \"' + tool_call.id + '\"}' }}"
-    "{%- if not loop.last %}"
-    "{{- \", \" }}"
-    "{%- else %}"
-    "{{- \"]\" + eos_token }}"
-    "{%- endif %}"
-    "{%- endfor %}"
+    "{{- \"<|start|>user<|message|>\" + message[\"content\"] + \"<|end|>\" }}"
     "{%- elif message[\"role\"] == \"assistant\" %}"
-    "{{- \" \" + message[\"content\"]|trim + eos_token}}"
-    "{%- elif message[\"role\"] == \"tool_results\" or message[\"role\"] == \"tool\" %}"
-    "{%- if message.content is defined and message.content.content is defined %}"
-    "{%- set content = message.content.content %}"
+    "{%- if message.tool_calls is defined and message.tool_calls is not none %}"
+    # Tool call response with analysis and commentary channels
+    "{%- for tool_call in message.tool_calls %}"
+    "{{- \"<|start|>assistant<|channel|>analysis<|message|>Calling function \" + tool_call.function.name + \"<|end|>\" }}"
+    "{{- \"<|start|>assistant to=functions.\" + tool_call.function.name + \"<|channel|>commentary json<|message|>\" }}"
+    "{{- tool_call.function.arguments }}"
+    "{{- \"<|call|>\" }}"
+    "{%- endfor %}"
     "{%- else %}"
-    "{%- set content = message.content %}"
+    # Regular assistant message on final channel
+    "{{- \"<|start|>assistant<|channel|>final<|message|>\" + message[\"content\"] + \"<|return|>\" }}"
     "{%- endif %}"
-    "{{- '[TOOL_RESULTS] {\"content\": ' + content|string + \", \" }}"
-    "{%- if not message.tool_call_id is defined or message.tool_call_id|length != 9 %}"
-    "{{- raise_exception(\"Tool call IDs should be alphanumeric strings with length 9!\") }}"
+    "{%- elif message[\"role\"] == \"tool\" %}"
+    # Tool result message
+    "{{- \"<|start|>functions.\" + message.get(\"name\", \"unknown\") + \" to=assistant<|channel|>commentary<|message|>\" }}"
+    "{%- if message.content is defined and message.content.content is defined %}"
+    "{{- message.content.content }}"
+    "{%- else %}"
+    "{{- message.content }}"
     "{%- endif %}"
-    "{{- '\"call_id\": \"' + message.tool_call_id + '\"}[/TOOL_RESULTS]' }}"
-    "{%- elif message[\"role\"] == \"system\" %}"
+    "{{- \"<|end|>\" }}"
     "{%- endif %}"
     "{%- endfor %}"
+    # Add generation prompt for assistant response
+    "{%- if add_generation_prompt %}"
+    "{{- \"<|start|>assistant<|channel|>final<|message|>\" }}"
+    "{%- endif %}"
 )
 
 
@@ -113,13 +147,40 @@ class LLMEngine:
         # Concurrent calls would double GPU KV cache allocation and OOM.
         self._inference_lock = threading.Lock()
 
-        # Initialize Jinja2 environment with Mistral v0.3 chat template
+        # Load chat template from model directory or use fallback
+        self._chat_template = self._load_chat_template()
+
+        self._load_model()
+
+    def _load_chat_template(self):
+        """
+        Load chat template from model directory or use GPT-OSS Harmony fallback.
+
+        Priority:
+        1. Load from model's HF directory (chat_template.jinja)
+        2. Fall back to built-in Harmony template
+        """
+        from datetime import datetime
+
         env = jinja2.Environment()
         env.filters['tojson'] = lambda val: json.dumps(val, ensure_ascii=False)
         env.globals['raise_exception'] = _raise_template_exception
-        self._chat_template = env.from_string(MISTRAL_V3_CHAT_TEMPLATE)
+        env.globals['strftime_now'] = lambda fmt: datetime.now().strftime(fmt)
 
-        self._load_model()
+        # Try to load template from model directory
+        model_template_path = Path(self.config.model.base_model_hf_path) / "chat_template.jinja"
+        if model_template_path.exists():
+            try:
+                with open(model_template_path, 'r') as f:
+                    template_str = f.read()
+                logger.info(f"Loaded chat template from {model_template_path}")
+                return env.from_string(template_str)
+            except Exception as e:
+                logger.warning(f"Failed to load chat template from {model_template_path}: {e}")
+
+        # Fall back to GPT-OSS Harmony template
+        logger.info("Using built-in GPT-OSS Harmony chat template")
+        return env.from_string(GPT_OSS_HARMONY_CHAT_TEMPLATE)
 
     def _load_model(self):
         """Load the GGUF model with llama.cpp."""
@@ -148,9 +209,9 @@ class LLMEngine:
         """
         Reload the model from a new GGUF file with automatic rollback on failure.
 
-        Strategy: unload current model first to free GPU memory (two 7B models
-        cannot coexist), then load the new one. If the new load fails, attempt
-        to restore the previous model.
+        Strategy: unload current model first to free GPU memory (two 20B models
+        cannot coexist on 24GB VRAM), then load the new one. If the new load fails,
+        attempt to restore the previous model.
 
         During the brief reload window (~5-15s), self.llm is None and requests
         will get RuntimeError("Model not loaded") → HTTP 503.
@@ -236,7 +297,7 @@ class LLMEngine:
             messages: List of ChatMessage objects
 
         Returns:
-            List of message dicts compatible with Mistral v0.3 chat template
+            List of message dicts compatible with GPT-OSS Harmony chat template
         """
         result = []
         for msg in messages:
@@ -284,7 +345,7 @@ class LLMEngine:
         tools: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """
-        Render messages into a prompt string using the Mistral v0.3 chat template.
+        Render messages into a prompt string using the GPT-OSS Harmony chat template.
 
         Args:
             messages_dict: List of message dicts
@@ -295,8 +356,7 @@ class LLMEngine:
         """
         render_kwargs = {
             "messages": messages_dict,
-            "bos_token": "",  # Let llama.cpp handle BOS token
-            "eos_token": "</s>",
+            "add_generation_prompt": True,
         }
         if tools:
             render_kwargs["tools"] = tools
@@ -309,15 +369,13 @@ class LLMEngine:
         """
         Parse tool calls from model output.
 
-        Handles two cases:
-        1. Explicit [TOOL_CALLS] prefix (text token) followed by JSON array
-        2. Output starts with a JSON array whose "name" fields match known
-           tool names — [TOOL_CALLS] is a special/control token in Mistral's
-           tokenizer so create_completion may omit it from text output.
+        Supports two formats:
+        1. Harmony format (native gpt-oss): Uses special tokens like <|call|>
+        2. Markdown JSON fallback: Extracts JSON from markdown code blocks
 
         Args:
             text: Raw model output text
-            tool_names: List of known tool function names (for heuristic detection)
+            tool_names: List of known tool function names (for validation)
 
         Returns:
             tuple: (content_text_or_None, tool_calls_list_or_None)
@@ -325,75 +383,123 @@ class LLMEngine:
         if not text:
             return None, None
 
-        tool_json = None
+        # Debug: log raw model output
+        logger.debug(f"=== RAW MODEL OUTPUT ({len(text)} chars) ===")
+        logger.debug(text[:500] + ("..." if len(text) > 500 else ""))
+        logger.debug("=== END RAW OUTPUT ===")
+
+        tool_calls = []
         content = None
+        import re
 
-        if "[TOOL_CALLS]" in text:
-            # Case 1: explicit [TOOL_CALLS] text token present
-            parts = text.split("[TOOL_CALLS]", 1)
-            content = parts[0].strip() or None
-            tool_json = parts[1].strip()
-            logger.debug("Detected tool calls via [TOOL_CALLS] prefix")
-        else:
-            # Case 2: [TOOL_CALLS] is a special token not in text output.
-            # Check if output starts with a JSON array that looks like tool calls.
-            stripped = text.strip()
-            if stripped.startswith("["):
-                # Find the end of the JSON array (first unbalanced ']')
-                bracket_depth = 0
-                end_idx = None
-                for i, ch in enumerate(stripped):
-                    if ch == "[":
-                        bracket_depth += 1
-                    elif ch == "]":
-                        bracket_depth -= 1
-                        if bracket_depth == 0:
-                            end_idx = i + 1
-                            break
+        # Method 1: Try Harmony format first (native gpt-oss-20b)
+        # Supports both official format (with <|call|>) and jinx format (without <|call|>)
+        if "to=functions." in text:
+            # Try official format first: to=functions.FUNC...json<|message|>JSON<|call|>
+            pattern_official = r'to=functions\.(\w+).*?json<\|message\|>(.*?)<\|call\|>'
+            matches = re.findall(pattern_official, text, re.DOTALL)
 
-                if end_idx:
-                    candidate = stripped[:end_idx]
-                    try:
-                        parsed = json.loads(candidate)
-                        if isinstance(parsed, list) and len(parsed) > 0 and "name" in parsed[0]:
-                            # Verify the name matches a known tool
-                            if not tool_names or parsed[0]["name"] in tool_names:
-                                tool_json = candidate
-                                content = None
-                                logger.debug("Detected tool calls via JSON array heuristic (special token omitted)")
-                    except (json.JSONDecodeError, TypeError, IndexError):
-                        pass
+            # Try jinx format: <|channel|>commentary to=functions.FUNC <|constrain|>json<|message|>JSON
+            if not matches:
+                pattern_jinx = r'to=functions\.(\w+).*?<\|constrain\|>json<\|message\|>(.*?)(?:<\|end\|>|<\|return\|>|$)'
+                matches = re.findall(pattern_jinx, text, re.DOTALL)
 
-        if tool_json is None:
-            return text.strip(), None
+            for func_name, json_args in matches:
+                if tool_names and func_name not in tool_names:
+                    logger.warning(f"Unknown tool called: {func_name}")
+                    continue
 
-        # Clean up EOS tokens and trailing whitespace
-        tool_json = tool_json.replace("</s>", "").strip()
+                try:
+                    args = json.loads(json_args.strip())
+                    call_id = uuid.uuid4().hex[:9]
+                    tool_calls.append({
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": func_name,
+                            "arguments": json.dumps(args)
+                        }
+                    })
+                    logger.debug(f"Parsed tool call (Harmony format): {func_name}")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse Harmony tool call: {e}, raw: {json_args!r}")
 
-        try:
-            raw_calls = json.loads(tool_json)
-            if not isinstance(raw_calls, list):
-                raw_calls = [raw_calls]
+        # Method 2: Fallback to markdown JSON extraction (for fine-tuned models)
+        if not tool_calls and tool_names:
+            # Look for JSON in markdown code blocks
+            json_pattern = r'```(?:json)?\s*\n?(.*?)\n?```'
+            json_matches = re.findall(json_pattern, text, re.DOTALL)
 
-            tool_calls = []
-            for tc in raw_calls:
-                # Use model-generated ID (9 chars) or generate one
-                call_id = tc.get("id", uuid.uuid4().hex[:9])
-                tool_calls.append({
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": json.dumps(tc.get("arguments", {}))
-                    }
-                })
+            for json_block in json_matches:
+                try:
+                    parsed = json.loads(json_block.strip())
 
+                    # Try to infer function name from context or parsed structure
+                    func_name = None
+                    args = parsed
+
+                    # Check if JSON has a "name" field (direct format)
+                    if isinstance(parsed, dict) and "name" in parsed:
+                        func_name = parsed["name"]
+                        args = parsed.get("arguments", {})
+                    # Otherwise infer from tool_names if there's only one tool
+                    elif len(tool_names) == 1:
+                        func_name = tool_names[0]
+                    # Try to find tool name mentioned in text before the JSON
+                    else:
+                        for name in tool_names:
+                            if name in text.lower() or name.replace("_", " ") in text.lower():
+                                func_name = name
+                                break
+
+                    if func_name and func_name in tool_names:
+                        call_id = uuid.uuid4().hex[:9]
+                        tool_calls.append({
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": func_name,
+                                "arguments": json.dumps(args) if isinstance(args, dict) else args
+                            }
+                        })
+                        logger.debug(f"Parsed tool call (markdown fallback): {func_name}")
+                        break  # Only take first valid JSON block
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug(f"Skipping invalid JSON block: {e}")
+                    continue
+
+        # Extract text content (from channels or raw text)
+        # Priority: final channel > raw text > analysis channel (only if no tool calls)
+        if "<|channel|>final<|message|>" in text:
+            # Extract from final channel - this is the actual response
+            parts = text.split("<|channel|>final<|message|>", 1)
+            if len(parts) > 1:
+                # Split on both <|return|> and <|end|> to handle either terminator
+                content_raw = parts[1].split("<|return|>")[0].split("<|end|>")[0].strip()
+                content = content_raw if content_raw else None
+                logger.debug(f"Extracted content from final channel: {content!r}")
+        elif not tool_calls:
+            # If no final channel and no tool calls, check for analysis-only response
+            if "<|channel|>analysis<|message|>" in text:
+                # Only use analysis if there's no final channel (shouldn't happen normally)
+                parts = text.split("<|channel|>analysis<|message|>", 1)
+                if len(parts) > 1:
+                    content_raw = parts[1].split("<|end|>")[0].strip()
+                    content = content_raw if content_raw else None
+                    logger.warning(f"Using analysis channel as content (no final channel found): {content!r}")
+            else:
+                # Fallback: no channel markers, use raw text
+                cleaned = text.replace("<|return|>", "").replace("<|end|>", "").strip()
+                content = cleaned if cleaned else None
+                logger.debug(f"Extracted content (no channel markers, using raw text): {content!r}")
+
+        if tool_calls:
             logger.debug(f"Parsed {len(tool_calls)} tool call(s)")
             return content, tool_calls
 
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            logger.warning(f"Failed to parse tool calls: {e}, raw: {tool_json!r}")
-            return text.strip(), None
+        final_content = content or text.strip() if text.strip() else None
+        logger.debug(f"Final content to return: {final_content!r}")
+        return final_content, None
 
     def generate(
         self,
@@ -407,9 +513,9 @@ class LLMEngine:
         """
         Generate a response from the model.
 
-        Uses the Mistral v0.3 chat template for prompt rendering and
+        Uses the GPT-OSS Harmony chat template for prompt rendering and
         create_completion for inference, with post-processing to parse
-        [TOOL_CALLS] from the raw output.
+        tool calls from the harmony-formatted output.
 
         Args:
             messages: List of conversation messages
@@ -437,7 +543,7 @@ class LLMEngine:
         effective_tools = tools if tool_choice != "none" else None
 
         try:
-            # Render prompt using Mistral v0.3 template
+            # Render prompt using GPT-OSS Harmony template
             prompt = self._render_chat_prompt(messages_dict, tools=effective_tools)
 
             # Guard: count prompt tokens to prevent context overflow crash
@@ -474,19 +580,19 @@ class LLMEngine:
                     max_tokens=effective_max_tok,
                     temperature=temp,
                     top_p=top_p_val,
-                    stop=["</s>"]
+                    stop=["<|return|>"]  # Only stop on <|return|>, allow <|end|> for multi-channel responses
                 )
 
             raw_text = response['choices'][0]['text']
             logger.debug(f"Raw completion text: {raw_text!r}")
 
-            # Parse tool calls from output if tools were provided
+            # Always parse channels and tool calls from output
+            # Even without tools, we need to extract content from the final channel
+            tool_names = None
             if effective_tools:
                 tool_names = [t["function"]["name"] for t in effective_tools if "function" in t]
-                content, tool_calls = self._parse_tool_calls(raw_text, tool_names=tool_names)
-            else:
-                content = raw_text.strip() if raw_text else None
-                tool_calls = None
+
+            content, tool_calls = self._parse_tool_calls(raw_text, tool_names=tool_names)
 
             finish_reason = "tool_calls" if tool_calls else "stop"
 
@@ -543,7 +649,7 @@ class LLMEngine:
         max_tok = max_tokens if max_tokens is not None else self.config.model.max_tokens
 
         try:
-            # Render prompt using Mistral v0.3 template (no tools for streaming)
+            # Render prompt using GPT-OSS Harmony template (no tools for streaming)
             prompt = self._render_chat_prompt(messages_dict, tools=None)
 
             # Guard: count prompt tokens to prevent context overflow crash
@@ -581,7 +687,7 @@ class LLMEngine:
                     max_tokens=effective_max_tok,
                     temperature=temp,
                     top_p=top_p_val,
-                    stop=["</s>"],
+                    stop=["<|return|>"],  # Only stop on <|return|>, allow <|end|> for multi-channel responses
                     stream=True
                 )
 

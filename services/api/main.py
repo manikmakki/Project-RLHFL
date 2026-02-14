@@ -250,7 +250,7 @@ async def health_check():
 @app.get("/v1/models")
 async def list_models():
     """List available models (OpenAI-compatible)."""
-    model_id = config.model.model_id if config else "mistral-7b-instruct"
+    model_id = config.model.model_id if config else "gpt-oss-20b"
     return ModelsResponse(
         object="list",
         data=[
@@ -275,7 +275,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
     try:
         # Use configured model if not specified, or validate the requested model matches
-        configured_model_id = config.model.model_id if config else "mistral-7b-instruct"
+        configured_model_id = config.model.model_id if config else "gpt-oss-20b"
         request_model = request.model or configured_model_id
         
         if request_model not in [configured_model_id, "local-llm"]:  # Allow legacy "local-llm" for compatibility
@@ -333,10 +333,9 @@ async def chat_completions(request: ChatCompletionRequest):
             )
 
         if config.memory.rag_enabled and not request.tools:
-            # Skip RAG when tools are present — the Mistral template merges
-            # the system message into the last [INST] block, and lengthy RAG
-            # context between [AVAILABLE_TOOLS] and the user query causes
-            # the model to ignore tools and answer directly instead.
+            # Skip RAG when tools are present — the Harmony template includes
+            # tool definitions in the system message, and lengthy RAG context
+            # may interfere with proper tool calling behavior.
 
             # Run embedding generation in thread pool to avoid blocking event loop
             relevant_context = await asyncio.to_thread(
@@ -477,9 +476,11 @@ async def chat_completions(request: ChatCompletionRequest):
             )
 
         # Build assistant message with tool_calls if present
+        # Per OpenAI spec: content should be None when there are tool calls, but some
+        # clients (like Open WebUI) might expect an empty string instead
         assistant_message = ChatMessage(
             role=MessageRole.ASSISTANT,
-            content=response_text if response_text else None,
+            content=response_text,  # Keep empty string as-is, don't convert to None
             tool_calls=tool_calls
         )
         logger.debug(f"Built assistant_message: content={assistant_message.content!r}, tool_calls={assistant_message.tool_calls}")
@@ -554,7 +555,8 @@ async def stream_chat_completion(
             tool_calls = response_dict.get("tool_calls")
             finish_reason = response_dict.get("finish_reason", "stop")
 
-            # Send initial chunk with role
+            # Send initial chunk with role and empty content
+            # Some clients (like Open WebUI) expect content to be present even when empty
             initial_chunk = {
                 'id': completion_id,
                 'object': 'chat.completion.chunk',
@@ -562,10 +564,11 @@ async def stream_chat_completion(
                 'model': model_id,
                 'choices': [{
                     'index': 0,
-                    'delta': {'role': 'assistant'},
+                    'delta': {'role': 'assistant', 'content': ''},
                     'finish_reason': None
                 }]
             }
+            logger.debug(f"Sending initial chunk: {json.dumps(initial_chunk)}")
             yield f"data: {json.dumps(initial_chunk)}\n\n"
 
             # Send content chunk
@@ -581,6 +584,7 @@ async def stream_chat_completion(
                         'finish_reason': None
                     }]
                 }
+                logger.debug(f"Sending content chunk: {json.dumps(content_chunk)}")
                 yield f"data: {json.dumps(content_chunk)}\n\n"
 
             # Send tool_calls chunk if present
@@ -596,6 +600,7 @@ async def stream_chat_completion(
                         'finish_reason': None
                     }]
                 }
+                logger.debug(f"Sending tool_calls chunk: {json.dumps(tool_chunk)}")
                 yield f"data: {json.dumps(tool_chunk)}\n\n"
 
             # Send final chunk for tools path
@@ -610,6 +615,7 @@ async def stream_chat_completion(
                     'finish_reason': finish_reason
                 }]
             }
+            logger.debug(f"Sending final chunk: {json.dumps(final_chunk)}")
             yield f"data: {json.dumps(final_chunk)}\n\n"
         else:
             # Normal streaming without tools
@@ -694,7 +700,9 @@ async def stream_chat_completion(
             yield f"data: {json.dumps(final_chunk)}\n\n"
             finish_reason = 'stop'
 
+        logger.debug("Sending [DONE] message")
         yield "data: [DONE]\n\n"
+        logger.debug("Stream completed successfully")
 
         # Store user prompt paired with previous LLM response (n-1) to capture
         # user behavior — skip if no prior assistant message in history.
