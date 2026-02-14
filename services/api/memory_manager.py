@@ -70,14 +70,30 @@ class MemoryManager:
             text = f"User: {user_message}\nAssistant: {assistant_response}"
             embedding = self.embedder.encode(text).tolist()
             
+            # Store full messages for maximum training fidelity
+            # Handle edge case of extremely long messages (ChromaDB metadata limit: ~64KB)
+            user_msg_stored = user_message
+            assistant_resp_stored = assistant_response
+            truncated = False
+
+            if len(user_message) > 60000:
+                user_msg_stored = user_message[:60000] + "...[TRUNCATED]"
+                truncated = True
+            if len(assistant_response) > 60000:
+                assistant_resp_stored = assistant_response[:60000] + "...[TRUNCATED]"
+                truncated = True
+
             metadata = {
                 "conversation_id": conversation_id,
                 "timestamp": timestamp.isoformat(),
-                "user_message": user_message[:500],  # Truncate for metadata
-                "assistant_response": assistant_response[:500],
+                "user_message": user_msg_stored,  # Full message (no 500-char limit)
+                "assistant_response": assistant_resp_stored,  # Full response (no 500-char limit)
+                "user_message_length": len(user_message),
+                "assistant_response_length": len(assistant_response),
                 "sentiment": sentiment,
                 "weight": weight,
-                "is_golden": is_golden
+                "is_golden": is_golden,
+                "truncated": truncated
             }
             
             # Store in main collection
@@ -208,66 +224,75 @@ class MemoryManager:
             logger.error(f"Failed to retrieve golden examples: {e}")
             return []
 
-    def retrieve_relevant_context(
-        self,
-        query: str,
-        k: int = 5,
-        similarity_threshold: Optional[float] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Retrieve relevant interactions from memory using semantic search.
-
-        Args:
-            query: The user's message to find relevant context for
-            k: Number of results to retrieve
-            similarity_threshold: Minimum similarity score (0-1), defaults to config value
-
-        Returns:
-            List of relevant context items with user_message, assistant_response, and distance
-        """
-        try:
-            if not query.strip():
-                return []
-
-            # Use config threshold if not specified
-            threshold = similarity_threshold if similarity_threshold is not None else self.config.memory.similarity_threshold
-
-            # Generate embedding for the query
-            query_embedding = self.embedder.encode(query).tolist()
-
-            # Query ChromaDB for similar interactions
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=k,
-                include=["metadatas", "documents", "distances"]
-            )
-
-            # Parse results
-            relevant_context = []
-            if results['ids'] and len(results['ids'][0]) > 0:
-                for i in range(len(results['ids'][0])):
-                    # ChromaDB returns distance (lower is more similar)
-                    # Convert to similarity score (1 - normalized_distance)
-                    distance = results['distances'][0][i]
-                    similarity = 1.0 - distance  # Cosine distance to similarity
-
-                    # Filter by threshold
-                    if similarity >= threshold:
-                        metadata = results['metadatas'][0][i]
-                        relevant_context.append({
-                            'user_message': metadata.get('user_message', ''),
-                            'assistant_response': metadata.get('assistant_response', ''),
-                            'similarity': similarity,
-                            'timestamp': metadata.get('timestamp', ''),
-                            'sentiment': metadata.get('sentiment', 0.0)
-                        })
-
-            logger.debug(f"Retrieved {len(relevant_context)} relevant context items for query (threshold: {threshold})")
-            return relevant_context
-
-        except Exception as e:
-            logger.error(f"Failed to retrieve relevant context: {e}")
-            return []
+    # DEPRECATED: RAG functionality removed in favor of transparent proxy mode
+    # Keeping this method commented out for 2 weeks for rollback safety
+    # def retrieve_relevant_context(
+    #     self,
+    #     query: str,
+    #     k: int = 5,
+    #     similarity_threshold: Optional[float] = None
+    # ) -> List[Dict[str, Any]]:
+    #     """
+    #     DEPRECATED: Retrieve relevant interactions from memory using semantic search.
+    #
+    #     This method is no longer used. The system now operates in transparent proxy mode,
+    #     focusing on RLHF without RAG context injection.
+    #
+    #     Args:
+    #         query: The user's message to find relevant context for
+    #         k: Number of results to retrieve
+    #         similarity_threshold: Minimum similarity score (0-1), defaults to config value
+    #
+    #     Returns:
+    #         Empty list (method is deprecated)
+    #     """
+    #     logger.warning("retrieve_relevant_context() is deprecated and should not be called")
+    #     return []
+    #
+    # Original implementation commented out for rollback safety:
+    #     try:
+    #         if not query.strip():
+    #             return []
+    #
+    #         # Use config threshold if not specified
+    #         threshold = similarity_threshold if similarity_threshold is not None else self.config.memory.similarity_threshold
+    #
+    #         # Generate embedding for the query
+    #         query_embedding = self.embedder.encode(query).tolist()
+    #
+    #         # Query ChromaDB for similar interactions
+    #         results = self.collection.query(
+    #             query_embeddings=[query_embedding],
+    #             n_results=k,
+    #             include=["metadatas", "documents", "distances"]
+    #         )
+    #
+    #         # Parse results
+    #         relevant_context = []
+    #         if results['ids'] and len(results['ids'][0]) > 0:
+    #             for i in range(len(results['ids'][0])):
+    #                 # ChromaDB returns distance (lower is more similar)
+    #                 # Convert to similarity score (1 - normalized_distance)
+    #                 distance = results['distances'][0][i]
+    #                 similarity = 1.0 - distance  # Cosine distance to similarity
+    #
+    #                 # Filter by threshold
+    #                 if similarity >= threshold:
+    #                     metadata = results['metadatas'][0][i]
+    #                     relevant_context.append({
+    #                         'user_message': metadata.get('user_message', ''),
+    #                         'assistant_response': metadata.get('assistant_response', ''),
+    #                         'similarity': similarity,
+    #                         'timestamp': metadata.get('timestamp', ''),
+    #                         'sentiment': metadata.get('sentiment', 0.0)
+    #                     })
+    #
+    #         logger.debug(f"Retrieved {len(relevant_context)} relevant context items for query (threshold: {threshold})")
+    #         return relevant_context
+    #
+    #     except Exception as e:
+    #         logger.error(f"Failed to retrieve relevant context: {e}")
+    #         return []
     
     def get_training_stats(self) -> TrainingStats:
         """Get statistics about training status."""

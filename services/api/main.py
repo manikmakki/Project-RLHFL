@@ -26,9 +26,10 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
+import httpx
 import torch
 
-from shared.config import load_config, settings
+from shared.config import load_config, settings, SystemConfig
 from shared.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -43,7 +44,7 @@ from shared.models import (
     ModelReloadRequest,
     ModelReloadResponse,
 )
-from api.llm_engine import LLMEngine
+from api.llm_proxy import LLMProxy
 from api.memory_manager import MemoryManager
 from api.sentiment_analyzer import SentimentAnalyzer
 from api.prompt_interceptor import PromptInterceptor
@@ -58,10 +59,11 @@ logger = logging.getLogger(__name__)
 
 # Global state
 config = None
-llm_engine = None
+llm_proxy = None  # HTTP proxy to external LLM
 memory_manager = None
 sentiment_analyzer = None
 prompt_interceptor = None
+background_tasks = set()  # Track background storage tasks for graceful shutdown
 recent_api_requests = deque(maxlen=20)  # Rolling buffer of last 20 API requests
 
 
@@ -75,6 +77,99 @@ def normalize_model_name(model_name: str) -> str:
         # Strip the tag part (e.g., 'jinx-gpt-oss-20b:latest' -> 'jinx-gpt-oss-20b')
         return model_name.split(':')[0]
     return model_name
+
+
+def should_store_interaction(model_name: str, config: SystemConfig) -> bool:
+    """
+    Check if model is whitelisted for sentiment analysis and storage.
+
+    Args:
+        model_name: Model name from request (may include :tag)
+        config: System configuration
+
+    Returns:
+        True if model should be analyzed and stored, False otherwise
+    """
+    whitelist = config.llm_proxy.sentiment_enabled_models
+
+    # Empty whitelist = analyze all models (default for single-model setups)
+    if not whitelist:
+        return True
+
+    # Normalize model name (strip :latest, :32b tags)
+    normalized = model_name.split(':')[0] if ':' in model_name else model_name
+
+    # Check if in whitelist
+    for whitelisted in whitelist:
+        whitelisted_normalized = whitelisted.split(':')[0] if ':' in whitelisted else whitelisted
+        if normalized == whitelisted_normalized:
+            return True
+
+    return False
+
+
+async def store_interaction_background(
+    conversation_id: str,
+    user_message: str,
+    assistant_response: str,
+    sentiment_analyzer,
+    memory_manager
+):
+    """
+    Run sentiment analysis and storage in background (fire-and-forget).
+    Never blocks the response - errors are logged but not propagated.
+
+    Args:
+        conversation_id: Unique conversation identifier
+        user_message: User's message text
+        assistant_response: Assistant's response text
+        sentiment_analyzer: SentimentAnalyzer instance
+        memory_manager: MemoryManager instance
+    """
+    try:
+        # Run sentiment analysis
+        sentiment = await asyncio.to_thread(
+            sentiment_analyzer.analyze,
+            user_message=user_message,
+            assistant_response=assistant_response,
+            conversation_continuing=True
+        )
+
+        # Calculate weight
+        weight = await asyncio.to_thread(
+            sentiment_analyzer.calculate_weight,
+            user_message=user_message,
+            sentiment=sentiment,
+            conversation_continuing=True
+        )
+
+        # Check if golden example
+        is_golden = await asyncio.to_thread(
+            sentiment_analyzer.is_golden_example,
+            user_message=user_message,
+            sentiment=sentiment,
+            weight=weight
+        )
+
+        # Store interaction
+        await asyncio.to_thread(
+            memory_manager.store_interaction,
+            conversation_id=conversation_id,
+            user_message=user_message,
+            assistant_response=assistant_response,
+            sentiment=sentiment,
+            weight=weight,
+            is_golden=is_golden
+        )
+
+        logger.info(
+            f"Stored interaction: sentiment={sentiment:.2f}, "
+            f"weight={weight:.2f}, golden={is_golden}"
+        )
+
+    except Exception as e:
+        # Log error but don't propagate (fire-and-forget)
+        logger.error(f"Background storage failed: {e}", exc_info=True)
 
 
 def parse_model_response(content: str) -> dict:
@@ -122,10 +217,13 @@ def parse_model_response(content: str) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager for FastAPI app."""
-    global config, llm_engine, memory_manager, sentiment_analyzer, prompt_interceptor
+    global config, llm_proxy, memory_manager, sentiment_analyzer, prompt_interceptor, background_tasks
 
     # Startup
-    logger.info("Starting LLM API service...")
+    logger.info("Starting LLM API service (Proxy Mode)...")
+
+    # Initialize background tasks set for graceful shutdown
+    background_tasks = set()
 
     # Configure thread pool for asyncio.to_thread() to handle blocking operations
     thread_pool_size = int(os.environ.get('ASYNCIO_THREAD_POOL_SIZE', 16))
@@ -136,7 +234,7 @@ async def lifespan(app: FastAPI):
     # Load configuration
     config = load_config()
     logger.info(f"Configuration loaded from {settings.config_path}")
-    
+
     # Initialize memory manager
     memory_manager = MemoryManager(config)
     logger.info("Memory manager initialized")
@@ -156,41 +254,45 @@ async def lifespan(app: FastAPI):
     prompt_interceptor = PromptInterceptor(rules_path)
     logger.info("Prompt interceptor initialized")
 
-    # Initialize LLM engine
-    llm_engine = LLMEngine(config, settings.model_path)
-    logger.info("LLM engine initialized")
+    # Initialize LLM proxy (replaces local model loading)
+    llm_proxy = LLMProxy(config)
+    logger.info(f"LLM Proxy initialized: {llm_proxy}")
+
     # Wire admin UI dependencies now that managers are initialized
     try:
         from api import admin_ui
-        admin_ui.set_dependencies(memory_manager, llm_engine, recent_api_requests, prompt_interceptor)
+        admin_ui.set_dependencies(memory_manager, llm_proxy, recent_api_requests, prompt_interceptor)
     except Exception:
         logger.warning("Failed to set admin UI dependencies at startup")
     
-    # Check GPU availability
-    if torch.cuda.is_available():
-        logger.info(f"GPU detected: {torch.cuda.get_device_name(0)}")
-        logger.info(f"CUDA version: {torch.version.cuda}")
-    else:
-        logger.warning("No GPU detected, running on CPU")
-    
-    # Start background checkpoint poller
-    poll_interval = config.model.checkpoint_poll_interval_seconds
-    checkpoint_poller_task = asyncio.create_task(
-        _poll_for_new_checkpoints(llm_engine, settings.checkpoints_path, poll_interval)
-    )
-    logger.info(f"Background checkpoint poller started ({poll_interval}s interval)")
+    # Checkpoint polling not needed in proxy mode (external LLM handles model loading)
+    # poll_interval = config.model.checkpoint_poll_interval_seconds
+    # checkpoint_poller_task = asyncio.create_task(
+    #     _poll_for_new_checkpoints(llm_proxy, settings.checkpoints_path, poll_interval)
+    # )
+    # logger.info(f"Background checkpoint poller started ({poll_interval}s interval)")
 
     logger.info("LLM API service ready!")
 
     yield
 
     # Shutdown
-    checkpoint_poller_task.cancel()
-    try:
-        await checkpoint_poller_task
-    except asyncio.CancelledError:
-        pass
     logger.info("Shutting down LLM API service...")
+
+    # Wait for background tasks to complete (with timeout)
+    if background_tasks:
+        logger.info(f"Waiting for {len(background_tasks)} background tasks to complete...")
+        done, pending = await asyncio.wait(background_tasks, timeout=30.0)
+        if pending:
+            logger.warning(f"{len(pending)} background tasks did not complete within timeout")
+        else:
+            logger.info("All background tasks completed")
+
+    # Close LLM proxy connection pool
+    if llm_proxy:
+        await llm_proxy.close()
+
+    logger.info("Shutdown complete")
 
 
 app = FastAPI(
@@ -250,11 +352,11 @@ def get_memory_manager():
     return memory_manager
 
 
-def get_llm_engine():
+def get_llm_proxy():
     """Provide LLM engine to endpoints."""
-    if llm_engine is None:
+    if llm_proxy is None:
         raise HTTPException(status_code=503, detail="LLM engine not initialized")
-    return llm_engine
+    return llm_proxy
 
 
 # Include admin router
@@ -271,7 +373,7 @@ for route in app.routes:
             
             async def wrapped_endpoint(*args, **kwargs):
                 kwargs['memory_manager'] = memory_manager
-                kwargs['llm_engine'] = llm_engine
+                kwargs['llm_proxy'] = llm_proxy
                 return await original_endpoint(*args, **kwargs)
             
             route.endpoint = wrapped_endpoint
@@ -280,22 +382,20 @@ for route in app.routes:
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    gpu_available = torch.cuda.is_available()
+    # In proxy mode, check proxy readiness instead of local model/GPU
+    model_ready = llm_proxy.is_loaded() if llm_proxy else False
 
-    is_reloading = llm_engine.is_reloading() if llm_engine else False
-    if is_reloading:
-        status_str = "reloading"
-    elif llm_engine and llm_engine.is_loaded():
+    if model_ready and memory_manager:
         status_str = "healthy"
     else:
         status_str = "degraded"
 
     status = HealthStatus(
         status=status_str,
-        model_loaded=llm_engine.is_loaded() if llm_engine else False,
+        model_loaded=model_ready,
         memory_connected=memory_manager.is_connected() if memory_manager else False,
-        gpu_available=gpu_available,
-        current_checkpoint=llm_engine.current_checkpoint_id if llm_engine else None
+        gpu_available=False,  # Not relevant in proxy mode
+        current_checkpoint=None  # External LLM manages checkpoints
     )
 
     return status
@@ -324,7 +424,7 @@ async def chat_completions(request: ChatCompletionRequest):
     Create a chat completion (OpenAI-compatible).
     Supports both streaming and non-streaming responses.
     """
-    if not llm_engine or not llm_engine.is_loaded():
+    if not llm_proxy or not llm_proxy.is_loaded():
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     try:
@@ -372,7 +472,7 @@ async def chat_completions(request: ChatCompletionRequest):
         )
         prev_assistant_text = prev_assistant_message.get_text_content() if prev_assistant_message else None
 
-        # Retrieve relevant context from memory using RAG (if enabled)
+        # Extract user message text for sentiment analysis
         user_message_text = user_message.get_text_content()
         messages_with_context = list(request.messages)
 
@@ -389,45 +489,11 @@ async def chat_completions(request: ChatCompletionRequest):
                 user_message_text
             )
 
-        if config.memory.rag_enabled and not request.tools:
-            # Skip RAG when tools are present — the Harmony template includes
-            # tool definitions in the system message, and lengthy RAG context
-            # may interfere with proper tool calling behavior.
+        # Transparent proxy mode - messages pass through unmodified
+        # RAG functionality removed to focus on RLHF with minimal interference
+        logger.debug("Operating in transparent proxy mode - no RAG context injection")
 
-            # Run embedding generation in thread pool to avoid blocking event loop
-            relevant_context = await asyncio.to_thread(
-                memory_manager.retrieve_relevant_context,
-                query=user_message_text,
-                k=config.memory.rag_top_k
-            )
-
-            # Inject retrieved context into messages
-            if relevant_context:
-                # Build context string from retrieved interactions
-                context_parts = ["Here are some relevant previous interactions for context:\n"]
-                for idx, ctx in enumerate(relevant_context, 1):
-                    context_parts.append(
-                        f"\n[Context {idx}] (Similarity: {ctx['similarity']:.2f})\n"
-                        f"User: {ctx['user_message']}\n"
-                        f"Assistant: {ctx['assistant_response']}\n"
-                    )
-                context_str = "".join(context_parts)
-
-                # Insert context as a system message at the beginning
-                context_message = ChatMessage(
-                    role=MessageRole.SYSTEM,
-                    content=context_str
-                )
-                messages_with_context.insert(0, context_message)
-                logger.info(f"RAG: Injected {len(relevant_context)} context items into prompt")
-            else:
-                logger.debug("RAG: No relevant context found for this query")
-        elif request.tools:
-            logger.debug("RAG: Skipped — tools present in request")
-        else:
-            logger.debug("RAG: Disabled in configuration")
-
-        # Log post-processed request (after interception + RAG) so the admin
+        # Log post-processed request (after interception) so the admin
         # UI shows exactly what the LLM will receive.
         recent_api_requests.append({
             "timestamp": datetime.now().isoformat(),
@@ -456,8 +522,8 @@ async def chat_completions(request: ChatCompletionRequest):
         # Generate non-streaming response with context
         # Run LLM inference in thread pool to avoid blocking event loop
         start_time = time.time()
-        response_dict = await asyncio.to_thread(
-            llm_engine.generate,
+        # llm_proxy.generate() is already async, no need for to_thread()
+        response_dict = await llm_proxy.generate(
             messages=messages_with_context,
             temperature=request.temperature,
             top_p=request.top_p,
@@ -591,17 +657,17 @@ async def stream_chat_completion(
     messages_with_context: list[ChatMessage],
     prev_assistant_text: str | None = None
 ) -> AsyncGenerator[str, None]:
-    """Stream chat completion responses in OpenAI format with RAG context."""
+    """Stream chat completion responses in OpenAI format."""
     try:
         completion_id = f"chatcmpl-{uuid.uuid4()}"
         created = int(time.time())
 
         # When tools are present, generate complete response then stream as SSE
-        # (llm_engine.generate_stream doesn't support tools properly)
+        # (llm_proxy.generate_stream doesn't support tools properly)
         if request.tools:
             logger.debug("Streaming with tools: using generate() then converting to SSE")
-            response_dict = await asyncio.to_thread(
-                llm_engine.generate,
+            # llm_proxy.generate() is already async, no need for to_thread()
+            response_dict = await llm_proxy.generate(
                 messages=messages_with_context,
                 temperature=request.temperature,
                 top_p=request.top_p,
@@ -694,31 +760,17 @@ async def stream_chat_completion(
 
             full_response = ""
             finish_reason = "stop"
-            _STREAM_END = object()
+            # llm_proxy.generate_stream() is an async generator, use async for
+            stream_gen = llm_proxy.generate_stream(
+                messages=messages_with_context,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                max_tokens=request.max_tokens,
+                tools=None,
+                tool_choice=None
+            )
 
-            def get_next_chunk(generator):
-                try:
-                    return next(generator)
-                except StopIteration:
-                    return _STREAM_END
-
-            def get_stream_generator():
-                return llm_engine.generate_stream(
-                    messages=messages_with_context,
-                    temperature=request.temperature,
-                    top_p=request.top_p,
-                    max_tokens=request.max_tokens,
-                    tools=None,
-                    tool_choice=None
-                )
-
-            stream_gen = await asyncio.to_thread(get_stream_generator)
-
-            while True:
-                chunk = await asyncio.to_thread(get_next_chunk, stream_gen)
-
-                if chunk is _STREAM_END:
-                    break
+            async for chunk in stream_gen:
 
                 if 'choices' in chunk and len(chunk['choices']) > 0:
                     choice = chunk['choices'][0]
@@ -841,58 +893,23 @@ async def get_training_stats():
     return stats
 
 
-@app.post("/v1/model/unload")
-async def unload_model():
-    """
-    Unload the current LLM to free GPU vRAM.
-    Called by the trainer before training starts so it gets full GPU access.
-    The model should be reloaded via /v1/model/reload after training completes.
-    """
-    if not llm_engine:
-        raise HTTPException(status_code=503, detail="LLM engine not initialized")
-
-    logger.info("Model unload requested (pre-training GPU release)")
-    success = await asyncio.to_thread(llm_engine.unload_model)
-
-    if success:
-        return {"success": True, "message": "Model unloaded, GPU vRAM freed for training"}
-    else:
-        return {"success": False, "message": "Failed to unload model (check API logs)"}
+# Model unload/reload endpoints not needed in proxy mode (external LLM manages models)
+# @app.post("/v1/model/unload")
+# async def unload_model():
+#     """
+#     DEPRECATED: Model unloading not needed in proxy mode.
+#     External LLM manages its own model loading/unloading.
+#     """
+#     return {"success": False, "message": "Model unload not supported in proxy mode"}
 
 
-@app.post("/v1/model/reload")
-async def reload_model(request_body: ModelReloadRequest):
-    """
-    Reload the LLM with a new GGUF model file.
-    Called by the trainer after GGUF conversion, or manually for rollback.
-    """
-    if not llm_engine:
-        raise HTTPException(status_code=503, detail="LLM engine not initialized")
-
-    logger.info(
-        f"Model reload requested: checkpoint={request_body.checkpoint_id}, "
-        f"path={request_body.gguf_model_path}"
-    )
-
-    success = await asyncio.to_thread(
-        llm_engine.reload_model,
-        new_model_path=request_body.gguf_model_path,
-        checkpoint_id=request_body.checkpoint_id,
-    )
-
-    if success:
-        return ModelReloadResponse(
-            success=True,
-            message=f"Model reloaded with checkpoint {request_body.checkpoint_id}",
-            new_model_path=request_body.gguf_model_path,
-            checkpoint_id=request_body.checkpoint_id,
-        )
-    else:
-        return ModelReloadResponse(
-            success=False,
-            message="Model reload failed; previous model restored (check API logs)",
-            checkpoint_id=request_body.checkpoint_id,
-        )
+# @app.post("/v1/model/reload")
+# async def reload_model(request_body: ModelReloadRequest):
+#     """
+#     DEPRECATED: Model reloading not needed in proxy mode.
+#     External LLM manages its own model loading/unloading.
+#     """
+#     return {"success": False, "message": "Model reload not supported in proxy mode"}
 
 
 # ============================================================================
@@ -902,522 +919,167 @@ async def reload_model(request_body: ModelReloadRequest):
 @app.post("/api/chat")
 async def ollama_chat(request: Request):
     """
-    Generate chat completion (Ollama-compatible).
-    Converts Ollama request/response format to/from OpenAI format.
-    Supports both streaming and non-streaming responses.
+    Transparent proxy to external Ollama instance.
+    Forwards requests unchanged and captures messages in background for training.
     """
-    if not llm_engine or not llm_engine.is_loaded():
-        raise HTTPException(status_code=503, detail="Model not loaded")
+    if not llm_proxy:
+        raise HTTPException(status_code=503, detail="Proxy not configured")
 
     try:
-        # Parse Ollama request
-        ollama_req = await request.json()
+        # Read raw request body
+        request_body = await request.body()
+        ollama_req = json.loads(request_body)
 
-        # Normalize model name (handle :latest tag)
-        model_name = normalize_model_name(ollama_req.get("model", ""))
-        configured_model_id = config.model.model_id if config else "gpt-oss-20b"
+        # Extract info for background storage (fire-and-forget)
+        messages = ollama_req.get("messages", [])
+        model_name = ollama_req.get("model", "")
+        conversation_id = ollama_req.get("conversation_id", str(uuid.uuid4()))
 
-        if model_name not in [configured_model_id, "local-llm"]:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Model '{ollama_req.get('model')}' not found. Available model: {configured_model_id}:latest"
-            )
+        # Build external Ollama endpoint URL
+        endpoint_url = f"{llm_proxy.base_url.rstrip('/')}/api/chat"
 
-        # Convert Ollama format to OpenAI format
-        # Parse messages - convert to ChatMessage objects
-        raw_messages = ollama_req.get("messages", [])
-        messages = [
-            ChatMessage(
-                role=MessageRole(msg["role"]),
-                content=msg.get("content", ""),
-                tool_calls=msg.get("tool_calls")
-            )
-            for msg in raw_messages
-        ]
+        # Forward headers (exclude host and content-length as they'll be auto-set)
+        forward_headers = {
+            k: v for k, v in request.headers.items()
+            if k.lower() not in ['host', 'content-length']
+        }
 
-        tools = ollama_req.get("tools", None)
-        stream = ollama_req.get("stream", True)
+        # Forward request to external Ollama and stream response
+        async def transparent_proxy_stream():
+            """Stream response from external Ollama unchanged."""
+            accumulated_content = ""
+            done = False
 
-        # Extract options (Ollama uses 'options' object for generation params)
-        options = ollama_req.get("options", {})
-        temperature = options.get("temperature", config.model.temperature if config else 0.7)
-        top_p = options.get("top_p", config.model.top_p if config else 0.9)
-        max_tokens = options.get("num_predict", config.model.max_tokens if config else 2048)
+            try:
+                async with llm_proxy.client.stream(
+                    "POST",
+                    endpoint_url,
+                    content=request_body,
+                    headers=forward_headers
+                ) as response:
+                    response.raise_for_status()
 
-        # Build OpenAI-compatible request
-        openai_request = ChatCompletionRequest(
-            model=configured_model_id,
-            messages=messages,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            stream=stream,
-            tools=tools,
-            tool_choice=ollama_req.get("tool_choice", "auto") if tools else None
+                    # Stream each line unchanged
+                    async for line in response.aiter_lines():
+                        # Forward line exactly as received
+                        yield line + "\n"
+
+                        # Parse for background storage (don't modify the stream)
+                        if line.strip():
+                            try:
+                                chunk = json.loads(line)
+                                if chunk.get("done"):
+                                    done = True
+                                    if chunk.get("message", {}).get("content"):
+                                        accumulated_content = chunk["message"]["content"]
+                            except json.JSONDecodeError:
+                                pass
+
+                # Background storage (fire-and-forget) after stream completes
+                if done and messages and accumulated_content:
+                    # Check model whitelist
+                    should_store = should_store_interaction(model_name, config)
+
+                    if should_store:
+                        # Extract user message (last user message)
+                        user_message = next(
+                            (msg.get("content", "") for msg in reversed(messages)
+                             if msg.get("role") == "user"),
+                            None
+                        )
+
+                        # Extract previous assistant message (n-1 pairing)
+                        prev_assistant_message = next(
+                            (msg.get("content", "") for msg in reversed(messages)
+                             if msg.get("role") == "assistant"),
+                            None
+                        )
+
+                        if user_message and prev_assistant_message:
+                            # Create background task (fire-and-forget)
+                            task = asyncio.create_task(
+                                store_interaction_background(
+                                    conversation_id=conversation_id,
+                                    user_message=user_message,
+                                    assistant_response=prev_assistant_message,
+                                    sentiment_analyzer=sentiment_analyzer,
+                                    memory_manager=memory_manager
+                                )
+                            )
+                            background_tasks.add(task)
+                            task.add_done_callback(background_tasks.discard)
+                            logger.debug(f"Stored interaction for model '{model_name}'")
+                        else:
+                            logger.debug(f"Skipped storage - missing user or assistant message")
+                    else:
+                        logger.debug(f"Model '{model_name}' not whitelisted - skipping storage")
+
+            except httpx.HTTPStatusError as e:
+                logger.error(f"External Ollama error {e.response.status_code}: {e.response.text}")
+                raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+            except Exception as e:
+                logger.error(f"Proxy error: {e}", exc_info=True)
+                raise
+
+        return StreamingResponse(
+            transparent_proxy_stream(),
+            media_type="application/x-ndjson"
         )
-
-        # Handle streaming response
-        if stream:
-            async def ollama_stream_generator():
-                """Convert OpenAI SSE format to Ollama NDJSON format."""
-                start_time = time.time_ns()
-                full_content = ""
-                thinking_content = ""
-                final_content = ""
-                full_tool_calls = []
-                current_channel = None  # Track which channel we're in (analysis or final)
-                in_thinking = False
-                thinking_sent = False
-
-                # Get user message for conversation_id
-                user_message_text = next(
-                    (msg.get_text_content() for msg in reversed(messages) if msg.role == MessageRole.USER),
-                    ""
-                )
-                conversation_id = ollama_req.get("conversation_id", str(uuid.uuid4()))
-
-                # Normalize content arrays
-                messages_normalized = [msg.normalize_content() for msg in messages]
-
-                # Get previous assistant message for memory pairing
-                prev_assistant_text = next(
-                    (msg.get_text_content() for msg in reversed(messages) if msg.role == MessageRole.ASSISTANT),
-                    None
-                )
-
-                # Use existing stream_chat_completion function
-                async for sse_chunk in stream_chat_completion(
-                    openai_request, conversation_id, user_message_text,
-                    configured_model_id, messages_normalized, prev_assistant_text
-                ):
-                    # Parse SSE chunk
-                    chunk_text = sse_chunk.decode('utf-8') if isinstance(sse_chunk, bytes) else sse_chunk
-
-                    if chunk_text.startswith("data: "):
-                        chunk_text = chunk_text[6:]
-
-                    chunk_text = chunk_text.strip()
-
-                    if chunk_text == "[DONE]":
-                        # Send final chunk with done=true
-                        final_chunk = {
-                            "model": configured_model_id,
-                            "created_at": datetime.now().isoformat() + "Z",
-                            "message": {
-                                "role": "assistant",
-                                "content": final_content
-                            },
-                            "done": True,
-                            "done_reason": "stop",
-                            "total_duration": time.time_ns() - start_time,
-                            "load_duration": 0,
-                            "prompt_eval_count": 0,
-                            "eval_count": len(final_content.split())
-                        }
-
-                        # Add thinking if we collected any
-                        if thinking_content:
-                            final_chunk["message"]["thinking"] = thinking_content
-
-                        if full_tool_calls:
-                            final_chunk["message"]["tool_calls"] = full_tool_calls
-
-                        yield json.dumps(final_chunk) + "\n"
-                        break
-
-                    if not chunk_text:
-                        continue
-
-                    try:
-                        openai_data = json.loads(chunk_text)
-                    except json.JSONDecodeError:
-                        continue
-
-                    # Extract delta from OpenAI chunk
-                    if "choices" in openai_data and len(openai_data["choices"]) > 0:
-                        delta = openai_data["choices"][0].get("delta", {})
-
-                        # Handle role
-                        if "role" in delta:
-                            ollama_chunk = {
-                                "model": configured_model_id,
-                                "created_at": datetime.now().isoformat() + "Z",
-                                "message": {"role": delta["role"]},
-                                "done": False
-                            }
-                            yield json.dumps(ollama_chunk) + "\n"
-
-                        # Handle content - parse channel markers on-the-fly
-                        if "content" in delta and delta["content"]:
-                            token = delta["content"]
-                            full_content += token
-
-                            # Detect channel changes
-                            if "<|channel|>analysis<|message|>" in full_content and not in_thinking:
-                                in_thinking = True
-                                current_channel = "analysis"
-                                continue
-                            elif "<|channel|>final<|message|>" in full_content:
-                                in_thinking = False
-                                current_channel = "final"
-                                # Send accumulated thinking as a single chunk if we have it
-                                if thinking_content and not thinking_sent:
-                                    # Clean template tokens from thinking before sending
-                                    import re
-                                    thinking_cleaned = re.sub(r'<\|[^|]+\|>', '', thinking_content)
-                                    # Remove malformed artifacts like "assistantfinal"
-                                    thinking_cleaned = re.sub(r'\bassistantfinal\b', '', thinking_cleaned, flags=re.IGNORECASE)
-                                    thinking_cleaned = re.sub(r'\buserfinal\b', '', thinking_cleaned, flags=re.IGNORECASE)
-                                    thinking_cleaned = re.sub(r'\bsystemfinal\b', '', thinking_cleaned, flags=re.IGNORECASE)
-                                    thinking_cleaned = " ".join(thinking_cleaned.split()).strip()
-
-                                    thinking_chunk = {
-                                        "model": configured_model_id,
-                                        "created_at": datetime.now().isoformat() + "Z",
-                                        "message": {"thinking": thinking_cleaned},
-                                        "done": False
-                                    }
-                                    yield json.dumps(thinking_chunk) + "\n"
-                                    thinking_sent = True
-                                continue
-
-                            # Skip channel markers, template tokens, and end tags
-                            if any(marker in token for marker in ["<|channel|>", "<|message|>", "<|end|>", "<|return|>", "<|start|>"]):
-                                continue
-
-                            # Accumulate content based on current channel
-                            if in_thinking or current_channel == "analysis":
-                                thinking_content += token
-                            elif current_channel == "final":
-                                final_content += token
-                                # Stream final content in real-time
-                                ollama_chunk = {
-                                    "model": configured_model_id,
-                                    "created_at": datetime.now().isoformat() + "Z",
-                                    "message": {"content": token},
-                                    "done": False
-                                }
-                                yield json.dumps(ollama_chunk) + "\n"
-
-                        # Handle tool calls
-                        if "tool_calls" in delta:
-                            tool_calls = delta["tool_calls"]
-                            if tool_calls:
-                                for tc in tool_calls:
-                                    if tc.get("function"):
-                                        full_tool_calls.append(tc)
-                                ollama_chunk = {
-                                    "model": configured_model_id,
-                                    "created_at": datetime.now().isoformat() + "Z",
-                                    "message": {"tool_calls": tool_calls},
-                                    "done": False
-                                }
-                                yield json.dumps(ollama_chunk) + "\n"
-
-            return StreamingResponse(
-                ollama_stream_generator(),
-                media_type="application/x-ndjson"
-            )
-
-        # Handle non-streaming response
-        else:
-            # Get non-streaming response from our chat completions logic
-            json_response = await chat_completions(openai_request)
-
-            # Parse the JSON content from the JSONResponse
-            import json as json_module
-            response_content = json_module.loads(json_response.body.decode('utf-8'))
-
-            # Convert OpenAI response to Ollama format
-            choice = response_content["choices"][0]
-            message = choice["message"]
-
-            ollama_response = {
-                "model": configured_model_id,
-                "created_at": datetime.now().isoformat() + "Z",
-                "message": {
-                    "role": message.get("role", "assistant"),
-                    "content": message.get("content") or ""
-                },
-                "done": True,
-                "done_reason": choice.get("finish_reason") or "stop",
-                "total_duration": 0,
-                "load_duration": 0,
-                "prompt_eval_count": response_content.get("usage", {}).get("prompt_tokens", 0),
-                "eval_count": response_content.get("usage", {}).get("completion_tokens", 0)
-            }
-
-            # Add thinking if present in the message
-            if message.get("thinking"):
-                thinking_full = message["thinking"]
-                thinking_preview = thinking_full[:200] if len(thinking_full) > 200 else thinking_full
-                logger.debug(f"[OLLAMA THINKING] Preview (first 200 chars): {thinking_preview!r}")
-                logger.debug(f"[OLLAMA THINKING] Full length: {len(thinking_full)} chars")
-                # Log the end of thinking to see if template tokens are there
-                if len(thinking_full) > 200:
-                    thinking_end = thinking_full[-200:]
-                    logger.debug(f"[OLLAMA THINKING] End (last 200 chars): {thinking_end!r}")
-                # Check for template token presence
-                has_start_token = "<|start|>" in thinking_full
-                has_assistant_final = "assistantfinal" in thinking_full.lower()
-                logger.debug(f"[OLLAMA THINKING] Contains <|start|>: {has_start_token}, Contains 'assistantfinal': {has_assistant_final}")
-                ollama_response["message"]["thinking"] = thinking_full
-
-            # Add tool calls if present
-            if message.get("tool_calls"):
-                ollama_response["message"]["tool_calls"] = [
-                    {
-                        "function": {
-                            "name": tc["function"]["name"],
-                            "arguments": tc["function"]["arguments"]
-                        }
-                    }
-                    for tc in message["tool_calls"]
-                ]
-
-            return JSONResponse(content=ollama_response)
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in Ollama chat endpoint: {e}", exc_info=True)
+        logger.error(f"Error in Ollama proxy: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/tags")
-async def ollama_list_models():
+@app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+async def ollama_proxy_catchall(request: Request, path: str):
     """
-    List available models (Ollama-compatible).
-    Returns model information including size, format, and capabilities.
+    Catch-all transparent proxy for all other Ollama API endpoints.
+    Forwards requests to external Ollama unchanged.
+
+    Handles: /api/tags, /api/show, /api/ps, /api/version, /api/pull, /api/push, etc.
+    Note: /api/chat is handled separately for message capture.
     """
-    if not config:
-        raise HTTPException(status_code=503, detail="Configuration not loaded")
+    if not llm_proxy:
+        raise HTTPException(status_code=503, detail="Proxy not configured")
 
-    model_id = config.model.model_id
-    model_path = Path(config.model.base_model_path)
-
-    # Get model file size
     try:
-        if model_path.exists():
-            model_size = model_path.stat().st_size
-            model_modified = datetime.fromtimestamp(model_path.stat().st_mtime).isoformat()
-        else:
-            model_size = 0
-            model_modified = datetime.now().isoformat()
-    except Exception as e:
-        logger.warning(f"Could not read model file stats: {e}")
-        model_size = 0
-        model_modified = datetime.now().isoformat()
+        # Build external Ollama endpoint URL
+        endpoint_url = f"{llm_proxy.base_url.rstrip('/')}/api/{path}"
 
-    # Extract model family from model_id (e.g., "gpt-oss-20b" -> "gpt-oss")
-    model_family = "-".join(model_id.split("-")[:-1]) if "-" in model_id else model_id
+        # Read request body
+        request_body = await request.body()
 
-    # Determine parameter size from model_id (e.g., "20b" from "gpt-oss-20b")
-    param_size = model_id.split("-")[-1] if "-" in model_id else "unknown"
-    if param_size.endswith("b") or param_size.endswith("B"):
-        param_size = param_size.upper()
+        # Forward headers (exclude host and content-length)
+        forward_headers = {
+            k: v for k, v in request.headers.items()
+            if k.lower() not in ['host', 'content-length']
+        }
 
-    # Include :latest tag to match Ollama's convention
-    model_name_with_tag = f"{model_id}:latest"
-
-    return {
-        "models": [
-            {
-                "name": model_name_with_tag,
-                "model": model_name_with_tag,
-                "modified_at": model_modified,
-                "size": model_size,
-                "digest": "sha256:local",  # Local model, no remote digest
-                "details": {
-                    "parent_model": "",
-                    "format": "gguf",
-                    "family": model_family,
-                    "families": [model_family],
-                    "parameter_size": param_size,
-                    "quantization_level": "Q4_K_M"  # From our GGUF config
-                }
-            }
-        ]
-    }
-
-
-@app.post("/api/show")
-async def ollama_show_model(request: Request):
-    """
-    Show detailed model information (Ollama-compatible).
-    Returns model configuration, parameters, capabilities, and template.
-    """
-    if not config:
-        raise HTTPException(status_code=503, detail="Configuration not loaded")
-
-    # Parse request body
-    try:
-        body = await request.json()
-        requested_model = body.get("model", config.model.model_id)
-        verbose = body.get("verbose", False)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid request body")
-
-    model_id = config.model.model_id
-
-    # Normalize model name to handle Ollama-style tags (e.g., 'model:latest')
-    normalized_model = normalize_model_name(requested_model)
-
-    # Validate requested model matches our model
-    if normalized_model not in [model_id, "local-llm"]:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Model '{requested_model}' not found. Available model: {model_id}:latest"
+        # Forward request to external Ollama
+        response = await llm_proxy.client.request(
+            method=request.method,
+            url=endpoint_url,
+            content=request_body if request_body else None,
+            headers=forward_headers,
+            params=request.query_params
         )
 
-    model_path = Path(config.model.base_model_path)
+        # Return response with same status code and content type
+        return JSONResponse(
+            content=response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text,
+            status_code=response.status_code,
+            headers={k: v for k, v in response.headers.items() if k.lower() not in ['content-encoding', 'content-length', 'transfer-encoding']}
+        )
 
-    # Get model file stats
-    try:
-        if model_path.exists():
-            model_size = model_path.stat().st_size
-            model_modified = datetime.fromtimestamp(model_path.stat().st_mtime).isoformat()
-        else:
-            model_size = 0
-            model_modified = datetime.now().isoformat()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"External Ollama error {e.response.status_code}: {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
     except Exception as e:
-        logger.warning(f"Could not read model file stats: {e}")
-        model_size = 0
-        model_modified = datetime.now().isoformat()
-
-    # Extract model family from model_id
-    model_family = "-".join(model_id.split("-")[:-1]) if "-" in model_id else model_id
-    param_size = model_id.split("-")[-1] if "-" in model_id else "unknown"
-    if param_size.endswith("b") or param_size.endswith("B"):
-        param_size = param_size.upper()
-
-    # Build parameters string from config
-    parameters_lines = [
-        f"temperature {config.model.temperature}",
-        f"top_p {config.model.top_p}",
-        f"num_ctx {config.model.context_length}",
-        f"num_gpu {config.model.n_gpu_layers}",
-        f"num_thread {config.model.n_threads}",
-    ]
-
-    response = {
-        "modelfile": f"# Modelfile for {model_id}\nFROM {model_path}\n",
-        "parameters": "\n".join(parameters_lines),
-        "template": "{{ .System }}\n{{ .Prompt }}",
-        "details": {
-            "parent_model": "",
-            "format": "gguf",
-            "family": model_family,
-            "families": [model_family],
-            "parameter_size": param_size,
-            "quantization_level": "Q4_K_M"
-        },
-        "model_info": {
-            "general.architecture": model_family,
-            "general.file_type": "Q4_K_M",
-            "general.parameter_count": param_size,
-            "general.quantization_version": 2,
-            f"{model_family}.context_length": config.model.context_length,
-            f"{model_family}.embedding_length": 4096,
-            f"{model_family}.block_count": 32,
-            f"{model_family}.attention.head_count": 32,
-            f"{model_family}.attention.head_count_kv": 32,
-        },
-        "modified_at": model_modified,
-        "capabilities": ["completion", "tools"]  # We support tool calling
-    }
-
-    # Add verbose fields if requested
-    if verbose:
-        response["license"] = "Project RLHFL - Local Model License"
-        response["system"] = ""  # No default system prompt
-
-    return response
-
-
-@app.get("/api/ps")
-async def ollama_list_running():
-    """
-    List currently running (loaded) models (Ollama-compatible).
-    Returns information about models loaded in memory.
-    """
-    if not config or not llm_engine:
-        return {"models": []}
-
-    # Check if model is loaded
-    if not llm_engine.is_loaded():
-        return {"models": []}
-
-    model_id = config.model.model_id
-    model_path = Path(config.model.base_model_path)
-
-    # Get model file stats
-    try:
-        if model_path.exists():
-            model_size = model_path.stat().st_size
-        else:
-            model_size = 0
-    except Exception:
-        model_size = 0
-
-    # Extract model family and parameter size
-    model_family = "-".join(model_id.split("-")[:-1]) if "-" in model_id else model_id
-    param_size = model_id.split("-")[-1] if "-" in model_id else "unknown"
-    if param_size.endswith("b") or param_size.endswith("B"):
-        param_size = param_size.upper()
-
-    # Calculate expiration time (models stay loaded indefinitely in our case)
-    # Set to 24 hours from now as a reasonable default
-    expires_at = (datetime.now().astimezone()).isoformat()
-
-    # Estimate VRAM usage (rough estimate based on quantization)
-    # Q4_K_M uses roughly 4.5 bits per parameter
-    try:
-        if param_size.endswith("B"):
-            param_count_str = param_size[:-1]
-            param_count = float(param_count_str) * 1_000_000_000
-            # 4.5 bits per parameter for Q4_K_M
-            size_vram = int(param_count * 4.5 / 8)
-        else:
-            size_vram = int(model_size * 0.8)  # Rough estimate
-    except Exception:
-        size_vram = int(model_size * 0.8)
-
-    # Include :latest tag to match Ollama's convention
-    model_name_with_tag = f"{model_id}:latest"
-
-    return {
-        "models": [
-            {
-                "name": model_name_with_tag,
-                "model": model_name_with_tag,
-                "size": model_size,
-                "digest": "sha256:local",
-                "details": {
-                    "parent_model": "",
-                    "format": "gguf",
-                    "family": model_family,
-                    "families": [model_family],
-                    "parameter_size": param_size,
-                    "quantization_level": "Q4_K_M"
-                },
-                "expires_at": expires_at,
-                "size_vram": size_vram,
-                "context_length": config.model.context_length
-            }
-        ]
-    }
-
-
-@app.get("/api/version")
-async def ollama_version():
-    """
-    Get version information (Ollama-compatible).
-    Returns the API version for compatibility.
-    """
-    return {
-        "version": "0.5.1"  # Ollama API version we're compatible with
-    }
+        logger.error(f"Proxy error for /api/{path}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================

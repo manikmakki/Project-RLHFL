@@ -60,7 +60,8 @@ RUN pip install --no-cache-dir \
     PyYAML==6.0.1 \
     aiofiles==23.2.1 \
     python-multipart==0.0.6 \
-    psutil==5.9.6
+    psutil==5.9.6 \
+    httpx
 
 WORKDIR /app
 

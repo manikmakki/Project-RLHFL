@@ -7,7 +7,7 @@ memory:
   rag_enabled: false
   rag_top_k: 5
   # Memory management settings
-  max_db_size_gb: 10                # Maximum database size before auto-cleanup
+  max_db_size_gb: 25                # Maximum database size before auto-cleanup (increased for full-context storage)
   auto_cleanup_threshold: 0.9       # Trigger cleanup at 90% of max size
   auto_cleanup_percentage: 0.1      # Remove bottom 10% by weight during auto-cleanup
   min_weight_threshold: 0.5         # Remove entries below this weight during pre-training cleanup
@@ -32,6 +32,19 @@ sentiment:
   explicit_instruction_boost: 3.0
   negative_threshold: -0.3
   positive_threshold: 0.3
+llm_proxy:
+  base_url: "http://192.168.10.20:11434"
+  endpoint_type: "auto"
+  external_model_name: "jan-fischer-haw/jinx-gpt-oss-20b:Q4_K_M"
+  api_key: null
+  sentiment_enabled_models:
+    - "jan-fischer-haw/jinx-gpt-oss-20b:Q4_K_M"  # Model being trained
+  connect_timeout_seconds: 10
+  read_timeout_seconds: 120
+  max_retries: 2
+  retry_delay_seconds: 1.0
+  max_connections: 10
+  max_keepalive_connections: 5
 training:
   batch_size: 2
   gradient_accumulation_steps: 4
