@@ -65,6 +65,60 @@ prompt_interceptor = None
 recent_api_requests = deque(maxlen=20)  # Rolling buffer of last 20 API requests
 
 
+def normalize_model_name(model_name: str) -> str:
+    """
+    Normalize model name by stripping Ollama-style tags.
+    Ollama uses 'model:tag' format where tag defaults to 'latest'.
+    This allows clients to request 'jinx-gpt-oss-20b:latest' or just 'jinx-gpt-oss-20b'.
+    """
+    if ':' in model_name:
+        # Strip the tag part (e.g., 'jinx-gpt-oss-20b:latest' -> 'jinx-gpt-oss-20b')
+        return model_name.split(':')[0]
+    return model_name
+
+
+def parse_model_response(content: str) -> dict:
+    """
+    Parse the model's response to extract thinking (analysis) and final content.
+    The model outputs special channel tags:
+    - <|channel|>analysis<|message|>...text...<|end|> for chain-of-thought reasoning
+    - <|channel|>final<|message|>...text...<|end|> for the final user-facing response
+
+    Returns dict with 'thinking' and 'content' fields.
+    """
+    import re
+
+    result = {
+        'thinking': None,
+        'content': content  # Default to full content if no parsing needed
+    }
+
+    # Extract analysis/thinking section
+    analysis_match = re.search(
+        r'<\|channel\|>analysis<\|message\|>(.*?)(?:<\|end\|>|<\|channel\|>)',
+        content,
+        re.DOTALL
+    )
+
+    # Extract final content section
+    final_match = re.search(
+        r'<\|channel\|>final<\|message\|>(.*?)(?:<\|end\|>|<\|return\|>|$)',
+        content,
+        re.DOTALL
+    )
+
+    if analysis_match:
+        result['thinking'] = analysis_match.group(1).strip()
+
+    if final_match:
+        result['content'] = final_match.group(1).strip()
+    elif analysis_match:
+        # If we found analysis but no final section, content should be empty
+        result['content'] = ''
+
+    return result
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager for FastAPI app."""
@@ -277,8 +331,11 @@ async def chat_completions(request: ChatCompletionRequest):
         # Use configured model if not specified, or validate the requested model matches
         configured_model_id = config.model.model_id if config else "gpt-oss-20b"
         request_model = request.model or configured_model_id
-        
-        if request_model not in [configured_model_id, "local-llm"]:  # Allow legacy "local-llm" for compatibility
+
+        # Normalize model name to handle Ollama-style tags (e.g., 'model:latest')
+        normalized_model = normalize_model_name(request_model)
+
+        if normalized_model not in [configured_model_id, "local-llm"]:  # Allow legacy "local-llm" for compatibility
             raise HTTPException(
                 status_code=400,
                 detail=f"Model '{request_model}' not found. Available model: {configured_model_id}"
@@ -415,9 +472,10 @@ async def chat_completions(request: ChatCompletionRequest):
         # Extract response components
         response_text = response_dict.get("content") or ""
         tool_calls = response_dict.get("tool_calls")
+        thinking = response_dict.get("thinking")
         finish_reason = response_dict.get("finish_reason", "stop")
 
-        logger.debug(f"Parsed response - finish_reason={finish_reason}, has_content={bool(response_text)}, tool_calls={tool_calls}")
+        logger.debug(f"Parsed response - finish_reason={finish_reason}, has_content={bool(response_text)}, thinking={bool(thinking)}, tool_calls={tool_calls}")
 
         # Only analyze sentiment and store if this is a final response (not a tool call)
         # Store user prompt paired with previous LLM response (n-1) to capture
@@ -481,9 +539,10 @@ async def chat_completions(request: ChatCompletionRequest):
         assistant_message = ChatMessage(
             role=MessageRole.ASSISTANT,
             content=response_text,  # Keep empty string as-is, don't convert to None
-            tool_calls=tool_calls
+            tool_calls=tool_calls,
+            thinking=thinking  # Include thinking if present
         )
-        logger.debug(f"Built assistant_message: content={assistant_message.content!r}, tool_calls={assistant_message.tool_calls}")
+        logger.debug(f"Built assistant_message: content={assistant_message.content!r}, thinking={bool(thinking)}, tool_calls={assistant_message.tool_calls}")
 
         # Build OpenAI-compatible response
         completion_response = ChatCompletionResponse(
@@ -835,6 +894,535 @@ async def reload_model(request_body: ModelReloadRequest):
             checkpoint_id=request_body.checkpoint_id,
         )
 
+
+# ============================================================================
+# Ollama API Compatibility Endpoints
+# ============================================================================
+
+@app.post("/api/chat")
+async def ollama_chat(request: Request):
+    """
+    Generate chat completion (Ollama-compatible).
+    Converts Ollama request/response format to/from OpenAI format.
+    Supports both streaming and non-streaming responses.
+    """
+    if not llm_engine or not llm_engine.is_loaded():
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    try:
+        # Parse Ollama request
+        ollama_req = await request.json()
+
+        # Normalize model name (handle :latest tag)
+        model_name = normalize_model_name(ollama_req.get("model", ""))
+        configured_model_id = config.model.model_id if config else "gpt-oss-20b"
+
+        if model_name not in [configured_model_id, "local-llm"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model '{ollama_req.get('model')}' not found. Available model: {configured_model_id}:latest"
+            )
+
+        # Convert Ollama format to OpenAI format
+        # Parse messages - convert to ChatMessage objects
+        raw_messages = ollama_req.get("messages", [])
+        messages = [
+            ChatMessage(
+                role=MessageRole(msg["role"]),
+                content=msg.get("content", ""),
+                tool_calls=msg.get("tool_calls")
+            )
+            for msg in raw_messages
+        ]
+
+        tools = ollama_req.get("tools", None)
+        stream = ollama_req.get("stream", True)
+
+        # Extract options (Ollama uses 'options' object for generation params)
+        options = ollama_req.get("options", {})
+        temperature = options.get("temperature", config.model.temperature if config else 0.7)
+        top_p = options.get("top_p", config.model.top_p if config else 0.9)
+        max_tokens = options.get("num_predict", config.model.max_tokens if config else 2048)
+
+        # Build OpenAI-compatible request
+        openai_request = ChatCompletionRequest(
+            model=configured_model_id,
+            messages=messages,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            stream=stream,
+            tools=tools,
+            tool_choice=ollama_req.get("tool_choice", "auto") if tools else None
+        )
+
+        # Handle streaming response
+        if stream:
+            async def ollama_stream_generator():
+                """Convert OpenAI SSE format to Ollama NDJSON format."""
+                start_time = time.time_ns()
+                full_content = ""
+                thinking_content = ""
+                final_content = ""
+                full_tool_calls = []
+                current_channel = None  # Track which channel we're in (analysis or final)
+                in_thinking = False
+                thinking_sent = False
+
+                # Get user message for conversation_id
+                user_message_text = next(
+                    (msg.get_text_content() for msg in reversed(messages) if msg.role == MessageRole.USER),
+                    ""
+                )
+                conversation_id = ollama_req.get("conversation_id", str(uuid.uuid4()))
+
+                # Normalize content arrays
+                messages_normalized = [msg.normalize_content() for msg in messages]
+
+                # Get previous assistant message for memory pairing
+                prev_assistant_text = next(
+                    (msg.get_text_content() for msg in reversed(messages) if msg.role == MessageRole.ASSISTANT),
+                    None
+                )
+
+                # Use existing stream_chat_completion function
+                async for sse_chunk in stream_chat_completion(
+                    openai_request, conversation_id, user_message_text,
+                    configured_model_id, messages_normalized, prev_assistant_text
+                ):
+                    # Parse SSE chunk
+                    chunk_text = sse_chunk.decode('utf-8') if isinstance(sse_chunk, bytes) else sse_chunk
+
+                    if chunk_text.startswith("data: "):
+                        chunk_text = chunk_text[6:]
+
+                    chunk_text = chunk_text.strip()
+
+                    if chunk_text == "[DONE]":
+                        # Send final chunk with done=true
+                        final_chunk = {
+                            "model": configured_model_id,
+                            "created_at": datetime.now().isoformat() + "Z",
+                            "message": {
+                                "role": "assistant",
+                                "content": final_content
+                            },
+                            "done": True,
+                            "done_reason": "stop",
+                            "total_duration": time.time_ns() - start_time,
+                            "load_duration": 0,
+                            "prompt_eval_count": 0,
+                            "eval_count": len(final_content.split())
+                        }
+
+                        # Add thinking if we collected any
+                        if thinking_content:
+                            final_chunk["message"]["thinking"] = thinking_content
+
+                        if full_tool_calls:
+                            final_chunk["message"]["tool_calls"] = full_tool_calls
+
+                        yield json.dumps(final_chunk) + "\n"
+                        break
+
+                    if not chunk_text:
+                        continue
+
+                    try:
+                        openai_data = json.loads(chunk_text)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Extract delta from OpenAI chunk
+                    if "choices" in openai_data and len(openai_data["choices"]) > 0:
+                        delta = openai_data["choices"][0].get("delta", {})
+
+                        # Handle role
+                        if "role" in delta:
+                            ollama_chunk = {
+                                "model": configured_model_id,
+                                "created_at": datetime.now().isoformat() + "Z",
+                                "message": {"role": delta["role"]},
+                                "done": False
+                            }
+                            yield json.dumps(ollama_chunk) + "\n"
+
+                        # Handle content - parse channel markers on-the-fly
+                        if "content" in delta and delta["content"]:
+                            token = delta["content"]
+                            full_content += token
+
+                            # Detect channel changes
+                            if "<|channel|>analysis<|message|>" in full_content and not in_thinking:
+                                in_thinking = True
+                                current_channel = "analysis"
+                                continue
+                            elif "<|channel|>final<|message|>" in full_content:
+                                in_thinking = False
+                                current_channel = "final"
+                                # Send accumulated thinking as a single chunk if we have it
+                                if thinking_content and not thinking_sent:
+                                    # Clean template tokens from thinking before sending
+                                    import re
+                                    thinking_cleaned = re.sub(r'<\|[^|]+\|>', '', thinking_content)
+                                    # Remove malformed artifacts like "assistantfinal"
+                                    thinking_cleaned = re.sub(r'\bassistantfinal\b', '', thinking_cleaned, flags=re.IGNORECASE)
+                                    thinking_cleaned = re.sub(r'\buserfinal\b', '', thinking_cleaned, flags=re.IGNORECASE)
+                                    thinking_cleaned = re.sub(r'\bsystemfinal\b', '', thinking_cleaned, flags=re.IGNORECASE)
+                                    thinking_cleaned = " ".join(thinking_cleaned.split()).strip()
+
+                                    thinking_chunk = {
+                                        "model": configured_model_id,
+                                        "created_at": datetime.now().isoformat() + "Z",
+                                        "message": {"thinking": thinking_cleaned},
+                                        "done": False
+                                    }
+                                    yield json.dumps(thinking_chunk) + "\n"
+                                    thinking_sent = True
+                                continue
+
+                            # Skip channel markers, template tokens, and end tags
+                            if any(marker in token for marker in ["<|channel|>", "<|message|>", "<|end|>", "<|return|>", "<|start|>"]):
+                                continue
+
+                            # Accumulate content based on current channel
+                            if in_thinking or current_channel == "analysis":
+                                thinking_content += token
+                            elif current_channel == "final":
+                                final_content += token
+                                # Stream final content in real-time
+                                ollama_chunk = {
+                                    "model": configured_model_id,
+                                    "created_at": datetime.now().isoformat() + "Z",
+                                    "message": {"content": token},
+                                    "done": False
+                                }
+                                yield json.dumps(ollama_chunk) + "\n"
+
+                        # Handle tool calls
+                        if "tool_calls" in delta:
+                            tool_calls = delta["tool_calls"]
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    if tc.get("function"):
+                                        full_tool_calls.append(tc)
+                                ollama_chunk = {
+                                    "model": configured_model_id,
+                                    "created_at": datetime.now().isoformat() + "Z",
+                                    "message": {"tool_calls": tool_calls},
+                                    "done": False
+                                }
+                                yield json.dumps(ollama_chunk) + "\n"
+
+            return StreamingResponse(
+                ollama_stream_generator(),
+                media_type="application/x-ndjson"
+            )
+
+        # Handle non-streaming response
+        else:
+            # Get non-streaming response from our chat completions logic
+            json_response = await chat_completions(openai_request)
+
+            # Parse the JSON content from the JSONResponse
+            import json as json_module
+            response_content = json_module.loads(json_response.body.decode('utf-8'))
+
+            # Convert OpenAI response to Ollama format
+            choice = response_content["choices"][0]
+            message = choice["message"]
+
+            ollama_response = {
+                "model": configured_model_id,
+                "created_at": datetime.now().isoformat() + "Z",
+                "message": {
+                    "role": message.get("role", "assistant"),
+                    "content": message.get("content") or ""
+                },
+                "done": True,
+                "done_reason": choice.get("finish_reason") or "stop",
+                "total_duration": 0,
+                "load_duration": 0,
+                "prompt_eval_count": response_content.get("usage", {}).get("prompt_tokens", 0),
+                "eval_count": response_content.get("usage", {}).get("completion_tokens", 0)
+            }
+
+            # Add thinking if present in the message
+            if message.get("thinking"):
+                thinking_full = message["thinking"]
+                thinking_preview = thinking_full[:200] if len(thinking_full) > 200 else thinking_full
+                logger.debug(f"[OLLAMA THINKING] Preview (first 200 chars): {thinking_preview!r}")
+                logger.debug(f"[OLLAMA THINKING] Full length: {len(thinking_full)} chars")
+                # Log the end of thinking to see if template tokens are there
+                if len(thinking_full) > 200:
+                    thinking_end = thinking_full[-200:]
+                    logger.debug(f"[OLLAMA THINKING] End (last 200 chars): {thinking_end!r}")
+                # Check for template token presence
+                has_start_token = "<|start|>" in thinking_full
+                has_assistant_final = "assistantfinal" in thinking_full.lower()
+                logger.debug(f"[OLLAMA THINKING] Contains <|start|>: {has_start_token}, Contains 'assistantfinal': {has_assistant_final}")
+                ollama_response["message"]["thinking"] = thinking_full
+
+            # Add tool calls if present
+            if message.get("tool_calls"):
+                ollama_response["message"]["tool_calls"] = [
+                    {
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"]
+                        }
+                    }
+                    for tc in message["tool_calls"]
+                ]
+
+            return JSONResponse(content=ollama_response)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in Ollama chat endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tags")
+async def ollama_list_models():
+    """
+    List available models (Ollama-compatible).
+    Returns model information including size, format, and capabilities.
+    """
+    if not config:
+        raise HTTPException(status_code=503, detail="Configuration not loaded")
+
+    model_id = config.model.model_id
+    model_path = Path(config.model.base_model_path)
+
+    # Get model file size
+    try:
+        if model_path.exists():
+            model_size = model_path.stat().st_size
+            model_modified = datetime.fromtimestamp(model_path.stat().st_mtime).isoformat()
+        else:
+            model_size = 0
+            model_modified = datetime.now().isoformat()
+    except Exception as e:
+        logger.warning(f"Could not read model file stats: {e}")
+        model_size = 0
+        model_modified = datetime.now().isoformat()
+
+    # Extract model family from model_id (e.g., "gpt-oss-20b" -> "gpt-oss")
+    model_family = "-".join(model_id.split("-")[:-1]) if "-" in model_id else model_id
+
+    # Determine parameter size from model_id (e.g., "20b" from "gpt-oss-20b")
+    param_size = model_id.split("-")[-1] if "-" in model_id else "unknown"
+    if param_size.endswith("b") or param_size.endswith("B"):
+        param_size = param_size.upper()
+
+    # Include :latest tag to match Ollama's convention
+    model_name_with_tag = f"{model_id}:latest"
+
+    return {
+        "models": [
+            {
+                "name": model_name_with_tag,
+                "model": model_name_with_tag,
+                "modified_at": model_modified,
+                "size": model_size,
+                "digest": "sha256:local",  # Local model, no remote digest
+                "details": {
+                    "parent_model": "",
+                    "format": "gguf",
+                    "family": model_family,
+                    "families": [model_family],
+                    "parameter_size": param_size,
+                    "quantization_level": "Q4_K_M"  # From our GGUF config
+                }
+            }
+        ]
+    }
+
+
+@app.post("/api/show")
+async def ollama_show_model(request: Request):
+    """
+    Show detailed model information (Ollama-compatible).
+    Returns model configuration, parameters, capabilities, and template.
+    """
+    if not config:
+        raise HTTPException(status_code=503, detail="Configuration not loaded")
+
+    # Parse request body
+    try:
+        body = await request.json()
+        requested_model = body.get("model", config.model.model_id)
+        verbose = body.get("verbose", False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid request body")
+
+    model_id = config.model.model_id
+
+    # Normalize model name to handle Ollama-style tags (e.g., 'model:latest')
+    normalized_model = normalize_model_name(requested_model)
+
+    # Validate requested model matches our model
+    if normalized_model not in [model_id, "local-llm"]:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{requested_model}' not found. Available model: {model_id}:latest"
+        )
+
+    model_path = Path(config.model.base_model_path)
+
+    # Get model file stats
+    try:
+        if model_path.exists():
+            model_size = model_path.stat().st_size
+            model_modified = datetime.fromtimestamp(model_path.stat().st_mtime).isoformat()
+        else:
+            model_size = 0
+            model_modified = datetime.now().isoformat()
+    except Exception as e:
+        logger.warning(f"Could not read model file stats: {e}")
+        model_size = 0
+        model_modified = datetime.now().isoformat()
+
+    # Extract model family from model_id
+    model_family = "-".join(model_id.split("-")[:-1]) if "-" in model_id else model_id
+    param_size = model_id.split("-")[-1] if "-" in model_id else "unknown"
+    if param_size.endswith("b") or param_size.endswith("B"):
+        param_size = param_size.upper()
+
+    # Build parameters string from config
+    parameters_lines = [
+        f"temperature {config.model.temperature}",
+        f"top_p {config.model.top_p}",
+        f"num_ctx {config.model.context_length}",
+        f"num_gpu {config.model.n_gpu_layers}",
+        f"num_thread {config.model.n_threads}",
+    ]
+
+    response = {
+        "modelfile": f"# Modelfile for {model_id}\nFROM {model_path}\n",
+        "parameters": "\n".join(parameters_lines),
+        "template": "{{ .System }}\n{{ .Prompt }}",
+        "details": {
+            "parent_model": "",
+            "format": "gguf",
+            "family": model_family,
+            "families": [model_family],
+            "parameter_size": param_size,
+            "quantization_level": "Q4_K_M"
+        },
+        "model_info": {
+            "general.architecture": model_family,
+            "general.file_type": "Q4_K_M",
+            "general.parameter_count": param_size,
+            "general.quantization_version": 2,
+            f"{model_family}.context_length": config.model.context_length,
+            f"{model_family}.embedding_length": 4096,
+            f"{model_family}.block_count": 32,
+            f"{model_family}.attention.head_count": 32,
+            f"{model_family}.attention.head_count_kv": 32,
+        },
+        "modified_at": model_modified,
+        "capabilities": ["completion", "tools"]  # We support tool calling
+    }
+
+    # Add verbose fields if requested
+    if verbose:
+        response["license"] = "Project RLHFL - Local Model License"
+        response["system"] = ""  # No default system prompt
+
+    return response
+
+
+@app.get("/api/ps")
+async def ollama_list_running():
+    """
+    List currently running (loaded) models (Ollama-compatible).
+    Returns information about models loaded in memory.
+    """
+    if not config or not llm_engine:
+        return {"models": []}
+
+    # Check if model is loaded
+    if not llm_engine.is_loaded():
+        return {"models": []}
+
+    model_id = config.model.model_id
+    model_path = Path(config.model.base_model_path)
+
+    # Get model file stats
+    try:
+        if model_path.exists():
+            model_size = model_path.stat().st_size
+        else:
+            model_size = 0
+    except Exception:
+        model_size = 0
+
+    # Extract model family and parameter size
+    model_family = "-".join(model_id.split("-")[:-1]) if "-" in model_id else model_id
+    param_size = model_id.split("-")[-1] if "-" in model_id else "unknown"
+    if param_size.endswith("b") or param_size.endswith("B"):
+        param_size = param_size.upper()
+
+    # Calculate expiration time (models stay loaded indefinitely in our case)
+    # Set to 24 hours from now as a reasonable default
+    expires_at = (datetime.now().astimezone()).isoformat()
+
+    # Estimate VRAM usage (rough estimate based on quantization)
+    # Q4_K_M uses roughly 4.5 bits per parameter
+    try:
+        if param_size.endswith("B"):
+            param_count_str = param_size[:-1]
+            param_count = float(param_count_str) * 1_000_000_000
+            # 4.5 bits per parameter for Q4_K_M
+            size_vram = int(param_count * 4.5 / 8)
+        else:
+            size_vram = int(model_size * 0.8)  # Rough estimate
+    except Exception:
+        size_vram = int(model_size * 0.8)
+
+    # Include :latest tag to match Ollama's convention
+    model_name_with_tag = f"{model_id}:latest"
+
+    return {
+        "models": [
+            {
+                "name": model_name_with_tag,
+                "model": model_name_with_tag,
+                "size": model_size,
+                "digest": "sha256:local",
+                "details": {
+                    "parent_model": "",
+                    "format": "gguf",
+                    "family": model_family,
+                    "families": [model_family],
+                    "parameter_size": param_size,
+                    "quantization_level": "Q4_K_M"
+                },
+                "expires_at": expires_at,
+                "size_vram": size_vram,
+                "context_length": config.model.context_length
+            }
+        ]
+    }
+
+
+@app.get("/api/version")
+async def ollama_version():
+    """
+    Get version information (Ollama-compatible).
+    Returns the API version for compatibility.
+    """
+    return {
+        "version": "0.5.1"  # Ollama API version we're compatible with
+    }
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
 
 def _read_checkpoint_json(checkpoint_file: Path) -> Optional[dict]:
     """Read and parse checkpoint JSON file. Returns None on error."""

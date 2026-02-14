@@ -17,7 +17,7 @@ model:
   base_model_path: /models/jinx-gpt-oss-20b-Q4_K_M.gguf
   response_format: openai # Options: openai (default), openclaw
   context_length: 32768
-  max_tokens: 1024
+  max_tokens: 4096
   model_id: jinx-gpt-oss-20b
   n_batch: 512
   n_gpu_layers: -1

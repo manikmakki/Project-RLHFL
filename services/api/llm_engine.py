@@ -468,38 +468,88 @@ class LLMEngine:
                     logger.debug(f"Skipping invalid JSON block: {e}")
                     continue
 
+        def clean_template_tokens(text: str) -> str:
+            """Remove template tokens that may leak into output."""
+            if not text:
+                return text
+
+            import re
+
+            # Remove any <|...|> format tokens (catches all special tokens)
+            cleaned = re.sub(r'<\|[^|]+\|>', '', text)
+
+            # Remove malformed role+channel combinations that sometimes leak
+            # These are template artifacts, not natural language
+            template_artifacts = [
+                r'\bassistantfinal\b',  # "assistantfinal" without spaces
+                r'\buserfinal\b',       # "userfinal" without spaces
+                r'\bsystemfinal\b',     # "systemfinal" without spaces
+            ]
+
+            for pattern in template_artifacts:
+                cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+
+            # Clean up multiple spaces and trim
+            cleaned = " ".join(cleaned.split())
+            return cleaned.strip()
+
+        # Extract thinking content from analysis channel (chain-of-thought reasoning)
+        thinking = None
+        if "<|channel|>analysis<|message|>" in text:
+            parts = text.split("<|channel|>analysis<|message|>", 1)
+            if len(parts) > 1:
+                # Extract thinking up to the next channel, start marker, or end marker
+                thinking_raw_original = parts[1]
+                logger.debug(f"[THINKING DEBUG] Raw thinking before terminator split (first 300 chars): {thinking_raw_original[:300]!r}")
+
+                # Split on various terminators
+                thinking_raw = thinking_raw_original
+                for terminator in ["<|channel|>", "<|start|>", "<|end|>", "<|return|>"]:
+                    thinking_raw = thinking_raw.split(terminator)[0]
+
+                logger.debug(f"[THINKING DEBUG] After terminator splits (first 300 chars): {thinking_raw[:300]!r}")
+
+                thinking_cleaned = clean_template_tokens(thinking_raw)
+                logger.debug(f"[THINKING DEBUG] After clean_template_tokens (first 300 chars): {thinking_cleaned[:300]!r}")
+                logger.debug(f"[THINKING DEBUG] Full cleaned thinking length: {len(thinking_cleaned)} chars")
+
+                thinking = thinking_cleaned if thinking_cleaned else None
+                thinking_preview = thinking[:100] if thinking else None
+                logger.debug(f"Extracted thinking from analysis channel: {thinking_preview!r}...")
+
         # Extract text content (from channels or raw text)
-        # Priority: final channel > raw text > analysis channel (only if no tool calls)
+        # Priority: final channel > raw text (no channels) > empty (if only analysis exists)
         if "<|channel|>final<|message|>" in text:
             # Extract from final channel - this is the actual response
             parts = text.split("<|channel|>final<|message|>", 1)
             if len(parts) > 1:
-                # Split on both <|return|> and <|end|> to handle either terminator
-                content_raw = parts[1].split("<|return|>")[0].split("<|end|>")[0].strip()
+                # Split on terminators
+                content_raw = parts[1]
+                for terminator in ["<|return|>", "<|end|>", "<|start|>"]:
+                    content_raw = content_raw.split(terminator)[0]
+
+                content_raw = clean_template_tokens(content_raw)
                 content = content_raw if content_raw else None
                 logger.debug(f"Extracted content from final channel: {content!r}")
-        elif not tool_calls:
-            # If no final channel and no tool calls, check for analysis-only response
-            if "<|channel|>analysis<|message|>" in text:
-                # Only use analysis if there's no final channel (shouldn't happen normally)
-                parts = text.split("<|channel|>analysis<|message|>", 1)
-                if len(parts) > 1:
-                    content_raw = parts[1].split("<|end|>")[0].strip()
-                    content = content_raw if content_raw else None
-                    logger.warning(f"Using analysis channel as content (no final channel found): {content!r}")
-            else:
-                # Fallback: no channel markers, use raw text
-                cleaned = text.replace("<|return|>", "").replace("<|end|>", "").strip()
-                content = cleaned if cleaned else None
-                logger.debug(f"Extracted content (no channel markers, using raw text): {content!r}")
+        elif "<|channel|>" in text:
+            # Has channel markers but no final channel - likely just thinking/analysis
+            # Content should be empty since we already extracted thinking
+            content = None
+            logger.debug("Model output contains only analysis channel, no final content")
+        else:
+            # Fallback: no channel markers at all, use raw text as content
+            cleaned = clean_template_tokens(text)
+            content = cleaned if cleaned else None
+            logger.debug(f"Extracted content (no channel markers, using raw text): {content!r}")
 
         if tool_calls:
             logger.debug(f"Parsed {len(tool_calls)} tool call(s)")
-            return content, tool_calls
+            return content, tool_calls, thinking
 
-        final_content = content or text.strip() if text.strip() else None
-        logger.debug(f"Final content to return: {final_content!r}")
-        return final_content, None
+        # Don't fall back to raw text if we've already determined content should be None
+        # (e.g., analysis-only output where thinking was extracted)
+        logger.debug(f"Final content to return: {content!r}")
+        return content, None, thinking
 
     def generate(
         self,
@@ -592,13 +642,14 @@ class LLMEngine:
             if effective_tools:
                 tool_names = [t["function"]["name"] for t in effective_tools if "function" in t]
 
-            content, tool_calls = self._parse_tool_calls(raw_text, tool_names=tool_names)
+            content, tool_calls, thinking = self._parse_tool_calls(raw_text, tool_names=tool_names)
 
             finish_reason = "tool_calls" if tool_calls else "stop"
 
             result = {
                 "content": content,
                 "tool_calls": tool_calls,
+                "thinking": thinking,
                 "finish_reason": finish_reason
             }
 

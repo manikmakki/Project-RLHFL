@@ -78,6 +78,10 @@ class ChatMessage(BaseModel):
         None,
         description="ID of the tool call this message is responding to (only for tool role)"
     )
+    thinking: Optional[str] = Field(
+        None,
+        description="Chain-of-thought reasoning from the assistant (extended reasoning/analysis)"
+    )
 
     def normalize_content(self) -> "ChatMessage":
         """Flatten content arrays to plain text string.
