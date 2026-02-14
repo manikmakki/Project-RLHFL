@@ -65,9 +65,10 @@ class MemoryConfig(BaseModel):
     embedding_model: str = "all-MiniLM-L6-v2"
     batch_size: int = 32
     similarity_threshold: float = 0.7
-    # RAG (Retrieval Augmented Generation) settings
-    rag_enabled: bool = True
-    rag_top_k: int = 5  # Number of similar interactions to retrieve for context
+    # RAG (Retrieval Augmented Generation) settings - DEPRECATED
+    # System now operates in transparent proxy mode, focusing on RLHF without RAG
+    rag_enabled: bool = False  # Default changed from True (deprecated)
+    rag_top_k: int = 5  # Number of similar interactions to retrieve for context (deprecated)
     # Memory management settings
     max_db_size_gb: float = 10.0  # Maximum database size before auto-cleanup
     auto_cleanup_threshold: float = 0.9  # Trigger cleanup at 90% of max size
@@ -83,11 +84,40 @@ class SentimentConfig(BaseModel):
     continuation_baseline: float = 0.1
 
 
+class LLMProxyConfig(BaseModel):
+    """Configuration for HTTP proxy to external LLM services."""
+    # External LLM endpoint URL
+    base_url: str = "http://ollama:11434"  # Override with LLM_BASE_URL env var
+
+    # Endpoint type: "auto" (detect from URL), "ollama", "openai"
+    endpoint_type: str = "auto"
+
+    # Model name to request from external LLM
+    external_model_name: str = "qwen2.5:32b"  # Override with LLM_MODEL_NAME env var
+
+    # API key for authenticated endpoints (OpenAI, etc.)
+    api_key: Optional[str] = None  # Override with OPENAI_API_KEY env var
+
+    # Model whitelist for sentiment analysis + storage
+    # Empty list = analyze all models (default for single-model setups)
+    # Non-empty = only whitelisted models get sentiment + storage
+    sentiment_enabled_models: list[str] = []
+
+    # HTTP client settings
+    connect_timeout_seconds: int = 10
+    read_timeout_seconds: int = 120  # Long for streaming
+    max_retries: int = 2
+    retry_delay_seconds: float = 1.0
+    max_connections: int = 10
+    max_keepalive_connections: int = 5
+
+
 class SystemConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     sentiment: SentimentConfig = Field(default_factory=SentimentConfig)
+    llm_proxy: LLMProxyConfig = Field(default_factory=LLMProxyConfig)
 
 
 class Settings(BaseSettings):
@@ -96,6 +126,11 @@ class Settings(BaseSettings):
     config_path: str = os.getenv("CONFIG_PATH", "/config/system_config.yaml")
     data_path: str = os.getenv("DATA_PATH", "/data")
     checkpoints_path: str = os.getenv("CHECKPOINTS_PATH", "/checkpoints")
+
+    # LLM Proxy settings (override config file)
+    llm_base_url: str = os.getenv("LLM_BASE_URL", "")
+    llm_model_name: str = os.getenv("LLM_MODEL_NAME", "")
+    openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
 
     cuda_visible_devices: str = os.getenv("CUDA_VISIBLE_DEVICES", "0")
     log_level: str = os.getenv("LOG_LEVEL", "DEBUG")

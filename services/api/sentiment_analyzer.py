@@ -6,9 +6,18 @@ from shared.config import SystemConfig
 
 logger = logging.getLogger(__name__)
 
+# Try to import ML sentiment analyzer
+_ml_analyzer = None
+try:
+    from .ml_sentiment_analyzer import MLSentimentAnalyzer
+    _ml_analyzer = MLSentimentAnalyzer()
+    logger.info("ML sentiment analyzer loaded successfully")
+except Exception as e:
+    logger.warning(f"ML sentiment analyzer not available, using regex-only: {e}")
+
 
 class SentimentAnalyzer:
-    """Infer sentiment from user messages using hybrid approach."""
+    """Infer sentiment from user messages using hybrid ML + regex approach."""
     
     # Strong indicators
     STRONG_POSITIVE = [
@@ -48,6 +57,8 @@ class SentimentAnalyzer:
         self.negative_threshold = config.sentiment.negative_threshold
         self.instruction_boost = config.sentiment.explicit_instruction_boost
         self.continuation_baseline = config.sentiment.continuation_baseline
+        self.ml_analyzer = _ml_analyzer
+        self.use_ml = _ml_analyzer is not None
     
     def analyze(
         self,
@@ -56,53 +67,100 @@ class SentimentAnalyzer:
         conversation_continuing: bool = True
     ) -> float:
         """
-        Analyze sentiment using multiple signals.
-        
+        Analyze sentiment using hybrid ML + regex approach.
+
+        Primary: ML-based sentiment analysis (RoBERTa)
+        Fallback: Regex-based pattern matching
+
+        Returns:
+            float: Sentiment score from -1.0 (very negative) to +1.0 (very positive)
+        """
+        # Try ML-based analysis first
+        if self.use_ml:
+            try:
+                ml_sentiment = self.ml_analyzer.analyze(
+                    user_message,
+                    assistant_response,
+                    conversation_continuing
+                )
+
+                # Also run regex for comparison logging during transition
+                regex_sentiment = self._analyze_regex(
+                    user_message,
+                    assistant_response,
+                    conversation_continuing
+                )
+
+                # Log comparison for validation
+                diff = abs(ml_sentiment - regex_sentiment)
+                if diff > 0.3:
+                    logger.info(
+                        f"Sentiment divergence: ML={ml_sentiment:.2f}, "
+                        f"Regex={regex_sentiment:.2f}, diff={diff:.2f}"
+                    )
+
+                return ml_sentiment
+
+            except Exception as e:
+                logger.warning(f"ML sentiment failed, falling back to regex: {e}")
+
+        # Fallback to regex-based analysis
+        return self._analyze_regex(user_message, assistant_response, conversation_continuing)
+
+    def _analyze_regex(
+        self,
+        user_message: str,
+        assistant_response: str,
+        conversation_continuing: bool = True
+    ) -> float:
+        """
+        Legacy regex-based sentiment analysis (fallback method).
+
         Returns:
             float: Sentiment score from -1.0 (very negative) to +1.0 (very positive)
         """
         text = user_message.lower()
         sentiment = 0.0
         signals = []
-        
+
         # Signal 1: Strong explicit feedback (highest priority)
         strong_neg = sum(1 for p in self.STRONG_NEGATIVE if re.search(p, text))
         strong_pos = sum(1 for p in self.STRONG_POSITIVE if re.search(p, text))
-        
+
         if strong_neg > 0:
             sentiment = -0.8 * min(strong_neg / 2.0, 1.0)
             signals.append(f"strong_negative({strong_neg})")
-            logger.debug(f"Strong negative sentiment: {sentiment:.2f}")
+            logger.debug(f"[Regex] Strong negative sentiment: {sentiment:.2f}")
             return sentiment
-        
+
         if strong_pos > 0:
             sentiment = 0.8 * min(strong_pos / 2.0, 1.0)
             signals.append(f"strong_positive({strong_pos})")
-            logger.debug(f"Strong positive sentiment: {sentiment:.2f}")
+            logger.debug(f"[Regex] Strong positive sentiment: {sentiment:.2f}")
             return sentiment
-        
+
         # Signal 2: Moderate feedback
         mod_neg = sum(1 for p in self.MODERATE_NEGATIVE if re.search(p, text))
         mod_pos = sum(1 for p in self.MODERATE_POSITIVE if re.search(p, text))
-        
+
         if mod_neg > mod_pos:
             sentiment -= 0.4 * (mod_neg / (mod_neg + mod_pos + 1))
             signals.append(f"moderate_negative({mod_neg})")
         elif mod_pos > mod_neg:
             sentiment += 0.4 * (mod_pos / (mod_neg + mod_pos + 1))
             signals.append(f"moderate_positive({mod_pos})")
-        
+
         # Signal 3: Message length (very short follow-ups often indicate issues)
         if len(user_message) < 10 and conversation_continuing:
             sentiment -= 0.1
             signals.append("very_short")
-        
+
         # Signal 4: Question marks (multiple questions may indicate confusion)
         question_count = text.count('?')
         if question_count > 2:
             sentiment -= 0.15
             signals.append(f"many_questions({question_count})")
-        
+
         # Signal 5: Exclamation marks (enthusiasm or frustration)
         exclamation_count = text.count('!')
         if exclamation_count > 0:
@@ -113,22 +171,22 @@ class SentimentAnalyzer:
             else:
                 sentiment -= 0.1 * min(exclamation_count, 2)
                 signals.append("frustrated")
-        
+
         # Signal 6: Instructions (high value, neutral-to-positive)
         instruction_matches = sum(1 for p in self.INSTRUCTION_PATTERNS if re.search(p, text))
         if instruction_matches > 0:
             sentiment = max(sentiment, 0.3)  # Instructions are at least mildly positive
             signals.append(f"instruction({instruction_matches})")
-        
+
         # Signal 7: Conversation continuation (baseline positive)
         if conversation_continuing and sentiment == 0:
             sentiment = self.continuation_baseline
             signals.append("continuation")
-        
+
         # Clamp to [-1, 1]
         sentiment = max(-1.0, min(1.0, sentiment))
-        
-        logger.debug(f"Sentiment: {sentiment:.2f} | Signals: {', '.join(signals)}")
+
+        logger.debug(f"[Regex] Sentiment: {sentiment:.2f} | Signals: {', '.join(signals)}")
         return sentiment
     
     def calculate_weight(
