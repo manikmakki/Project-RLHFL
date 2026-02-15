@@ -65,6 +65,8 @@ sentiment_analyzer = None
 prompt_interceptor = None
 background_tasks = set()  # Track background storage tasks for graceful shutdown
 recent_api_requests = deque(maxlen=20)  # Rolling buffer of last 20 API requests
+training_in_progress = False  # Flag to indicate training is active (model unloaded)
+training_start_time = None  # Timestamp when training started
 
 
 def normalize_model_name(model_name: str) -> str:
@@ -359,6 +361,44 @@ def get_llm_proxy():
     return llm_proxy
 
 
+# Middleware to return 503 during training
+@app.middleware("http")
+async def training_mode_middleware(request: Request, call_next):
+    """
+    Block inference requests with 503 when training is in progress.
+    Allows admin endpoints, health checks, and training control endpoints.
+    """
+    # Paths that are always allowed (admin UI, health, training control)
+    allowed_paths = [
+        "/health",
+        "/admin",
+        "/v1/model/unload",
+        "/v1/model/reload",
+        "/v1/training/trigger",
+        "/v1/training/stats",
+    ]
+
+    # Check if path is allowed
+    is_allowed = any(request.url.path.startswith(path) for path in allowed_paths)
+
+    # If training in progress and path not allowed, return 503
+    if training_in_progress and not is_allowed:
+        estimated_wait = 300  # 5 minutes (conservative estimate)
+        if training_start_time:
+            elapsed = time.time() - training_start_time
+            # Assume training takes ~5 minutes, decrease estimate as time passes
+            estimated_wait = max(60, int(300 - elapsed))
+
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service temporarily unavailable - model training in progress. Retry in ~{estimated_wait}s"
+        )
+
+    # Otherwise proceed normally
+    response = await call_next(request)
+    return response
+
+
 # Include admin router
 from api import admin_ui
 app.include_router(admin_router)
@@ -385,17 +425,22 @@ async def health_check():
     # In proxy mode, check proxy readiness instead of local model/GPU
     model_ready = llm_proxy.is_loaded() if llm_proxy else False
 
-    if model_ready and memory_manager:
+    # Status is "training" if training in progress, otherwise "healthy" or "degraded"
+    if training_in_progress:
+        status_str = "training"
+    elif model_ready and memory_manager:
         status_str = "healthy"
     else:
         status_str = "degraded"
 
     status = HealthStatus(
         status=status_str,
-        model_loaded=model_ready,
+        model_loaded=model_ready and not training_in_progress,
         memory_connected=memory_manager.is_connected() if memory_manager else False,
         gpu_available=False,  # Not relevant in proxy mode
-        current_checkpoint=None  # External LLM manages checkpoints
+        current_checkpoint=None,  # External LLM manages checkpoints
+        training_in_progress=training_in_progress,
+        external_model_name=config.llm_proxy.external_model_name if config else None
     )
 
     return status
@@ -893,23 +938,81 @@ async def get_training_stats():
     return stats
 
 
-# Model unload/reload endpoints not needed in proxy mode (external LLM manages models)
-# @app.post("/v1/model/unload")
-# async def unload_model():
-#     """
-#     DEPRECATED: Model unloading not needed in proxy mode.
-#     External LLM manages its own model loading/unloading.
-#     """
-#     return {"success": False, "message": "Model unload not supported in proxy mode"}
+@app.post("/v1/model/unload")
+async def unload_model():
+    """
+    Unload model from Ollama to free GPU vRAM for training.
+
+    Sets training_in_progress flag to true, causing 503 responses for inference.
+    Returns immediately after requesting Ollama to unload (keep_alive: 0).
+    """
+    global training_in_progress, training_start_time
+
+    if not llm_proxy:
+        raise HTTPException(status_code=503, detail="Proxy not configured")
+
+    try:
+        # Set training flag BEFORE unloading
+        training_in_progress = True
+        training_start_time = time.time()
+        logger.info("Training mode activated - API will return 503 for inference requests")
+
+        # Call Ollama to unload the model (keep_alive: 0)
+        await llm_proxy.unload_model()
+
+        return {
+            "success": True,
+            "message": f"Model {config.llm_proxy.external_model_name} unloaded from Ollama, GPU vRAM freed for training"
+        }
+    except Exception as e:
+        logger.error(f"Failed to unload model: {e}", exc_info=True)
+        # Reset flag on failure
+        training_in_progress = False
+        training_start_time = None
+        return {
+            "success": False,
+            "message": f"Failed to unload model: {str(e)}"
+        }
 
 
-# @app.post("/v1/model/reload")
-# async def reload_model(request_body: ModelReloadRequest):
-#     """
-#     DEPRECATED: Model reloading not needed in proxy mode.
-#     External LLM manages its own model loading/unloading.
-#     """
-#     return {"success": False, "message": "Model reload not supported in proxy mode"}
+@app.post("/v1/model/reload")
+async def reload_model(request_body: ModelReloadRequest):
+    """
+    Reload model in Ollama after training completes.
+
+    Clears training_in_progress flag to resume normal inference.
+    The request_body is ignored in proxy mode (Ollama manages model files).
+    """
+    global training_in_progress, training_start_time
+
+    if not llm_proxy:
+        raise HTTPException(status_code=503, detail="Proxy not configured")
+
+    try:
+        # Call Ollama to reload the model (keep_alive: 5m)
+        await llm_proxy.load_model()
+
+        # Clear training flag AFTER successful reload
+        training_in_progress = False
+        elapsed = time.time() - training_start_time if training_start_time else 0
+        training_start_time = None
+
+        logger.info(f"Training mode deactivated after {elapsed:.1f}s - API resuming normal inference")
+
+        return ModelReloadResponse(
+            success=True,
+            message=f"Model {config.llm_proxy.external_model_name} reloaded in Ollama",
+            previous_model_path=None,  # Not applicable in proxy mode
+            new_model_path=None,  # Not applicable in proxy mode
+            checkpoint_id=request_body.checkpoint_id
+        )
+    except Exception as e:
+        logger.error(f"Failed to reload model: {e}", exc_info=True)
+        return ModelReloadResponse(
+            success=False,
+            message=f"Failed to reload model: {str(e)}",
+            checkpoint_id=request_body.checkpoint_id
+        )
 
 
 # ============================================================================

@@ -58,6 +58,15 @@ class TrainingConfig(BaseModel):
     weight_decay: float = 0.01
     max_seq_length: int = 256  # Reduced from 512 for attention mask compatibility
 
+    # Sequential layer training parameters (for memory-constrained training)
+    enable_sequential_training: bool = False  # Toggle sequential mode
+    layers_per_pass: int = 5  # How many layers to train per pass
+    sequential_merge_checkpoints: bool = True  # Auto-merge between passes
+
+    # CPU training mode (for systems with limited VRAM but abundant RAM/cores)
+    enable_cpu_training: bool = False  # Train on CPU instead of GPU
+    cpu_threads: int = 32  # Number of CPU threads to use (leave room for inference)
+
 
 class MemoryConfig(BaseModel):
     golden_examples_count: int = 20

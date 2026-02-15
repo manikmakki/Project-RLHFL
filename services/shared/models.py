@@ -378,3 +378,5 @@ class HealthStatus(BaseModel):
     memory_connected: bool
     gpu_available: bool
     current_checkpoint: Optional[str] = None
+    training_in_progress: bool = False
+    external_model_name: Optional[str] = None

@@ -82,7 +82,25 @@ class GGUFConverter:
             self._cleanup_dir(merged_model_dir)
 
     def _merge_adapter(self, adapter_path: str, output_dir: str, lora_trainer) -> None:
-        """Stage 1: Merge LoRA adapter into base model."""
+        """Stage 1: Merge LoRA adapter into base model (or copy if already merged)."""
+        import shutil
+        from pathlib import Path
+
+        adapter_config_path = Path(adapter_path) / "adapter_config.json"
+
+        # Check if this is an adapter or an already-merged model
+        if not adapter_config_path.exists():
+            logger.info(f"No adapter_config.json found - {adapter_path} appears to be a merged model")
+            logger.info(f"Copying merged model to {output_dir} instead of merging")
+            # This is already a merged model (e.g., from sequential training)
+            # Just copy it to the output directory
+            if Path(output_dir).exists():
+                shutil.rmtree(output_dir)
+            shutil.copytree(adapter_path, output_dir)
+            logger.info(f"Merged model copied successfully")
+            return
+
+        # Standard adapter merge
         if lora_trainer is None:
             raise GGUFConversionError("LoRATrainer instance required for merging")
         try:
