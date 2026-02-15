@@ -50,8 +50,8 @@ training:
   gradient_accumulation_steps: 4
   inactivity_threshold_hours: 8
   learning_rate: 5.0e-05
-  lora_alpha: 32
-  lora_rank: 16
+  lora_alpha: 16  # Halved to match reduced rank (maintains 1:1 ratio)
+  lora_rank: 8  # Reduced from 16 to fit in VRAM (less FP32 conversion overhead)
   max_days_between_training: 7
   max_grad_norm: 1.0
   min_interactions_threshold: 50
@@ -59,3 +59,10 @@ training:
   validation_split: 0.1
   warmup_steps: 100
   weight_decay: 0.01
+  # Sequential layer training (memory-efficient mode for large models)
+  enable_sequential_training: true  # Train layers in batches to reduce VRAM
+  layers_per_pass: 5  # Number of layers to train per pass
+  sequential_merge_checkpoints: true  # Auto-merge adapters between passes
+  # CPU training mode (slow but allows GPU for inference)
+  enable_cpu_training: true  # Train on CPU instead of GPU (50-200x slower)
+  cpu_threads: 32  # Use half of 64 cores (leave room for inference + system)

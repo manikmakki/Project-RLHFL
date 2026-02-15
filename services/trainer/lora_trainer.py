@@ -18,6 +18,7 @@ fine-tuning memory while achieving comparable results.
 
 import logging
 import os
+import shutil
 import torch
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -27,7 +28,8 @@ from transformers import (
     AutoTokenizer,
     TrainingArguments,
     Trainer,
-    DataCollatorForLanguageModeling
+    DataCollatorForLanguageModeling,
+    BitsAndBytesConfig
 )
 from peft import (
     LoraConfig,
@@ -39,11 +41,56 @@ from datasets import Dataset
 import json
 
 # Set PyTorch CUDA memory management to avoid fragmentation
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+# expandable_segments reduces fragmentation when loading large models
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 from shared.config import SystemConfig
 
 logger = logging.getLogger(__name__)
+
+# Monkey patch bitsandbytes to ignore _is_hf_initialized parameter
+# This fixes compatibility issues between transformers 5.0, accelerate, and bitsandbytes
+try:
+    import bitsandbytes as bnb
+    from functools import wraps
+
+    # Patch Int8Params
+    if hasattr(bnb.nn, 'Int8Params'):
+        _original_int8_new = bnb.nn.Int8Params.__new__
+
+        @wraps(_original_int8_new)
+        def _patched_int8_new(cls, *args, **kwargs):
+            # Remove the problematic parameter
+            kwargs.pop('_is_hf_initialized', None)
+            return _original_int8_new(cls, *args, **kwargs)
+
+        bnb.nn.Int8Params.__new__ = staticmethod(_patched_int8_new)
+        logger.info("Applied Int8Params compatibility patch")
+
+    # Patch Params4bit if it exists
+    if hasattr(bnb.nn, 'Params4bit'):
+        _original_4bit_new = bnb.nn.Params4bit.__new__
+
+        @wraps(_original_4bit_new)
+        def _patched_4bit_new(cls, *args, **kwargs):
+            # Remove the problematic parameter
+            kwargs.pop('_is_hf_initialized', None)
+            return _original_4bit_new(cls, *args, **kwargs)
+
+        bnb.nn.Params4bit.__new__ = staticmethod(_patched_4bit_new)
+        logger.info("Applied Params4bit compatibility patch")
+except Exception as e:
+    logger.warning(f"Failed to apply bitsandbytes patch: {e}")
+
+
+def log_gpu_memory(stage: str):
+    """Log GPU memory usage at key training stages."""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated(0) / 1024**3
+        reserved = torch.cuda.memory_reserved(0) / 1024**3
+        logger.info(f"[Memory] {stage}: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB")
+    else:
+        logger.warning(f"[Memory] {stage}: CUDA not available")
 
 
 class LoRATrainer:
@@ -52,17 +99,37 @@ class LoRATrainer:
     def __init__(self, config: SystemConfig, base_model_path: str):
         self.config = config
         self.base_model_path = base_model_path
-        
-        # LoRA configuration for GPT-OSS architecture
-        # Targets attention (q/k/v/o) and MLP projections (gate/up/down)
-        self.lora_config = LoraConfig(
-            r=config.training.lora_rank,
-            lora_alpha=config.training.lora_alpha,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM"
-        )
+
+        # Create default LoRA config (trains all layers)
+        self.lora_config = self._create_lora_config()
+
+    def _create_lora_config(self, layers_to_train: Optional[List[int]] = None) -> LoraConfig:
+        """Create LoRA configuration, optionally restricted to specific layers.
+
+        Args:
+            layers_to_train: Optional list of layer indices to train. None means all layers.
+
+        Returns:
+            LoraConfig object with optional layer restriction.
+        """
+        config_params = {
+            "r": self.config.training.lora_rank,
+            "lora_alpha": self.config.training.lora_alpha,
+            "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj",
+                              "gate_proj", "up_proj", "down_proj"],
+            "lora_dropout": 0.05,
+            "bias": "none",
+            "task_type": "CAUSAL_LM"
+        }
+
+        # Add layers_to_transform if specified (for sequential training)
+        if layers_to_train is not None:
+            config_params["layers_to_transform"] = layers_to_train
+            logger.info(f"LoRA will ONLY train layers: {layers_to_train}")
+        else:
+            logger.info("LoRA will train ALL layers (standard mode)")
+
+        return LoraConfig(**config_params)
     
     def train(
         self,
@@ -77,45 +144,166 @@ class LoRATrainer:
             str: Path to the trained adapter
         """
         logger.info(f"Starting LoRA training with {len(train_dataset)} samples")
-        
+
         try:
+            import shutil
+            from pathlib import Path
+
             # Create checkpoint directory
             checkpoint_path = Path(checkpoint_dir)
             checkpoint_path.mkdir(parents=True, exist_ok=True)
-            
-            # Load tokenizer
+
+            # Load tokenizer with fallback logic
             logger.info(f"Loading tokenizer from {self.base_model_path}")
-            tokenizer = AutoTokenizer.from_pretrained(
-                self.base_model_path,
-                use_fast=False  # Use slow tokenizer to avoid tokenizer.json parsing issues
-            )
-            
+            tokenizer = None
+            tokenizer_errors = []
+            tokenizer_json_backup = None
+
+            # Try 1: Bypass corrupted tokenizer.json by temporarily renaming it
+            try:
+
+                tokenizer_json_path = Path(self.base_model_path) / "tokenizer.json"
+                if tokenizer_json_path.exists():
+                    tokenizer_json_backup = Path(self.base_model_path) / "tokenizer.json.backup"
+                    logger.warning(f"Temporarily moving potentially corrupted tokenizer.json to {tokenizer_json_backup}")
+                    shutil.move(str(tokenizer_json_path), str(tokenizer_json_backup))
+
+                # Load without tokenizer.json (forces legacy tokenizer)
+                from transformers import GPT2Tokenizer
+                tokenizer = GPT2Tokenizer.from_pretrained(
+                    self.base_model_path,
+                    use_fast=False
+                )
+                logger.info("Tokenizer loaded successfully (GPT2Tokenizer without tokenizer.json)")
+
+            except Exception as e1:
+                tokenizer_errors.append(f"GPT2Tokenizer without tokenizer.json: {e1}")
+
+                # Try 2: Restore tokenizer.json and try slow tokenizer
+                if tokenizer_json_backup and tokenizer_json_backup.exists():
+                    try:
+                        shutil.move(str(tokenizer_json_backup), str(tokenizer_json_path))
+                        logger.info("Restored tokenizer.json")
+                    except:
+                        pass
+
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        self.base_model_path,
+                        use_fast=False
+                    )
+                    logger.info("Tokenizer loaded successfully (slow tokenizer)")
+                except Exception as e2:
+                    tokenizer_errors.append(f"Slow tokenizer from {self.base_model_path}: {e2}")
+
+                    # Try 3: Use GPT-2 tokenizer directly as generic fallback
+                    try:
+                        logger.warning("Using generic GPT2Tokenizer as fallback")
+                        from transformers import GPT2Tokenizer
+                        tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+                        logger.info("Tokenizer loaded (generic GPT-2)")
+                    except Exception as e3:
+                        tokenizer_errors.append(f"Generic GPT-2 fallback: {e3}")
+
+            # Restore tokenizer.json if we backed it up and haven't already
+            if tokenizer_json_backup and tokenizer_json_backup.exists():
+                try:
+                    tokenizer_json_path = Path(self.base_model_path) / "tokenizer.json"
+                    if not tokenizer_json_path.exists():
+                        shutil.move(str(tokenizer_json_backup), str(tokenizer_json_path))
+                        logger.info("Restored tokenizer.json after successful load")
+                except Exception as e:
+                    logger.warning(f"Failed to restore tokenizer.json: {e}")
+
+            if tokenizer is None:
+                error_msg = "Failed to load tokenizer after all attempts:\n" + "\n".join(tokenizer_errors)
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
+            # Add GPT-OSS Harmony special tokens if not present
+            harmony_tokens = [
+                "<|startoftext|>", "<|endoftext|>", "<|return|>", "<|constrain|>",
+                "<|channel|>", "<|start|>", "<|end|>", "<|message|>", "<|call|>",
+                "<|endofprompt|>"
+            ]
+
+            # Check if special tokens are missing and add them
+            existing_tokens = set(tokenizer.get_vocab().keys())
+            missing_tokens = [t for t in harmony_tokens if t not in existing_tokens]
+
+            if missing_tokens:
+                logger.warning(f"Adding {len(missing_tokens)} missing Harmony tokens to tokenizer")
+                tokenizer.add_special_tokens({"additional_special_tokens": missing_tokens})
+
             # Ensure tokenizer has padding token
             if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
-            
-            # Load base model with 4-bit quantization (QLoRA)
-            logger.info(f"Loading base model from {self.base_model_path}")
-            model = AutoModelForCausalLM.from_pretrained(
-                self.base_model_path,
-                load_in_4bit=True,
-                device_map="auto",
-                trust_remote_code=True,
-                use_cache=False  # Disable KV cache for training to avoid attention mask mismatches
-            )
-            
-            # Prepare model for k-bit training
-            model = prepare_model_for_kbit_training(model)
-            
-            # Enable gradient checkpointing to save memory
-            # Note: Disabled due to attention mask dimension issues with KV cache
-            # model.gradient_checkpointing_enable()
-            
+                tokenizer.pad_token = tokenizer.eos_token if tokenizer.eos_token else "<|endoftext|>"
+
+            # Ensure EOS token is set (should be <|return|> for GPT-OSS Harmony)
+            if tokenizer.eos_token is None:
+                tokenizer.eos_token = "<|return|>"
+
+            logger.info(f"Tokenizer configured: vocab_size={len(tokenizer)}, pad_token={tokenizer.pad_token}, eos_token={tokenizer.eos_token}")
+
+            # Check if CPU training mode is enabled
+            if self.config.training.enable_cpu_training:
+                # CPU TRAINING MODE: Train on CPU with full precision (plenty of RAM available)
+                logger.info("=" * 80)
+                logger.info("CPU TRAINING MODE ENABLED")
+                logger.info(f"Using {self.config.training.cpu_threads} CPU threads (leaving rest for inference)")
+                logger.info("Training will be slower but allows GPU for inference")
+                logger.info("=" * 80)
+
+                # Set CPU thread count to avoid overwhelming system
+                torch.set_num_threads(self.config.training.cpu_threads)
+                logger.info(f"PyTorch CPU threads set to: {torch.get_num_threads()}")
+
+                # Load model on CPU without quantization (256GB RAM is plenty)
+                logger.info(f"Loading base model from {self.base_model_path} on CPU (no quantization)")
+                model = AutoModelForCausalLM.from_pretrained(
+                    self.base_model_path,
+                    device_map="cpu",  # Force CPU placement
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True,
+                    use_cache=False,
+                    torch_dtype=torch.float32  # Full precision on CPU
+                )
+                logger.info(f"Model loaded on CPU - RAM usage will be ~40-50GB")
+
+                # For CPU training, we don't need prepare_model_for_kbit_training
+                # Just freeze non-LoRA parameters
+                for param in model.parameters():
+                    param.requires_grad = False
+                logger.info("Model parameters frozen for LoRA training")
+
+            else:
+                # GPU TRAINING MODE: 8-bit quantization with CPU offload
+                logger.info(f"Loading base model from {self.base_model_path} with 8-bit quantization")
+                bnb_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                    llm_int8_threshold=6.0,
+                    llm_int8_enable_fp32_cpu_offload=True
+                )
+                model = AutoModelForCausalLM.from_pretrained(
+                    self.base_model_path,
+                    quantization_config=bnb_config,
+                    device_map="auto",
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True,
+                    use_cache=False,
+                    torch_dtype=torch.bfloat16
+                )
+                log_gpu_memory("After model load")
+
+                # Prepare model for k-bit training
+                model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
+
             # Apply LoRA
             logger.info("Applying LoRA configuration")
             model = get_peft_model(model, self.lora_config)
             model.print_trainable_parameters()
-            
+            log_gpu_memory("After LoRA application")
+
             # Ensure use_cache is disabled for training
             model.config.use_cache = False
             
@@ -136,14 +324,15 @@ class LoRATrainer:
                 weight_decay=self.config.training.weight_decay,
                 logging_steps=10,
                 logging_dir=f"{checkpoint_path}/logs",
-                evaluation_strategy="epoch",
+                eval_strategy="epoch",  # renamed from evaluation_strategy in transformers 5.0
                 save_strategy="epoch",
                 save_total_limit=3,
-                fp16=True,
-                fp16_opt_level="O2",
+                bf16=not self.config.training.enable_cpu_training,  # BF16 only for GPU training
+                gradient_checkpointing=False,  # Disabled: FP32 conversion needs 1.98GB we don't have
                 report_to="none",
                 remove_unused_columns=False,
                 dataloader_drop_last=False,
+                use_cpu=self.config.training.enable_cpu_training,  # Force CPU when CPU training enabled
             )
             
             # Custom data collator for causal LM that pads and masks prompt tokens
@@ -217,7 +406,137 @@ class LoRATrainer:
         except Exception as e:
             logger.error(f"Training failed: {e}", exc_info=True)
             raise
-    
+
+    def train_sequential(
+        self,
+        train_dataset: List[Dict[str, Any]],
+        val_dataset: List[Dict[str, Any]],
+        checkpoint_dir: str
+    ) -> str:
+        """
+        Train LoRA adapters sequentially across layer groups to reduce VRAM usage.
+
+        This method trains the model in multiple passes, each targeting a subset of layers.
+        Between passes, adapters are merged to create an incrementally fine-tuned base model.
+        This drastically reduces peak VRAM by only allocating LoRA parameters for a subset of layers.
+
+        Args:
+            train_dataset: Training examples in Harmony format
+            val_dataset: Validation examples in Harmony format
+            checkpoint_dir: Directory to save checkpoints and intermediate merged models
+
+        Returns:
+            Path to final merged adapter containing all trained layers
+        """
+        checkpoint_path = Path(checkpoint_dir)
+        num_layers = 24  # GPT-OSS 20B layer count
+        layers_per_pass = self.config.training.layers_per_pass
+
+        # Calculate layer ranges for each training pass
+        layer_ranges = []
+        for start in range(0, num_layers, layers_per_pass):
+            end = min(start + layers_per_pass - 1, num_layers - 1)
+            layer_ranges.append((start, end))
+
+        logger.info("=" * 80)
+        logger.info("SEQUENTIAL LAYER TRAINING STARTING")
+        logger.info("=" * 80)
+        logger.info(f"Total layers: {num_layers}")
+        logger.info(f"Layers per pass: {layers_per_pass}")
+        logger.info(f"Number of passes: {len(layer_ranges)}")
+        logger.info(f"Layer groups: {layer_ranges}")
+        logger.info("=" * 80)
+
+        # Track adapter paths for each pass
+        adapter_paths = []
+        merged_model_path = None  # Base model for next pass
+        original_base_path = self.base_model_path  # Save original for restoration
+
+        try:
+            for pass_idx, (start_layer, end_layer) in enumerate(layer_ranges):
+                logger.info("")
+                logger.info("=" * 80)
+                logger.info(f"PASS {pass_idx + 1}/{len(layer_ranges)}: Training layers {start_layer}-{end_layer}")
+                logger.info("=" * 80)
+
+                # Create LoRA config for this layer subset
+                layers_to_train = list(range(start_layer, end_layer + 1))
+                self.lora_config = self._create_lora_config(layers_to_train)
+
+                # Create checkpoint directory for this pass
+                pass_checkpoint_dir = checkpoint_path / f"pass_{pass_idx + 1}_layers_{start_layer}_{end_layer}"
+                pass_checkpoint_dir.mkdir(exist_ok=True, parents=True)
+
+                # If we have a merged model from previous pass, use it as base
+                if merged_model_path:
+                    logger.info(f"Using merged model from previous pass: {merged_model_path}")
+                    self.base_model_path = str(merged_model_path)
+
+                # Run standard training for this layer subset
+                logger.info(f"Starting training for layers {start_layer}-{end_layer}...")
+                adapter_path = self.train(train_dataset, val_dataset, str(pass_checkpoint_dir))
+                adapter_paths.append(adapter_path)
+                logger.info(f"Pass {pass_idx + 1} complete! Adapter saved to: {adapter_path}")
+
+                # Restore original base model path for merging
+                self.base_model_path = original_base_path
+
+                # Merge this adapter with base model for next pass
+                if pass_idx < len(layer_ranges) - 1:  # Not the last pass
+                    logger.info(f"Merging adapter from pass {pass_idx + 1} with base model...")
+                    merged_model_path = checkpoint_path / f"merged_through_pass_{pass_idx + 1}"
+
+                    # Use existing merge_adapter method
+                    self.merge_adapter(
+                        adapter_path=adapter_path,
+                        output_path=str(merged_model_path)
+                    )
+                    logger.info(f"Merged model saved to: {merged_model_path}")
+                    logger.info(f"Next pass will use this merged model as base")
+
+                # Clear GPU cache between passes
+                logger.info("Clearing GPU cache...")
+                torch.cuda.empty_cache()
+
+            # Final merge: The last adapter already incorporates all previous training
+            logger.info("")
+            logger.info("=" * 80)
+            logger.info("FINAL MERGE: Preparing final adapter")
+            logger.info("=" * 80)
+
+            final_adapter_path = checkpoint_path / "adapter_sequential_final"
+
+            # If we have a merged model, merge the last adapter with it
+            if merged_model_path:
+                logger.info("Merging final adapter with accumulated base model...")
+                # The last adapter was trained on the merged model, so we need to merge it back
+                self.base_model_path = str(merged_model_path)
+                self.merge_adapter(
+                    adapter_path=adapter_paths[-1],
+                    output_path=str(final_adapter_path)
+                )
+            else:
+                # Only one pass, just copy the adapter
+                logger.info("Single pass training, copying adapter as final...")
+                shutil.copytree(adapter_paths[-1], final_adapter_path, dirs_exist_ok=True)
+
+            # Restore original base model path
+            self.base_model_path = original_base_path
+
+            logger.info("=" * 80)
+            logger.info("SEQUENTIAL TRAINING COMPLETE!")
+            logger.info(f"Final adapter path: {final_adapter_path}")
+            logger.info(f"Total passes completed: {len(layer_ranges)}")
+            logger.info("=" * 80)
+
+            return str(final_adapter_path)
+
+        except Exception as e:
+            # Restore original base model path on error
+            self.base_model_path = original_base_path
+            logger.error(f"Sequential training failed: {e}", exc_info=True)
+            raise
+
     def _prepare_dataset(
         self,
         dataset: List[Dict[str, Any]],

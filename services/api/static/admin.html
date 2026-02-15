@@ -781,6 +781,15 @@
                         </div>
                     </div>
 
+                    <div class="card" id="live-training-card" style="display: none;">
+                        <h2>🔄 Live Training Status</h2>
+                        <div id="live-training-content">
+                            <div class="stat-row">
+                                <span class="stat-label">Loading...</span>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="card">
                         <h2>💾 Memory Stats</h2>
                         <div class="stat-row">
@@ -840,6 +849,147 @@
             `;
 
             document.getElementById('stats-content').innerHTML = html;
+        }
+
+        // Track consecutive inactive responses to prevent flickering
+        let inactiveCount = 0;
+        let lastTrainingData = null; // Cache last successful data
+        const INACTIVE_THRESHOLD = 3; // Hide after 3 consecutive inactive responses
+
+        async function loadLiveTrainingStatus() {
+            const card = document.getElementById('live-training-card');
+            const content = document.getElementById('live-training-content');
+
+            try {
+                const response = await fetch('/admin/api/training/progress');
+                const data = await response.json();
+
+                if (!data.training_active) {
+                    inactiveCount++;
+                    // Only hide after multiple consecutive inactive responses
+                    if (inactiveCount >= INACTIVE_THRESHOLD) {
+                        card.style.display = 'none';
+                        lastTrainingData = null;
+                    }
+                    return;
+                }
+
+                // Reset counter, cache data, and show the card when training is active
+                inactiveCount = 0;
+                lastTrainingData = data;
+                card.style.display = 'block';
+
+                let html = '';
+
+                // Training checkpoint info
+                html += `
+                    <div class="stat-row">
+                        <span class="stat-label">Checkpoint</span>
+                        <span class="stat-value" style="font-size: 11px;">${data.checkpoint_id || 'N/A'}</span>
+                    </div>
+                `;
+
+                // Overall progress
+                if (data.current_pass && data.total_passes) {
+                    const progress = Math.round((data.current_pass / data.total_passes) * 100);
+                    html += `
+                        <div class="stat-row">
+                            <span class="stat-label">Overall Progress</span>
+                            <span class="stat-value">Pass ${data.current_pass}/${data.total_passes} (${progress}%)</span>
+                        </div>
+                    `;
+                }
+
+                // Current pass details
+                if (data.passes && data.passes.length > 0) {
+                    const currentPass = data.passes[data.passes.length - 1];
+
+                    html += `
+                        <div class="stat-row">
+                            <span class="stat-label">Current Layers</span>
+                            <span class="stat-value">${currentPass.layers}</span>
+                        </div>
+                    `;
+
+                    if (currentPass.epoch) {
+                        html += `
+                            <div class="stat-row">
+                                <span class="stat-label">Epoch</span>
+                                <span class="stat-value">${currentPass.epoch}/${currentPass.epochs || 3}</span>
+                            </div>
+                        `;
+                    }
+
+                    if (currentPass.train_loss) {
+                        html += `
+                            <div class="stat-row">
+                                <span class="stat-label">Train Loss</span>
+                                <span class="stat-value">${currentPass.train_loss.toFixed(4)}</span>
+                            </div>
+                        `;
+                    }
+
+                    if (currentPass.eval_loss) {
+                        html += `
+                            <div class="stat-row">
+                                <span class="stat-label">Eval Loss</span>
+                                <span class="stat-value">${currentPass.eval_loss.toFixed(4)}</span>
+                            </div>
+                        `;
+                    }
+                }
+
+                // Pass history table
+                if (data.passes && data.passes.length > 0) {
+                    html += `
+                        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #333;">
+                            <div style="font-size: 11px; color: #888; margin-bottom: 8px;">Pass History:</div>
+                            <div style="max-height: 200px; overflow-y: auto;">
+                                <table style="width: 100%; font-size: 11px;">
+                                    <thead>
+                                        <tr style="color: #888;">
+                                            <th style="text-align: left; padding: 4px;">Pass</th>
+                                            <th style="text-align: left; padding: 4px;">Layers</th>
+                                            <th style="text-align: right; padding: 4px;">Loss</th>
+                                            <th style="text-align: center; padding: 4px;">Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                    `;
+
+                    data.passes.forEach(pass => {
+                        const status = pass.completed ? '✓' : '⟳';
+                        const statusColor = pass.completed ? '#4ade80' : '#fbbf24';
+                        html += `
+                            <tr>
+                                <td style="padding: 4px;">${pass.pass_number}</td>
+                                <td style="padding: 4px;">${pass.layers}</td>
+                                <td style="padding: 4px; text-align: right;">${pass.train_loss ? pass.train_loss.toFixed(4) : 'N/A'}</td>
+                                <td style="padding: 4px; text-align: center; color: ${statusColor};">${status}</td>
+                            </tr>
+                        `;
+                    });
+
+                    html += `
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                content.innerHTML = html;
+            } catch (error) {
+                // On fetch error, keep card visible if we have cached data
+                // This prevents flickering during slow API responses
+                if (lastTrainingData) {
+                    // Keep showing last known data, just don't update
+                    console.log('Live training status fetch failed, showing cached data');
+                } else {
+                    // No cached data and fetch failed - hide the card
+                    card.style.display = 'none';
+                }
+            }
         }
 
         async function loadTrainingCharts() {
@@ -1418,8 +1568,21 @@
         }
 
         function renderModelControls(status) {
-            const statusClass = status.is_reloading ? 'warning' : (status.model_loaded ? 'positive' : 'negative');
-            const statusText = status.is_reloading ? '⟳ Reloading...' : (status.model_loaded ? '✓ Serving' : '✗ Unavailable');
+            let statusClass, statusText;
+
+            if (status.training_in_progress) {
+                statusClass = 'warning';
+                statusText = '🔥 Training in Progress';
+            } else if (status.is_reloading) {
+                statusClass = 'warning';
+                statusText = '⟳ Reloading...';
+            } else if (status.model_loaded) {
+                statusClass = 'positive';
+                statusText = '✓ Serving';
+            } else {
+                statusClass = 'negative';
+                statusText = '✗ Unavailable';
+            }
 
             let metricsHtml = '';
             if (status.deployed_metrics) {
@@ -1438,6 +1601,10 @@
                                 <span class="stat-label">Model Status</span>
                                 <span class="stat-value ${statusClass}">${statusText}</span>
                             </div>
+                            ${status.external_model_name ? `<div class="stat-row">
+                                <span class="stat-label">External Model</span>
+                                <span class="stat-value">${status.external_model_name}</span>
+                            </div>` : ''}
                             <div class="stat-row">
                                 <span class="stat-label">Active Checkpoint</span>
                                 <span class="stat-value">${status.current_checkpoint_id || 'Base model (no fine-tuning)'}</span>
@@ -1610,15 +1777,17 @@
         loadTrainingCharts();
         loadModelControls();
         loadCheckpointsList();
+        loadLiveTrainingStatus();
 
-        // Refresh stats every 10 seconds
+        // Refresh stats every 60 seconds
         setInterval(() => {
             if (document.getElementById('stats-tab').classList.contains('active')) {
                 loadStats();
                 loadTrainingCharts();
                 loadModelControls();
+                loadLiveTrainingStatus();
             }
-        }, 10000);
+        }, 60000);
 
         // ----------------------------------------------------------------
         // Prompt Interceptor Rules

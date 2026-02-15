@@ -123,7 +123,8 @@ class ModelEvaluator:
             for sample in eval_samples:
                 prompt = sample['prompt']
                 completion = sample['completion']
-                text = f"[INST] {prompt} [/INST] {completion}"
+                # Use GPT-OSS Harmony format (not Llama format)
+                text = f"<|start|>user<|message|>{prompt}<|end|><|start|>assistant<|channel|>final<|message|>{completion}<|return|>"
 
                 inputs = tokenizer(text, return_tensors="pt").to(model.device)
 

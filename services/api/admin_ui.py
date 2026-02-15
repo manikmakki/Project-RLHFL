@@ -100,8 +100,8 @@ async def get_admin_stats():
             },
             "system": {
                 "model_loaded": llm_engine.is_loaded(),
-                "is_reloading": llm_engine.is_reloading(),
-                "current_checkpoint": llm_engine.current_checkpoint_id,
+                "is_reloading": getattr(llm_engine, 'is_reloading', lambda: False)(),
+                "current_checkpoint": getattr(llm_engine, 'current_checkpoint_id', None),
                 "model_path": getattr(llm_engine, 'model_path', None),
                 "memory_usage_mb": round(memory_info.rss / 1024 / 1024, 2),
                 "cpu_percent": psutil.cpu_percent(interval=0.1)
@@ -464,48 +464,97 @@ async def get_training_history():
             checkpoint_dirs = [d for d in checkpoints_path.iterdir() if d.is_dir()]
 
             for checkpoint_dir in checkpoint_dirs:
-                # Read training_metadata.json
-                metadata_file = checkpoint_dir / "training_metadata.json"
+                # Check for sequential training structure (pass_* directories)
+                pass_dirs = sorted([d for d in checkpoint_dir.iterdir() if d.is_dir() and d.name.startswith('pass_')])
 
-                if metadata_file.exists():
-                    try:
-                        with open(metadata_file, 'r') as f:
-                            metadata = json.load(f)
+                if pass_dirs:
+                    # Sequential training - collect data from each pass
+                    for pass_dir in pass_dirs:
+                        metadata_file = pass_dir / "training_metadata.json"
 
-                        history_entry = {
-                            "timestamp": metadata.get("timestamp"),
-                            "train_loss": metadata.get("train_loss"),
-                            "train_samples": metadata.get("train_samples"),
-                            "val_samples": metadata.get("val_samples"),
-                            "epochs": metadata.get("epochs"),
-                            "checkpoint_name": checkpoint_dir.name
-                        }
+                        if metadata_file.exists():
+                            try:
+                                with open(metadata_file, 'r') as f:
+                                    metadata = json.load(f)
 
-                        # Find the highest numbered checkpoint subdirectory
-                        checkpoint_subdirs = [d for d in checkpoint_dir.iterdir() if d.is_dir() and d.name.startswith('checkpoint-')]
-                        if checkpoint_subdirs:
-                            # Sort by checkpoint number and get the last one
-                            checkpoint_subdirs.sort(key=lambda x: int(x.name.split('-')[1]) if x.name.split('-')[1].isdigit() else 0)
-                            trainer_state_file = checkpoint_subdirs[-1] / "trainer_state.json"
+                                # Extract pass number and layers from directory name
+                                parts = pass_dir.name.split("_")
+                                pass_num = int(parts[1])
+                                layers = f"{parts[3]}-{parts[4]}"
 
-                            if trainer_state_file.exists():
-                                try:
-                                    with open(trainer_state_file, 'r') as f:
-                                        trainer_state = json.load(f)
+                                history_entry = {
+                                    "timestamp": metadata.get("timestamp"),
+                                    "train_loss": metadata.get("train_loss"),
+                                    "train_samples": metadata.get("train_samples"),
+                                    "val_samples": metadata.get("val_samples"),
+                                    "epochs": metadata.get("epochs"),
+                                    "checkpoint_name": f"{checkpoint_dir.name} - Pass {pass_num} (Layers {layers})"
+                                }
 
-                                    log_history = trainer_state.get("log_history", [])
-                                    if log_history:
-                                        # Get the last entry (most recent)
-                                        last_log = log_history[-1]
-                                        history_entry["eval_loss"] = last_log.get("eval_loss")
-                                        history_entry["eval_runtime"] = last_log.get("eval_runtime")
-                                        history_entry["global_step"] = trainer_state.get("global_step")
-                                except Exception as e:
-                                    logger.warning(f"Failed to load trainer state from {trainer_state_file}: {e}")
+                                # Find the highest numbered checkpoint subdirectory
+                                checkpoint_subdirs = [d for d in pass_dir.iterdir() if d.is_dir() and d.name.startswith('checkpoint-')]
+                                if checkpoint_subdirs:
+                                    checkpoint_subdirs.sort(key=lambda x: int(x.name.split('-')[1]) if x.name.split('-')[1].isdigit() else 0)
+                                    trainer_state_file = checkpoint_subdirs[-1] / "trainer_state.json"
 
-                        training_history.append(history_entry)
-                    except Exception as e:
-                        logger.warning(f"Failed to load checkpoint metadata {metadata_file}: {e}")
+                                    if trainer_state_file.exists():
+                                        try:
+                                            with open(trainer_state_file, 'r') as f:
+                                                trainer_state = json.load(f)
+
+                                            log_history = trainer_state.get("log_history", [])
+                                            if log_history:
+                                                last_log = log_history[-1]
+                                                history_entry["eval_loss"] = last_log.get("eval_loss")
+                                                history_entry["eval_runtime"] = last_log.get("eval_runtime")
+                                                history_entry["global_step"] = trainer_state.get("global_step")
+                                        except Exception as e:
+                                            logger.warning(f"Failed to load trainer state from {trainer_state_file}: {e}")
+
+                                training_history.append(history_entry)
+                            except Exception as e:
+                                logger.warning(f"Failed to load checkpoint metadata {metadata_file}: {e}")
+                else:
+                    # Standard training - metadata at top level
+                    metadata_file = checkpoint_dir / "training_metadata.json"
+
+                    if metadata_file.exists():
+                        try:
+                            with open(metadata_file, 'r') as f:
+                                metadata = json.load(f)
+
+                            history_entry = {
+                                "timestamp": metadata.get("timestamp"),
+                                "train_loss": metadata.get("train_loss"),
+                                "train_samples": metadata.get("train_samples"),
+                                "val_samples": metadata.get("val_samples"),
+                                "epochs": metadata.get("epochs"),
+                                "checkpoint_name": checkpoint_dir.name
+                            }
+
+                            # Find the highest numbered checkpoint subdirectory
+                            checkpoint_subdirs = [d for d in checkpoint_dir.iterdir() if d.is_dir() and d.name.startswith('checkpoint-')]
+                            if checkpoint_subdirs:
+                                checkpoint_subdirs.sort(key=lambda x: int(x.name.split('-')[1]) if x.name.split('-')[1].isdigit() else 0)
+                                trainer_state_file = checkpoint_subdirs[-1] / "trainer_state.json"
+
+                                if trainer_state_file.exists():
+                                    try:
+                                        with open(trainer_state_file, 'r') as f:
+                                            trainer_state = json.load(f)
+
+                                        log_history = trainer_state.get("log_history", [])
+                                        if log_history:
+                                            last_log = log_history[-1]
+                                            history_entry["eval_loss"] = last_log.get("eval_loss")
+                                            history_entry["eval_runtime"] = last_log.get("eval_runtime")
+                                            history_entry["global_step"] = trainer_state.get("global_step")
+                                    except Exception as e:
+                                        logger.warning(f"Failed to load trainer state from {trainer_state_file}: {e}")
+
+                            training_history.append(history_entry)
+                        except Exception as e:
+                            logger.warning(f"Failed to load checkpoint metadata {metadata_file}: {e}")
 
         # Sort by timestamp
         training_history.sort(key=lambda x: x.get('timestamp', ''))
@@ -701,18 +750,30 @@ async def cleanup_lowest_weight(percentage: Optional[float] = None):
 async def get_model_status():
     """Get current model and training pipeline status."""
     try:
+        # Import main.py's global state for training status
+        from api.main import training_in_progress, config
+
         result = {
             "model_loaded": False,
             "is_reloading": False,
+            "training_in_progress": training_in_progress,
             "current_checkpoint_id": None,
             "model_path": None,
+            "external_model_name": None,
         }
 
         if llm_engine:
-            result["model_loaded"] = llm_engine.is_loaded()
-            result["is_reloading"] = llm_engine.is_reloading()
-            result["current_checkpoint_id"] = llm_engine.current_checkpoint_id
+            # Proxy mode
+            result["model_loaded"] = llm_engine.is_loaded() and not training_in_progress
+            result["is_reloading"] = training_in_progress  # Training = reloading in proxy mode
+            result["current_checkpoint_id"] = getattr(llm_engine, "current_checkpoint_id", None)
             result["model_path"] = getattr(llm_engine, "model_path", None)
+
+            # Add external model name for Ollama
+            if hasattr(llm_engine, "model_name"):
+                result["external_model_name"] = llm_engine.model_name
+            elif config:
+                result["external_model_name"] = config.llm_proxy.external_model_name
 
         # Read current_checkpoint.json for GGUF and metrics info
         checkpoint_file = Path(settings.checkpoints_path) / "current_checkpoint.json"
@@ -754,6 +815,235 @@ async def trigger_training():
     except Exception as e:
         logger.error(f"Error triggering training: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/api/training/live-status")
+async def get_training_live_status():
+    """Get real-time training status including CPU usage, current pass, and progress."""
+    try:
+        import subprocess
+        import re
+
+        status = {
+            "training_active": False,
+            "training_mode": "unknown",
+            "cpu_percent": 0,
+            "ram_usage": "0B",
+            "ram_percent": 0,
+            "current_pass": None,
+            "total_passes": None,
+            "current_layers": None,
+            "current_epoch": None,
+            "total_epochs": None,
+            "last_log_time": None,
+            "logs": []
+        }
+
+        # Check if trainer container is running and get stats
+        try:
+            result = subprocess.run(
+                ["docker", "stats", "llm-trainer", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            if result.returncode == 0 and result.stdout.strip():
+                parts = result.stdout.strip().split('|')
+                if len(parts) >= 3:
+                    status["cpu_percent"] = float(parts[0].rstrip('%'))
+                    status["ram_usage"] = parts[1].split('/')[0].strip()
+                    status["ram_percent"] = float(parts[2].rstrip('%'))
+
+                    # If CPU > 1000%, training is likely active
+                    if status["cpu_percent"] > 1000:
+                        status["training_active"] = True
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, ValueError):
+            pass
+
+        # Get recent training logs to extract progress info
+        try:
+            result = subprocess.run(
+                ["docker", "logs", "llm-trainer", "--tail", "100"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            if result.returncode == 0:
+                logs = result.stdout + result.stderr
+
+                # Extract training mode
+                if "CPU TRAINING MODE ENABLED" in logs:
+                    status["training_mode"] = "CPU"
+                elif "Loading base model" in logs and "8-bit quantization" in logs:
+                    status["training_mode"] = "GPU (8-bit)"
+
+                # Extract current pass and layers
+                pass_match = re.search(r'PASS (\d+)/(\d+): Training layers (\d+)-(\d+)', logs)
+                if pass_match:
+                    status["current_pass"] = int(pass_match.group(1))
+                    status["total_passes"] = int(pass_match.group(2))
+                    status["current_layers"] = f"{pass_match.group(3)}-{pass_match.group(4)}"
+
+                # Extract epoch info
+                epoch_match = re.search(r'Epoch (\d+)/(\d+)', logs)
+                if epoch_match:
+                    status["current_epoch"] = int(epoch_match.group(1))
+                    status["total_epochs"] = int(epoch_match.group(2))
+
+                # Get last few relevant log lines
+                log_lines = logs.split('\n')
+                relevant_logs = []
+                for line in reversed(log_lines[-50:]):
+                    if any(keyword in line for keyword in ['Training', 'PASS', 'epoch', 'loss', 'CPU', 'Merging', 'complete']):
+                        relevant_logs.append(line.strip())
+                        if len(relevant_logs) >= 10:
+                            break
+
+                status["logs"] = list(reversed(relevant_logs))
+
+                # Get last log timestamp
+                timestamp_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', logs)
+                if timestamp_match:
+                    status["last_log_time"] = timestamp_match.group(1)
+
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+            pass
+
+        return status
+
+    except Exception as e:
+        logger.error(f"Error getting training status: {e}", exc_info=True)
+        return {
+            "training_active": False,
+            "error": str(e)
+        }
+
+
+@admin_router.get("/api/training/progress")
+async def get_training_progress():
+    """Get training progress from checkpoint metadata files (no docker needed)"""
+    try:
+        checkpoints_dir = Path(os.environ.get("CHECKPOINTS_PATH", "/checkpoints"))
+
+        # Find the most recent checkpoint directory
+        checkpoint_dirs = sorted(
+            [d for d in checkpoints_dir.iterdir() if d.is_dir() and d.name.startswith("checkpoint_")],
+            key=lambda x: x.stat().st_mtime,
+            reverse=True
+        )
+
+        if not checkpoint_dirs:
+            return {
+                "training_active": False,
+                "message": "No training checkpoints found"
+            }
+
+        latest_checkpoint = checkpoint_dirs[0]
+
+        # Scan for pass directories
+        pass_dirs = sorted(
+            [d for d in latest_checkpoint.iterdir() if d.is_dir() and d.name.startswith("pass_")],
+            key=lambda x: int(x.name.split("_")[1])
+        )
+
+        if not pass_dirs:
+            return {
+                "training_active": False,
+                "message": "No training passes found in checkpoint"
+            }
+
+        # Collect data from all passes
+        passes_data = []
+        total_passes = len(pass_dirs)
+        current_pass = None
+
+        for pass_dir in pass_dirs:
+            # Read training metadata
+            metadata_file = pass_dir / "training_metadata.json"
+            if not metadata_file.exists():
+                continue
+
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+
+            # Find the latest checkpoint within this pass
+            checkpoints = sorted(
+                [d for d in pass_dir.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")],
+                key=lambda x: int(x.name.split("-")[1]),
+                reverse=True
+            )
+
+            trainer_state = None
+            if checkpoints:
+                trainer_state_file = checkpoints[0] / "trainer_state.json"
+                if trainer_state_file.exists():
+                    with open(trainer_state_file, 'r') as f:
+                        trainer_state = json.load(f)
+
+            # Extract pass number and layers from directory name
+            # Format: pass_1_layers_0_4
+            parts = pass_dir.name.split("_")
+            pass_num = int(parts[1])
+            layers = f"{parts[3]}-{parts[4]}"
+
+            pass_info = {
+                "pass_number": pass_num,
+                "layers": layers,
+                "train_loss": metadata.get("train_loss"),
+                "train_samples": metadata.get("train_samples"),
+                "val_samples": metadata.get("val_samples"),
+                "epochs": metadata.get("epochs"),
+                "timestamp": metadata.get("timestamp"),
+                "completed": True
+            }
+
+            if trainer_state:
+                pass_info["epoch"] = trainer_state.get("epoch")
+                pass_info["global_step"] = trainer_state.get("global_step")
+                pass_info["max_steps"] = trainer_state.get("max_steps")
+
+                # Get the latest eval loss from log_history
+                log_history = trainer_state.get("log_history", [])
+                if log_history:
+                    latest_log = log_history[-1]
+                    pass_info["eval_loss"] = latest_log.get("eval_loss")
+                    pass_info["eval_runtime"] = latest_log.get("eval_runtime")
+
+            passes_data.append(pass_info)
+
+        # Check if training is currently active by looking at timestamps
+        if passes_data:
+            latest_pass = passes_data[-1]
+            latest_timestamp = datetime.fromisoformat(latest_pass["timestamp"].replace("Z", "+00:00"))
+            time_since_update = datetime.now(latest_timestamp.tzinfo) - latest_timestamp
+
+            # Consider training active if last update was within 10 minutes
+            training_active = time_since_update.total_seconds() < 600
+
+            # If active and not all passes complete, we're on the current pass
+            if training_active and len(passes_data) < total_passes:
+                current_pass = len(passes_data)
+                passes_data[-1]["completed"] = False
+        else:
+            training_active = False
+
+        return {
+            "training_active": training_active,
+            "checkpoint_id": latest_checkpoint.name,
+            "total_passes": total_passes,
+            "current_pass": current_pass or total_passes,
+            "passes": passes_data,
+            "training_mode": "CPU"  # From config
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting training progress: {e}", exc_info=True)
+        return {
+            "training_active": False,
+            "error": str(e)
+        }
 
 
 @admin_router.post("/api/model/rollback")

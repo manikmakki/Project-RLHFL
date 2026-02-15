@@ -379,6 +379,63 @@ class LLMProxy:
                         logger.error(f"Failed to parse OpenAI streaming chunk: {e}")
                         continue
 
+    async def unload_model(self):
+        """
+        Unload model from Ollama to free GPU vRAM.
+
+        Sends a request with keep_alive: 0 to tell Ollama to unload the model.
+        Only works with Ollama endpoints.
+        """
+        if self.endpoint_type != "ollama":
+            logger.warning(f"Model unload not supported for {self.endpoint_type} endpoints")
+            return
+
+        try:
+            endpoint_url = f"{self.base_url.rstrip('/')}/api/generate"
+            request_payload = {
+                "model": self.model_name,
+                "prompt": "",  # Empty prompt
+                "keep_alive": 0  # Unload immediately
+            }
+
+            response = await self.client.post(endpoint_url, json=request_payload, timeout=10.0)
+            response.raise_for_status()
+
+            logger.info(f"Ollama model {self.model_name} unloaded (keep_alive: 0)")
+
+        except Exception as e:
+            logger.error(f"Failed to unload Ollama model: {e}")
+            raise
+
+    async def load_model(self):
+        """
+        Load/reload model in Ollama.
+
+        Sends a request with keep_alive: "5m" to tell Ollama to load the model
+        and keep it in memory for 5 minutes.
+        Only works with Ollama endpoints.
+        """
+        if self.endpoint_type != "ollama":
+            logger.warning(f"Model load not supported for {self.endpoint_type} endpoints")
+            return
+
+        try:
+            endpoint_url = f"{self.base_url.rstrip('/')}/api/generate"
+            request_payload = {
+                "model": self.model_name,
+                "prompt": "",  # Empty prompt to trigger load
+                "keep_alive": "5m"  # Keep loaded for 5 minutes
+            }
+
+            response = await self.client.post(endpoint_url, json=request_payload, timeout=30.0)
+            response.raise_for_status()
+
+            logger.info(f"Ollama model {self.model_name} loaded (keep_alive: 5m)")
+
+        except Exception as e:
+            logger.error(f"Failed to load Ollama model: {e}")
+            raise
+
     def is_loaded(self) -> bool:
         """Check if proxy is ready (always True for proxy)."""
         return True

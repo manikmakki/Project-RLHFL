@@ -152,9 +152,13 @@ class TrainerWorker:
         start_time = time.time()
 
         try:
-            # Step 0: Free GPU vRAM by unloading the API's llama-cpp model
-            logger.info("Step 0: Requesting API model unload to free GPU vRAM...")
-            self._request_api_unload()
+            # Step 0: Free GPU vRAM (only needed for GPU training)
+            if self.config.training.enable_cpu_training:
+                logger.info("Step 0: SKIPPED - CPU training mode enabled, GPU model stays loaded for inference")
+                logger.info("Training will proceed on CPU while GPU serves requests")
+            else:
+                logger.info("Step 0: Requesting API model unload to free GPU vRAM...")
+                self._request_api_unload()
 
             # Step 1: Prepare dataset
             logger.info("Step 1: Preparing training dataset...")
@@ -189,17 +193,26 @@ class TrainerWorker:
             val_formatted = self.dataset_builder.format_for_training(val_data)
             
             # Step 3: Train LoRA adapter
-            logger.info("Step 3: Training LoRA adapter...")
-            
             checkpoint_id = f"checkpoint_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             checkpoint_dir = f"{settings.checkpoints_path}/{checkpoint_id}"
-            
-            adapter_path = self.lora_trainer.train(
-                train_formatted,
-                val_formatted,
-                checkpoint_dir
-            )
-            
+
+            # Check if sequential training is enabled (memory-efficient mode)
+            if self.config.training.enable_sequential_training:
+                logger.info("Step 3: Training LoRA adapter (SEQUENTIAL MODE - memory-efficient)...")
+                logger.info(f"Sequential training enabled: {self.config.training.layers_per_pass} layers per pass")
+                adapter_path = self.lora_trainer.train_sequential(
+                    train_formatted,
+                    val_formatted,
+                    checkpoint_dir
+                )
+            else:
+                logger.info("Step 3: Training LoRA adapter (STANDARD MODE - all layers)...")
+                adapter_path = self.lora_trainer.train(
+                    train_formatted,
+                    val_formatted,
+                    checkpoint_dir
+                )
+
             logger.info(f"Training complete. Adapter saved to: {adapter_path}")
             
             # Step 4: Evaluate checkpoint
@@ -231,10 +244,14 @@ class TrainerWorker:
                 logger.warning("Checkpoint failed validation, not deployed")
                 logger.info(f"Metrics: {metadata.metrics}")
                 self._request_api_reload_previous()
-            
+
+                # Cleanup failed checkpoint directory
+                logger.info(f"Cleaning up failed checkpoint: {checkpoint_id}")
+                self._cleanup_checkpoint_dir(checkpoint_dir)
+
             # Step 6: Mark training complete
             self.memory_manager.mark_training_complete()
-            
+
             # Step 7: Cleanup old memories
             logger.info("Step 6: Cleaning up old memories...")
             self.memory_manager.cleanup_old_memories()
@@ -249,6 +266,12 @@ class TrainerWorker:
             logger.info("=" * 80)
             logger.info("TRAINING PIPELINE FAILED")
             logger.info("=" * 80)
+
+            # Cleanup failed checkpoint if it was created
+            if 'checkpoint_dir' in locals():
+                logger.info(f"Cleaning up failed checkpoint directory: {checkpoint_dir}")
+                self._cleanup_checkpoint_dir(checkpoint_dir)
+
             # Ensure the API model is reloaded even if training crashed
             self._request_api_reload_previous()
     
@@ -333,6 +356,35 @@ class TrainerWorker:
             logger.warning(
                 f"Failed to notify API of new model (poller will pick it up): {e}"
             )
+
+    def _cleanup_checkpoint_dir(self, checkpoint_dir: str):
+        """
+        Remove a failed checkpoint directory, metadata, and any associated files.
+
+        Args:
+            checkpoint_dir: Path to the checkpoint directory to remove
+        """
+        import shutil
+
+        checkpoint_path = Path(checkpoint_dir)
+        checkpoint_id = checkpoint_path.name
+
+        # Clean up checkpoint directory
+        if checkpoint_path.exists():
+            try:
+                shutil.rmtree(checkpoint_path)
+                logger.info(f"Cleaned up checkpoint directory: {checkpoint_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up checkpoint directory {checkpoint_dir}: {e}")
+
+        # Clean up metadata file (saved in checkpoints_path root)
+        metadata_file = Path(settings.checkpoints_path) / f"{checkpoint_id}_metadata.json"
+        if metadata_file.exists():
+            try:
+                metadata_file.unlink()
+                logger.info(f"Cleaned up checkpoint metadata: {metadata_file}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up metadata {metadata_file}: {e}")
 
     def _cleanup_old_gguf_files(self, keep_count=2, current_gguf=""):
         """Remove old fine-tuned GGUF files, keeping base model + N most recent."""
