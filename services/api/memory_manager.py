@@ -295,14 +295,16 @@ class MemoryManager:
     #         return []
     
     def get_training_stats(self) -> TrainingStats:
-        """Get statistics about training status."""
+        """Get statistics about training status including sentiment breakdown."""
         try:
-            # Load training state
-            last_training = self._load_training_state()
-            
+            # Load training state (includes last_training and last_dpo_training)
+            training_state = self._load_training_state_full()
+            last_training = training_state.get('last_training')
+            last_dpo_training = training_state.get('last_dpo_training')
+
             # Get all interactions
             all_interactions = self.get_interactions_since()
-            
+
             if not all_interactions:
                 return TrainingStats(
                     new_interactions_since_last_training=0,
@@ -310,21 +312,53 @@ class MemoryManager:
                     days_since_last_training=999.0,
                     total_interactions=0,
                     last_training_timestamp=None,
-                    user_requested_training=self._is_training_requested()
+                    user_requested_training=self._is_training_requested(),
+                    new_positive_count=0,
+                    new_negative_count=0,
+                    new_neutral_count=0,
+                    new_golden_count=0,
+                    last_dpo_training_timestamp=None,
+                    new_negative_since_dpo=0,
+                    days_since_dpo_training=999.0
                 )
 
-            # Calculate stats
+            # Calculate basic stats
             now = datetime.now()
             latest_interaction = max(all_interactions, key=lambda x: x.timestamp)
-
             hours_since_last = (now - latest_interaction.timestamp).total_seconds() / 3600
 
+            # Calculate new interactions since last training
             if last_training:
-                new_interactions = sum(1 for i in all_interactions if i.timestamp > last_training)
+                new_interactions_list = [i for i in all_interactions if i.timestamp > last_training]
+                new_interactions = len(new_interactions_list)
                 days_since_training = (now - last_training).total_seconds() / 86400
             else:
+                new_interactions_list = all_interactions
                 new_interactions = len(all_interactions)
                 days_since_training = 999.0
+
+            # Calculate sentiment breakdown of NEW interactions
+            new_positive = sum(1 for i in new_interactions_list
+                             if i.sentiment > self.config.sentiment.positive_threshold)
+            new_negative = sum(1 for i in new_interactions_list
+                             if i.sentiment < self.config.sentiment.negative_threshold)
+            new_neutral = sum(1 for i in new_interactions_list
+                            if abs(i.sentiment) <= max(
+                                self.config.sentiment.positive_threshold,
+                                abs(self.config.sentiment.negative_threshold)
+                            ))
+            new_golden = sum(1 for i in new_interactions_list
+                           if i.metadata.get('is_golden', False))
+
+            # Calculate DPO-specific stats (new negatives since last DPO training)
+            if last_dpo_training:
+                new_negative_since_dpo = sum(1 for i in all_interactions
+                                             if i.timestamp > last_dpo_training and
+                                             i.sentiment < self.config.sentiment.negative_threshold)
+                days_since_dpo = (now - last_dpo_training).total_seconds() / 86400
+            else:
+                new_negative_since_dpo = new_negative
+                days_since_dpo = 999.0
 
             return TrainingStats(
                 new_interactions_since_last_training=new_interactions,
@@ -332,9 +366,16 @@ class MemoryManager:
                 days_since_last_training=days_since_training,
                 total_interactions=len(all_interactions),
                 last_training_timestamp=last_training,
-                user_requested_training=self._is_training_requested()
+                user_requested_training=self._is_training_requested(),
+                new_positive_count=new_positive,
+                new_negative_count=new_negative,
+                new_neutral_count=new_neutral,
+                new_golden_count=new_golden,
+                last_dpo_training_timestamp=last_dpo_training,
+                new_negative_since_dpo=new_negative_since_dpo,
+                days_since_dpo_training=days_since_dpo
             )
-            
+
         except Exception as e:
             logger.error(f"Failed to get training stats: {e}")
             return TrainingStats(
@@ -342,59 +383,144 @@ class MemoryManager:
                 hours_since_last_interaction=0.0,
                 days_since_last_training=999.0,
                 total_interactions=0,
-                user_requested_training=False
+                user_requested_training=False,
+                new_positive_count=0,
+                new_negative_count=0,
+                new_neutral_count=0,
+                new_golden_count=0,
+                last_dpo_training_timestamp=None,
+                new_negative_since_dpo=0,
+                days_since_dpo_training=999.0
             )
     
-    def mark_training_complete(self):
-        """Mark that training has completed."""
-        self._save_training_state(datetime.now())
+    def mark_training_complete(self, training_mode: str = "sft"):
+        """
+        Mark that training has completed.
+
+        Args:
+            training_mode: The mode used for training ("sft" or "dpo")
+        """
+        now = datetime.now()
+        self._save_training_state(now, training_mode)
         self.user_training_request = False
-        self._clear_training_request_file()
+        self.clear_training_request()
 
-    def request_training(self):
-        """User explicitly requests training. Persists to shared volume so trainer container sees it."""
+    def request_training(self, reason: str = "manual", training_mode: str = "auto"):
+        """
+        Request training execution. Persists to shared volume so trainer container sees it.
+
+        Args:
+            reason: Why training was requested ("manual", "inactivity", "negative_sentiment", etc.)
+            training_mode: Force specific mode ("auto", "sft", "dpo")
+        """
         self.user_training_request = True
-        self._write_training_request_file()
-        logger.info("User requested training (written to shared volume)")
 
-    def _is_training_requested(self) -> bool:
-        """Check both in-memory flag and shared trigger file."""
-        if self.user_training_request:
-            return True
-        trigger_file = Path(self.data_path) / "training_requested"
-        return trigger_file.exists()
+        request_data = {
+            "requested_at": datetime.now().isoformat(),
+            "reason": reason,
+            "training_mode": training_mode,
+            "triggered_by": "admin_ui" if reason == "manual" else "scheduler"
+        }
 
-    def _write_training_request_file(self):
-        """Write a trigger file to the shared data volume."""
         try:
-            trigger_file = Path(self.data_path) / "training_requested"
-            trigger_file.write_text(datetime.now().isoformat())
+            request_file = Path(self.data_path) / "training_request.json"
+            request_file.write_text(json.dumps(request_data, indent=2))
+            logger.info(f"Training requested: {reason} (mode: {training_mode})")
         except Exception as e:
             logger.warning(f"Failed to write training request file: {e}")
 
-    def _clear_training_request_file(self):
-        """Remove the trigger file after training completes."""
+    def get_training_request(self) -> Optional[dict]:
+        """Get pending training request if exists."""
         try:
-            trigger_file = Path(self.data_path) / "training_requested"
-            if trigger_file.exists():
-                trigger_file.unlink()
+            request_file = Path(self.data_path) / "training_request.json"
+            if request_file.exists():
+                return json.loads(request_file.read_text())
+        except Exception as e:
+            logger.warning(f"Failed to read training request file: {e}")
+        return None
+
+    def clear_training_request(self):
+        """Clear training request (called after training completes or fails)."""
+        try:
+            request_file = Path(self.data_path) / "training_request.json"
+            if request_file.exists():
+                request_file.unlink()
+                logger.info("Training request cleared")
         except Exception as e:
             logger.warning(f"Failed to clear training request file: {e}")
+
+    def _is_training_requested(self) -> bool:
+        """Check both in-memory flag and shared request file."""
+        if self.user_training_request:
+            return True
+        return self.get_training_request() is not None
+
+    def _write_training_request_file(self):
+        """Deprecated: Use request_training() instead."""
+        self.request_training(reason="manual", training_mode="auto")
+
+    def _clear_training_request_file(self):
+        """Deprecated: Use clear_training_request() instead."""
+        self.clear_training_request()
     
     def _load_training_state(self) -> Optional[datetime]:
-        """Load the last training timestamp."""
+        """Load the last training timestamp (backward compatibility)."""
+        state = self._load_training_state_full()
+        return state.get('last_training')
+
+    def _load_training_state_full(self) -> dict:
+        """
+        Load the full training state including DPO training timestamp.
+
+        Returns dict with:
+            - last_training: datetime or None
+            - last_dpo_training: datetime or None
+            - last_mode: str ("sft" or "dpo")
+        """
         try:
             with open(self.training_state_file, 'r') as f:
                 state = json.load(f)
-                return datetime.fromisoformat(state['last_training'])
+                return {
+                    'last_training': datetime.fromisoformat(state['last_training']) if 'last_training' in state else None,
+                    'last_dpo_training': datetime.fromisoformat(state['last_dpo_training']) if 'last_dpo_training' in state else None,
+                    'last_mode': state.get('last_mode', 'sft')
+                }
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
-            return None
-    
-    def _save_training_state(self, timestamp: datetime):
-        """Save the training timestamp."""
+            return {
+                'last_training': None,
+                'last_dpo_training': None,
+                'last_mode': 'sft'
+            }
+
+    def _save_training_state(self, timestamp: datetime, training_mode: str = "sft"):
+        """
+        Save the training timestamp.
+
+        Args:
+            timestamp: When training completed
+            training_mode: The mode used for training ("sft" or "dpo")
+        """
         try:
+            # Load existing state to preserve DPO timestamp
+            existing_state = self._load_training_state_full()
+
+            state = {
+                'last_training': timestamp.isoformat(),
+                'last_mode': training_mode
+            }
+
+            # Update DPO training timestamp if this was a DPO training run
+            if training_mode == "dpo":
+                state['last_dpo_training'] = timestamp.isoformat()
+            else:
+                # Preserve existing DPO timestamp
+                if existing_state['last_dpo_training']:
+                    state['last_dpo_training'] = existing_state['last_dpo_training'].isoformat()
+
             with open(self.training_state_file, 'w') as f:
-                json.dump({'last_training': timestamp.isoformat()}, f)
+                json.dump(state, f, indent=2)
+
+            logger.info(f"Training state saved: mode={training_mode}, timestamp={timestamp.isoformat()}")
         except Exception as e:
             logger.error(f"Failed to save training state: {e}")
     

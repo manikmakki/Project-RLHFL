@@ -333,6 +333,17 @@ class TrainingStats(BaseModel):
     last_training_timestamp: Optional[datetime] = None
     user_requested_training: bool = False
 
+    # Sentiment breakdown of NEW interactions (since last training)
+    new_positive_count: int = 0
+    new_negative_count: int = 0
+    new_neutral_count: int = 0
+    new_golden_count: int = 0
+
+    # DPO-specific tracking (since last DPO training)
+    last_dpo_training_timestamp: Optional[datetime] = None
+    new_negative_since_dpo: int = 0
+    days_since_dpo_training: float = 0.0
+
 
 class TrainingDatasetSample(BaseModel):
     """Single training sample."""

@@ -795,7 +795,7 @@ async def get_model_status():
 
 @admin_router.post("/api/training/trigger")
 async def trigger_training():
-    """Trigger a training run from the admin UI."""
+    """Trigger a training run from the admin UI (immediate execution, bypasses schedule)."""
     try:
         if not memory_manager:
             raise HTTPException(status_code=503, detail="Memory manager not initialized")
@@ -803,11 +803,12 @@ async def trigger_training():
         # Pre-training cleanup
         deleted_count = await asyncio.to_thread(memory_manager.cleanup_low_weight_entries)
 
-        memory_manager.request_training()
+        # Request manual training (bypasses schedule, auto-selects mode)
+        memory_manager.request_training(reason="manual", training_mode="auto")
 
         return {
             "success": True,
-            "message": "Training requested. It will begin at the next scheduled check.",
+            "message": "Manual training requested. It will begin immediately (bypasses schedule).",
             "pre_training_cleanup_deleted": deleted_count,
         }
     except HTTPException:

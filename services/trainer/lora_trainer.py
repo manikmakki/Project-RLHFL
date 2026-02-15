@@ -46,7 +46,19 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 from shared.config import SystemConfig
 
+# Initialize logger BEFORE trying to import DPO components
 logger = logging.getLogger(__name__)
+
+# DPO trainer for preference optimization
+# Note: TRL 0.7.4 is incompatible with transformers 5.0.0
+# Requires TRL >= 0.12.0 for transformers 5.0+ support
+try:
+    from trl import DPOTrainer, DPOConfig
+    DPO_AVAILABLE = True
+    logger.info("DPO training support loaded successfully")
+except ImportError as e:
+    logger.warning(f"TRL library not available or incompatible, DPO training will not be available: {e}")
+    DPO_AVAILABLE = False
 
 # Monkey patch bitsandbytes to ignore _is_hf_initialized parameter
 # This fixes compatibility issues between transformers 5.0, accelerate, and bitsandbytes
@@ -307,75 +319,130 @@ class LoRATrainer:
             # Ensure use_cache is disabled for training
             model.config.use_cache = False
             
-            # Prepare datasets
-            train_ds = self._prepare_dataset(train_dataset, tokenizer)
-            val_ds = self._prepare_dataset(val_dataset, tokenizer)
-            
-            # Training arguments
-            training_args = TrainingArguments(
-                output_dir=str(checkpoint_path),
-                num_train_epochs=self.config.training.num_epochs,
-                per_device_train_batch_size=self.config.training.batch_size,
-                per_device_eval_batch_size=self.config.training.batch_size,
-                gradient_accumulation_steps=self.config.training.gradient_accumulation_steps,
-                learning_rate=self.config.training.learning_rate,
-                warmup_steps=self.config.training.warmup_steps,
-                max_grad_norm=self.config.training.max_grad_norm,
-                weight_decay=self.config.training.weight_decay,
-                logging_steps=10,
-                logging_dir=f"{checkpoint_path}/logs",
-                eval_strategy="epoch",  # renamed from evaluation_strategy in transformers 5.0
-                save_strategy="epoch",
-                save_total_limit=3,
-                bf16=not self.config.training.enable_cpu_training,  # BF16 only for GPU training
-                gradient_checkpointing=False,  # Disabled: FP32 conversion needs 1.98GB we don't have
-                report_to="none",
-                remove_unused_columns=False,
-                dataloader_drop_last=False,
-                use_cpu=self.config.training.enable_cpu_training,  # Force CPU when CPU training enabled
-            )
-            
-            # Custom data collator for causal LM that pads and masks prompt tokens
-            class DataCollatorForCausalLM:
-                def __init__(self, tokenizer, max_length=None):
-                    self.tokenizer = tokenizer
-                    self.max_length = max_length
+            # Check training mode: DPO or SFT
+            is_dpo_mode = self.config.training.enable_dpo and DPO_AVAILABLE
 
-                def __call__(self, features):
-                    # features is a list of dicts with keys: input_ids, attention_mask, prompt_len
-                    batch = self.tokenizer.pad(
-                        features,
-                        padding=True,
-                        max_length=self.max_length,
-                        return_tensors="pt",
-                    )
+            if is_dpo_mode:
+                # DPO MODE: Direct Preference Optimization
+                logger.info("Using DPO (Direct Preference Optimization) training mode")
 
-                    input_ids = batch["input_ids"]
-                    attention_mask = batch["attention_mask"]
+                # DPO expects raw datasets with prompt, chosen, rejected fields
+                # No need to tokenize in advance - DPOTrainer handles it
+                train_ds = Dataset.from_list(train_dataset)
+                val_ds = Dataset.from_list(val_dataset)
 
-                    # Build labels and mask prompt portion with -100
-                    labels = input_ids.clone()
-                    prompt_lens = [f.get("prompt_len", 0) for f in features]
-                    for i, p_len in enumerate(prompt_lens):
-                        if p_len > 0:
-                            labels[i, :p_len] = -100
+                logger.info(f"DPO datasets prepared: {len(train_ds)} train, {len(val_ds)} val")
 
-                    return {
-                        "input_ids": input_ids,
-                        "attention_mask": attention_mask,
-                        "labels": labels,
-                    }
+                # DPO training arguments
+                training_args = TrainingArguments(
+                    output_dir=str(checkpoint_path),
+                    num_train_epochs=self.config.training.num_epochs,
+                    per_device_train_batch_size=self.config.training.batch_size,
+                    per_device_eval_batch_size=self.config.training.batch_size,
+                    gradient_accumulation_steps=self.config.training.gradient_accumulation_steps,
+                    learning_rate=self.config.training.learning_rate,
+                    warmup_steps=self.config.training.warmup_steps,
+                    max_grad_norm=self.config.training.max_grad_norm,
+                    weight_decay=self.config.training.weight_decay,
+                    logging_steps=10,
+                    logging_dir=f"{checkpoint_path}/logs",
+                    eval_strategy="epoch",
+                    save_strategy="epoch",
+                    save_total_limit=3,
+                    bf16=not self.config.training.enable_cpu_training,
+                    gradient_checkpointing=False,
+                    report_to="none",
+                    remove_unused_columns=False,
+                    use_cpu=self.config.training.enable_cpu_training,
+                )
 
-            data_collator = DataCollatorForCausalLM(tokenizer=tokenizer, max_length=self.config.training.max_seq_length)
-            
-            # Create trainer
-            trainer = Trainer(
-                model=model,
-                args=training_args,
-                train_dataset=train_ds,
-                eval_dataset=val_ds,
-                data_collator=data_collator,
-            )
+                # Create DPO trainer
+                trainer = DPOTrainer(
+                    model=model,
+                    args=training_args,
+                    train_dataset=train_ds,
+                    eval_dataset=val_ds,
+                    tokenizer=tokenizer,
+                    beta=self.config.training.dpo_beta,  # DPO temperature parameter
+                    max_length=self.config.training.max_seq_length,
+                    max_prompt_length=self.config.training.max_seq_length // 2,
+                )
+
+                logger.info(f"DPOTrainer created with beta={self.config.training.dpo_beta}")
+
+            else:
+                # SFT MODE: Supervised Fine-Tuning (standard mode)
+                logger.info("Using SFT (Supervised Fine-Tuning) training mode")
+
+                # Prepare datasets (tokenize)
+                train_ds = self._prepare_dataset(train_dataset, tokenizer)
+                val_ds = self._prepare_dataset(val_dataset, tokenizer)
+
+                # Training arguments
+                training_args = TrainingArguments(
+                    output_dir=str(checkpoint_path),
+                    num_train_epochs=self.config.training.num_epochs,
+                    per_device_train_batch_size=self.config.training.batch_size,
+                    per_device_eval_batch_size=self.config.training.batch_size,
+                    gradient_accumulation_steps=self.config.training.gradient_accumulation_steps,
+                    learning_rate=self.config.training.learning_rate,
+                    warmup_steps=self.config.training.warmup_steps,
+                    max_grad_norm=self.config.training.max_grad_norm,
+                    weight_decay=self.config.training.weight_decay,
+                    logging_steps=10,
+                    logging_dir=f"{checkpoint_path}/logs",
+                    eval_strategy="epoch",
+                    save_strategy="epoch",
+                    save_total_limit=3,
+                    bf16=not self.config.training.enable_cpu_training,
+                    gradient_checkpointing=False,
+                    report_to="none",
+                    remove_unused_columns=False,
+                    dataloader_drop_last=False,
+                    use_cpu=self.config.training.enable_cpu_training,
+                )
+
+                # Custom data collator for causal LM that pads and masks prompt tokens
+                class DataCollatorForCausalLM:
+                    def __init__(self, tokenizer, max_length=None):
+                        self.tokenizer = tokenizer
+                        self.max_length = max_length
+
+                    def __call__(self, features):
+                        # features is a list of dicts with keys: input_ids, attention_mask, prompt_len
+                        batch = self.tokenizer.pad(
+                            features,
+                            padding=True,
+                            max_length=self.max_length,
+                            return_tensors="pt",
+                        )
+
+                        input_ids = batch["input_ids"]
+                        attention_mask = batch["attention_mask"]
+
+                        # Build labels and mask prompt portion with -100
+                        labels = input_ids.clone()
+                        prompt_lens = [f.get("prompt_len", 0) for f in features]
+                        for i, p_len in enumerate(prompt_lens):
+                            if p_len > 0:
+                                labels[i, :p_len] = -100
+
+                        return {
+                            "input_ids": input_ids,
+                            "attention_mask": attention_mask,
+                            "labels": labels,
+                        }
+
+                data_collator = DataCollatorForCausalLM(tokenizer=tokenizer, max_length=self.config.training.max_seq_length)
+
+                # Create trainer
+                trainer = Trainer(
+                    model=model,
+                    args=training_args,
+                    train_dataset=train_ds,
+                    eval_dataset=val_ds,
+                    data_collator=data_collator,
+                )
             
             # Train
             logger.info("Starting training...")

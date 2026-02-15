@@ -446,6 +446,92 @@ docker-compose logs -f api | grep -i "ready"
 
 ---
 
+## Understanding Sentiment-Based Training
+
+**RLHFL uses implicit sentiment feedback to automatically train your AI** - no manual intervention required!
+
+### How It Works
+
+The system tracks sentiment for every interaction:
+- **Positive sentiment** (+0.3 to +1.0): Good responses you appreciate
+- **Negative sentiment** (-1.0 to -0.3): Bad responses that need correction
+- **Neutral sentiment** (-0.3 to +0.3): Normal conversations
+
+When enough feedback accumulates, training triggers automatically:
+
+| Trigger | Threshold | Training Mode | Purpose |
+|---------|-----------|---------------|---------|
+| **20+ positive/golden** | `sft_trigger_threshold` | **SFT** | Reinforce good behavior |
+| **5+ negative sentiments** | `dpo_trigger_threshold` | **DPO** | Train out bad behavior |
+| **8 hours inactivity** | `inactivity_threshold_hours` | **Auto** | Consolidate learnings |
+
+### Training Modes
+
+**SFT (Supervised Fine-Tuning)**
+- Reinforces positive patterns
+- Faster training (~2-4 hours on CPU)
+- Used when you have good examples to learn from
+
+**DPO (Direct Preference Optimization)**
+- Corrects unwanted behaviors
+- Generates synthetic "bad" responses for contrast
+- Used when you have negative feedback to address
+
+**The system automatically selects the right mode** based on your feedback!
+
+### Training Schedule
+
+To avoid impacting performance during peak hours, training runs **during off-peak times**:
+
+```yaml
+# In volumes/config/system_config.yaml
+training:
+  schedule_enabled: true              # Enable scheduled training
+  schedule_time: "01:00"              # Run at 1:00 AM
+  schedule_timezone: "America/New_York"
+  schedule_window_minutes: 60         # Execute within ±60 min of scheduled time
+```
+
+**Manual triggers** (via Admin UI) bypass the schedule and run immediately.
+
+### Example: Learning from Feedback
+
+```
+Day 1: User asks "Explain recursion"
+       Model includes code example
+       User gives negative feedback → negative sentiment
+
+Day 2: 4 more similar interactions with negative feedback
+       Total: 5 negative sentiments
+
+Night 2: DPO training triggered at 1:00 AM
+         Learns to avoid unsolicited code examples
+
+Day 3: User asks "Explain recursion"
+       Model provides clean explanation WITHOUT code ✓
+```
+
+**Your AI molds to your preferences automatically!**
+
+### Configuration Tips
+
+Adjust these in `volumes/config/system_config.yaml`:
+
+```yaml
+# Trigger thresholds
+sft_trigger_threshold: 20    # How many positive examples before SFT training
+dpo_trigger_threshold: 5     # How many negative examples before DPO training
+
+# Schedule
+schedule_time: "01:00"       # Change to fit your timezone/schedule
+schedule_timezone: "America/New_York"  # Your timezone
+```
+
+**Lower thresholds** = more frequent training (faster learning, more CPU usage)
+**Higher thresholds** = less frequent training (slower learning, less resource usage)
+
+---
+
 ## What's Next
 
 - **Read the README** for a project overview: [README.md](README.md)

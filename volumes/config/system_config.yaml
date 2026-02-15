@@ -11,7 +11,7 @@ memory:
   auto_cleanup_threshold: 0.9       # Trigger cleanup at 90% of max size
   auto_cleanup_percentage: 0.1      # Remove bottom 10% by weight during auto-cleanup
   min_weight_threshold: 0.5         # Remove entries below this weight during pre-training cleanup
-  top_n_weighted_interactions: 30   # Top N non-golden interactions by weight to include in training
+  top_n_weighted_interactions: 1000   # Total interactions (including golden) to include in training
 model:
   base_model_hf_path: /models/jinx-gpt-oss-20b-base
   base_model_path: /models/jinx-gpt-oss-20b-Q4_K_M.gguf
@@ -66,3 +66,17 @@ training:
   # CPU training mode (slow but allows GPU for inference)
   enable_cpu_training: true  # Train on CPU instead of GPU (50-200x slower)
   cpu_threads: 32  # Use half of 64 cores (leave room for inference + system)
+  # DPO (Direct Preference Optimization) settings
+  enable_dpo: true  # Master DPO toggle (auto-selection can still use SFT)
+  dpo_beta: 0.1  # DPO temperature parameter (lower = stronger preference, higher = softer)
+  dpo_batch_size: 8  # Batch size for synthetic rejection generation
+  dpo_rejection_timeout: 300  # Timeout per rejection generation request (seconds)
+  # Sentiment-based training triggers (implicit learning from user feedback)
+  sft_trigger_threshold: 20  # Trigger SFT training when ≥20 new positive/golden examples
+  dpo_trigger_threshold: 5   # Trigger DPO training when ≥5 new negative sentiments
+  dpo_mode_threshold: 5      # Use DPO mode if ≥5 negatives exist in dataset
+  # Training schedule (run during off-peak hours)
+  schedule_enabled: true                # Enable scheduled training execution
+  schedule_time: "01:00"                # Run training at 1:00 AM (24-hour format)
+  schedule_timezone: "America/New_York"  # Timezone for schedule_time
+  schedule_window_minutes: 60           # Execute if within ±60 minutes of scheduled time
