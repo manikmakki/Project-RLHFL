@@ -67,6 +67,23 @@ class TrainingConfig(BaseModel):
     enable_cpu_training: bool = False  # Train on CPU instead of GPU
     cpu_threads: int = 32  # Number of CPU threads to use (leave room for inference)
 
+    # DPO (Direct Preference Optimization) settings
+    enable_dpo: bool = False  # Master DPO toggle (if false, always use SFT)
+    dpo_beta: float = 0.1  # DPO temperature parameter (controls strength of preference)
+    dpo_batch_size: int = 8  # Batch size for rejection generation
+    dpo_rejection_timeout: int = 300  # Timeout per rejection generation (seconds)
+
+    # Sentiment-based training triggers
+    sft_trigger_threshold: int = 20  # Trigger SFT when ≥ this many new positive/golden
+    dpo_trigger_threshold: int = 5   # Trigger DPO when ≥ this many new negative sentiments
+    dpo_mode_threshold: int = 5      # Use DPO mode if ≥ this many negatives exist
+
+    # Training schedule settings
+    schedule_enabled: bool = False              # Enable scheduled training (vs immediate)
+    schedule_time: str = "01:00"                # Time to run training (24-hour format)
+    schedule_timezone: str = "America/New_York"  # Timezone for schedule_time
+    schedule_window_minutes: int = 60           # Execute if within N minutes of scheduled time
+
 
 class MemoryConfig(BaseModel):
     golden_examples_count: int = 20
@@ -83,7 +100,7 @@ class MemoryConfig(BaseModel):
     auto_cleanup_threshold: float = 0.9  # Trigger cleanup at 90% of max size
     auto_cleanup_percentage: float = 0.1  # Remove bottom 10% by weight during auto-cleanup
     min_weight_threshold: float = 0.5  # Remove entries below this weight during pre-training cleanup
-    top_n_weighted_interactions: int = 30  # Top N non-golden interactions by weight to include in training
+    top_n_weighted_interactions: int = 1000  # Total interactions (including golden) to include in training
 
 
 class SentimentConfig(BaseModel):

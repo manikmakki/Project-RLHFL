@@ -1047,6 +1047,12 @@ async def ollama_chat(request: Request):
             if k.lower() not in ['host', 'content-length']
         }
 
+        # Debug logging for tool calling
+        if "tools" in ollama_req:
+            logger.info(f"Request with tools - model: {model_name}, num_tools: {len(ollama_req.get('tools', []))}")
+            logger.debug(f"Forward headers: {dict(forward_headers)}")
+            logger.debug(f"Request body preview: {request_body[:500]}")
+
         # Forward request to external Ollama and stream response
         async def transparent_proxy_stream():
             """Stream response from external Ollama unchanged."""
@@ -1061,7 +1067,14 @@ async def ollama_chat(request: Request):
                     content=request_body,
                     headers=forward_headers
                 ) as response:
-                    response.raise_for_status()
+                    # Check for HTTP errors and pass through unchanged
+                    if response.status_code >= 400:
+                        error_detail = await response.aread()
+                        error_text = error_detail.decode('utf-8') if error_detail else f"HTTP {response.status_code}"
+                        logger.error(f"External Ollama error {response.status_code}: {error_text}")
+                        # Pass through Ollama's error response unchanged
+                        yield error_text
+                        return
 
                     # Stream each line unchanged
                     async for line in response.aiter_lines():
@@ -1148,11 +1161,16 @@ async def ollama_chat(request: Request):
                         logger.debug(f"Model '{model_name}' not whitelisted - skipping storage")
 
             except httpx.HTTPStatusError as e:
-                logger.error(f"External Ollama error {e.response.status_code}: {e.response.text}")
-                raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+                # This shouldn't happen anymore since we check status_code above
+                # But keep as fallback
+                logger.error(f"External Ollama HTTP error {e.response.status_code}: {str(e)}")
+                error_chunk = {"error": f"Upstream HTTP error: {e.response.status_code}"}
+                yield json.dumps(error_chunk) + "\n"
             except Exception as e:
                 logger.error(f"Proxy error: {e}", exc_info=True)
-                raise
+                # Yield error instead of raising to avoid "response already started" errors
+                error_chunk = {"error": f"Proxy error: {str(e)}"}
+                yield json.dumps(error_chunk) + "\n"
 
         return StreamingResponse(
             transparent_proxy_stream(),

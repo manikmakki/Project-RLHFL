@@ -129,26 +129,179 @@ class DatasetBuilder:
         
         return train_data, val_data
     
+    def build_dpo_dataset(
+        self,
+        interactions: List[Interaction],
+        golden_examples: List[Interaction],
+        rejections: Dict[str, str]
+    ) -> List[Dict[str, Any]]:
+        """
+        Build DPO dataset with chosen/rejected pairs.
+
+        Creates preference pairs by combining positive/golden interactions
+        (chosen responses) with synthetically generated rejections.
+
+        Args:
+            interactions: Top-N weighted interactions
+            golden_examples: Golden examples (all included for catastrophic forgetting prevention)
+            rejections: Map of prompt -> synthetic rejected response
+
+        Returns:
+            Dataset with (prompt, chosen, rejected) triplets for DPO training
+        """
+        logger.info(
+            f"Building DPO dataset from {len(interactions)} interactions, "
+            f"{len(golden_examples)} golden examples, "
+            f"{len(rejections)} synthetic rejections"
+        )
+
+        dataset = []
+
+        # Separate interactions by sentiment
+        positive = [i for i in interactions if i.sentiment > self.config.sentiment.positive_threshold]
+        negative = [i for i in interactions if i.sentiment < self.config.sentiment.negative_threshold]
+        neutral = [
+            i for i in interactions
+            if abs(i.sentiment) <= max(
+                self.config.sentiment.positive_threshold,
+                abs(self.config.sentiment.negative_threshold)
+            )
+        ]
+
+        logger.info(
+            f"Sentiment distribution - Positive: {len(positive)}, "
+            f"Negative: {len(negative)}, Neutral: {len(neutral)}"
+        )
+
+        # Positive examples with synthetic rejections (DPO pairs)
+        for interaction in positive:
+            rejection = rejections.get(interaction.user_message)
+            if rejection:
+                dataset.append({
+                    "prompt": interaction.user_message,
+                    "chosen": interaction.assistant_response,
+                    "rejected": rejection,
+                    "weight": interaction.weight,
+                    "sentiment": interaction.sentiment,
+                    "type": "positive_dpo"
+                })
+            else:
+                # Fallback: if no rejection available, treat as SFT sample
+                logger.warning(f"No rejection found for positive interaction, using SFT fallback")
+                dataset.append({
+                    "prompt": interaction.user_message,
+                    "chosen": interaction.assistant_response,
+                    "rejected": None,
+                    "weight": interaction.weight,
+                    "sentiment": interaction.sentiment,
+                    "type": "positive_sft"
+                })
+
+        # Neutral examples with synthetic rejections
+        for interaction in neutral:
+            rejection = rejections.get(interaction.user_message)
+            if rejection:
+                dataset.append({
+                    "prompt": interaction.user_message,
+                    "chosen": interaction.assistant_response,
+                    "rejected": rejection,
+                    "weight": interaction.weight * 0.5,  # Lower weight
+                    "sentiment": interaction.sentiment,
+                    "type": "neutral_dpo"
+                })
+
+        # Golden examples with synthetic rejections (CRITICAL - prevents catastrophic forgetting)
+        for example in golden_examples:
+            rejection = rejections.get(example.user_message)
+            if rejection:
+                dataset.append({
+                    "prompt": example.user_message,
+                    "chosen": example.assistant_response,
+                    "rejected": rejection,
+                    "weight": example.weight * 2.0,  # Higher weight for golden examples
+                    "sentiment": example.sentiment,
+                    "type": "golden_dpo"
+                })
+            else:
+                logger.warning(f"No rejection found for golden example, using SFT fallback")
+                dataset.append({
+                    "prompt": example.user_message,
+                    "chosen": example.assistant_response,
+                    "rejected": None,
+                    "weight": example.weight * 2.0,
+                    "sentiment": example.sentiment,
+                    "type": "golden_sft"
+                })
+
+        # Negative examples: use actual bad responses as rejections
+        # Pair with similar positive response or skip if no good alternative
+        for interaction in negative:
+            # For now, skip negative-only examples in DPO
+            # Future: could pair with similar positive responses
+            logger.debug(f"Skipping negative-only interaction (no chosen alternative)")
+
+        logger.info(f"Built DPO dataset with {len(dataset)} total samples")
+
+        # Log dataset composition
+        type_counts = {}
+        for sample in dataset:
+            sample_type = sample['type']
+            type_counts[sample_type] = type_counts.get(sample_type, 0) + 1
+
+        dpo_pairs = sum(1 for s in dataset if s.get('rejected') is not None)
+        logger.info(
+            f"DPO dataset composition: {type_counts} "
+            f"(DPO pairs: {dpo_pairs}, SFT fallbacks: {len(dataset) - dpo_pairs})"
+        )
+
+        return dataset
+
     def format_for_training(
         self,
         dataset: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
-        Format dataset for training framework.
-        
-        For supervised fine-tuning, we'll use the chosen responses.
-        For DPO, we need chosen/rejected pairs.
+        Format dataset for SFT training framework.
+
+        Filters to only chosen responses, discarding rejected responses.
         """
         formatted = []
-        
+
         for sample in dataset:
-            # For now, use supervised fine-tuning format
-            # (Can be extended to full DPO with rejection sampling)
+            # For supervised fine-tuning, use only chosen responses
             if sample['chosen'] is not None:
                 formatted.append({
                     "prompt": sample['prompt'],
                     "completion": sample['chosen'],
                     "weight": sample['weight']
                 })
-        
+
+        return formatted
+
+    def format_for_dpo_training(
+        self,
+        dataset: List[Dict[str, Any]]
+    ) -> List[Dict[str, str]]:
+        """
+        Format dataset for DPO training framework.
+
+        Returns only samples with both chosen and rejected responses.
+        Samples without rejected responses are skipped (DPO requires pairs).
+        """
+        formatted = []
+
+        for sample in dataset:
+            # DPO requires both chosen and rejected responses
+            if sample.get('chosen') and sample.get('rejected'):
+                formatted.append({
+                    "prompt": sample['prompt'],
+                    "chosen": sample['chosen'],
+                    "rejected": sample['rejected']
+                })
+
+        logger.info(
+            f"Formatted {len(formatted)} DPO pairs "
+            f"({len(dataset) - len(formatted)} samples skipped - missing pairs)"
+        )
+
         return formatted

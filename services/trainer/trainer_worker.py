@@ -80,25 +80,103 @@ class TrainerWorker:
         """Check if training should be triggered and execute if needed."""
         try:
             logger.info("Checking training conditions...")
-            
-            # Get training statistics
+
+            # Check for pending training request
+            request = self.memory_manager.get_training_request()
+
+            if request:
+                reason = request["reason"]
+                requested_mode = request.get("training_mode", "auto")
+
+                # Manual requests bypass schedule
+                if reason == "manual":
+                    logger.info("Manual training requested, bypassing schedule")
+                    self._execute_training(requested_mode=requested_mode)
+                    return
+
+                # Automatic triggers check schedule
+                if self._is_within_schedule():
+                    logger.info(f"Training triggered: {reason}")
+                    self._execute_training(requested_mode=requested_mode)
+                else:
+                    logger.info(
+                        f"Training requested ({reason}) but outside schedule window. "
+                        f"Waiting for {self.config.training.schedule_time} "
+                        f"{self.config.training.schedule_timezone}"
+                    )
+                return
+
+            # No pending request, check if conditions are met
             stats = self.memory_manager.get_training_stats()
-            
+
             # Log status
             status_message = self.scheduler.get_status_message(stats)
             logger.info(f"Training status:\n{status_message}")
-            
+
             # Check if training should be triggered
-            should_train, reason = self.scheduler.should_trigger_training(stats)
-            
+            should_train, reason, mode = self.scheduler.should_trigger_training(stats)
+
             if should_train:
-                logger.info(f"Training triggered: {reason}")
-                self._execute_training()
+                # Create request for scheduled execution
+                logger.info(f"Training conditions met: {reason} (mode: {mode})")
+                self.memory_manager.request_training(reason=reason, training_mode=mode)
+                logger.info("Training request created for next schedule window")
             else:
                 logger.info("No training trigger conditions met")
-                
+
         except Exception as e:
             logger.error(f"Error in training check: {e}", exc_info=True)
+
+    def _is_within_schedule(self) -> bool:
+        """
+        Check if current time is within configured training schedule.
+
+        Returns:
+            True if schedule disabled OR current time matches schedule window
+        """
+        if not self.config.training.schedule_enabled:
+            return True  # Schedule disabled, always allow
+
+        try:
+            import pytz
+            from datetime import datetime
+
+            # Get configured timezone
+            tz = pytz.timezone(self.config.training.schedule_timezone)
+            now = datetime.now(tz)
+
+            # Parse schedule time (e.g., "01:00")
+            schedule_hour, schedule_minute = map(int, self.config.training.schedule_time.split(':'))
+
+            # Calculate window
+            window_minutes = self.config.training.schedule_window_minutes
+
+            # Check if current time is within window of scheduled time
+            scheduled_time = now.replace(hour=schedule_hour, minute=schedule_minute, second=0, microsecond=0)
+            time_diff_minutes = abs((now - scheduled_time).total_seconds() / 60)
+
+            # Handle day boundary (e.g., schedule at 01:00, current time 23:50)
+            if time_diff_minutes > 12 * 60:  # More than 12 hours diff means crossed midnight
+                time_diff_minutes = 24 * 60 - time_diff_minutes
+
+            within_window = time_diff_minutes <= window_minutes
+
+            if within_window:
+                logger.info(
+                    f"Within training schedule window "
+                    f"({time_diff_minutes:.1f} min from {self.config.training.schedule_time})"
+                )
+            else:
+                logger.debug(
+                    f"Outside training schedule window "
+                    f"({time_diff_minutes:.1f} min from {self.config.training.schedule_time})"
+                )
+
+            return within_window
+
+        except Exception as e:
+            logger.error(f"Error checking schedule (allowing training): {e}")
+            return True  # On error, allow training
     
     def _request_api_reload_previous(self):
         """Tell the API to reload its previous model (after training didn't produce a new deployment)."""
@@ -143,13 +221,20 @@ class TrainerWorker:
             logger.warning(f"Could not reach API for model unload: {e}")
         return False
 
-    def _execute_training(self):
-        """Execute the complete training pipeline."""
+    def _execute_training(self, requested_mode: str = "auto"):
+        """
+        Execute the complete training pipeline.
+
+        Args:
+            requested_mode: Training mode ("auto", "sft", or "dpo")
+                          "auto" = select based on data sentiment distribution
+        """
         logger.info("=" * 80)
         logger.info("STARTING TRAINING PIPELINE")
         logger.info("=" * 80)
 
         start_time = time.time()
+        selected_mode = "sft"  # Default fallback
 
         try:
             # Step 0: Free GPU vRAM (only needed for GPU training)
@@ -160,45 +245,138 @@ class TrainerWorker:
                 logger.info("Step 0: Requesting API model unload to free GPU vRAM...")
                 self._request_api_unload()
 
-            # Step 1: Prepare dataset
-            logger.info("Step 1: Preparing training dataset...")
+            # Step 1: Collect training data
+            logger.info("Step 1: Collecting training data...")
 
-            top_n = self.config.memory.top_n_weighted_interactions
-            interactions = self.memory_manager.get_top_interactions_by_weight(top_n)
+            # Get golden examples first to reserve space in top_n
             golden_examples = self.memory_manager.get_golden_examples()
+
+            # Adjust top_n to include golden examples in total count
+            top_n = self.config.memory.top_n_weighted_interactions
+            top_n_adjusted = max(0, top_n - len(golden_examples))
+            logger.info(
+                f"Top-N interactions: {top_n} total "
+                f"({top_n_adjusted} weighted + {len(golden_examples)} golden)"
+            )
+
+            interactions = self.memory_manager.get_top_interactions_by_weight(top_n_adjusted)
 
             if not interactions and not golden_examples:
                 logger.warning("No training data available, skipping training")
                 return
 
-            dataset = self.dataset_builder.build_training_dataset(
-                interactions,
-                golden_examples
-            )
-            
+            # Step 1.5: Select training mode
+            logger.info("Step 1.5: Selecting training mode...")
+
+            if requested_mode == "auto":
+                # Auto-select based on sentiment distribution
+                stats = self.memory_manager.get_training_stats()
+                selected_mode = self.scheduler._select_mode_from_stats(stats)
+                logger.info(f"Auto-selected mode: {selected_mode}")
+            elif requested_mode in ["sft", "dpo"]:
+                selected_mode = requested_mode
+                logger.info(f"Using requested mode: {selected_mode}")
+            else:
+                logger.warning(f"Unknown mode '{requested_mode}', defaulting to SFT")
+                selected_mode = "sft"
+
+            # Temporarily override config for this training run
+            original_enable_dpo = self.config.training.enable_dpo
+            self.config.training.enable_dpo = (selected_mode == "dpo")
+
+            # Step 2: Generate synthetic rejections for DPO (if DPO mode selected)
+            rejections = {}
+            if self.config.training.enable_dpo:
+                logger.info("Step 1.5: Generating synthetic rejections for DPO...")
+
+                from trainer.rejection_generator import RejectionGenerator
+
+                # Initialize generator (uses Ollama API)
+                generator = RejectionGenerator(ollama_url="http://api:8000")
+
+                # Collect all prompts that need rejections
+                all_prompts = []
+
+                # Positive and neutral interactions
+                positive = [i for i in interactions if i.sentiment > self.config.sentiment.positive_threshold]
+                neutral = [
+                    i for i in interactions
+                    if abs(i.sentiment) <= max(
+                        self.config.sentiment.positive_threshold,
+                        abs(self.config.sentiment.negative_threshold)
+                    )
+                ]
+
+                for interaction in positive + neutral:
+                    all_prompts.append(interaction.user_message)
+
+                # Golden examples (critical for preventing catastrophic forgetting)
+                for example in golden_examples:
+                    all_prompts.append(example.user_message)
+
+                logger.info(f"Generating rejections for {len(all_prompts)} prompts...")
+
+                # Batch generate rejections using currently loaded model
+                rejections = generator.generate_rejections(
+                    all_prompts,
+                    batch_size=self.config.training.dpo_batch_size,
+                    timeout=self.config.training.dpo_rejection_timeout
+                )
+
+                logger.info(
+                    f"Rejection generation complete: {len(rejections)}/{len(all_prompts)} "
+                    f"({len(rejections)/len(all_prompts)*100:.1f}% success rate)"
+                )
+
+            # Step 2: Build dataset
+            logger.info("Step 2: Building dataset...")
+
+            if self.config.training.enable_dpo and rejections:
+                logger.info("Using DPO dataset builder (preference pairs)")
+                dataset = self.dataset_builder.build_dpo_dataset(
+                    interactions,
+                    golden_examples,
+                    rejections
+                )
+            else:
+                logger.info("Using SFT dataset builder (supervised fine-tuning)")
+                dataset = self.dataset_builder.build_training_dataset(
+                    interactions,
+                    golden_examples
+                )
+
             if not dataset:
                 logger.warning("Empty dataset after preparation, skipping training")
                 return
-            
-            # Step 2: Split into train/validation
-            logger.info("Step 2: Creating train/validation split...")
-            
+
+            # Step 3: Split into train/validation
+            logger.info("Step 3: Creating train/validation split...")
+
             train_data, val_data = self.dataset_builder.create_validation_split(
                 dataset,
                 self.config.training.validation_split
             )
+
+            # Format for training (DPO or SFT)
+            if self.config.training.enable_dpo:
+                logger.info("Formatting dataset for DPO training...")
+                train_formatted = self.dataset_builder.format_for_dpo_training(train_data)
+                val_formatted = self.dataset_builder.format_for_dpo_training(val_data)
+            else:
+                logger.info("Formatting dataset for SFT training...")
+                train_formatted = self.dataset_builder.format_for_training(train_data)
+                val_formatted = self.dataset_builder.format_for_training(val_data)
             
-            # Format for training
-            train_formatted = self.dataset_builder.format_for_training(train_data)
-            val_formatted = self.dataset_builder.format_for_training(val_data)
-            
-            # Step 3: Train LoRA adapter
+            # Step 4: Train LoRA adapter (DPO or SFT mode)
             checkpoint_id = f"checkpoint_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             checkpoint_dir = f"{settings.checkpoints_path}/{checkpoint_id}"
 
+            # Determine training mode
+            training_mode = "DPO" if self.config.training.enable_dpo else "SFT"
+
             # Check if sequential training is enabled (memory-efficient mode)
             if self.config.training.enable_sequential_training:
-                logger.info("Step 3: Training LoRA adapter (SEQUENTIAL MODE - memory-efficient)...")
+                logger.info(f"Step 4: Training LoRA adapter ({training_mode}, SEQUENTIAL MODE)...")
                 logger.info(f"Sequential training enabled: {self.config.training.layers_per_pass} layers per pass")
                 adapter_path = self.lora_trainer.train_sequential(
                     train_formatted,
@@ -206,7 +384,7 @@ class TrainerWorker:
                     checkpoint_dir
                 )
             else:
-                logger.info("Step 3: Training LoRA adapter (STANDARD MODE - all layers)...")
+                logger.info(f"Step 4: Training LoRA adapter ({training_mode}, STANDARD MODE)...")
                 adapter_path = self.lora_trainer.train(
                     train_formatted,
                     val_formatted,
@@ -214,19 +392,19 @@ class TrainerWorker:
                 )
 
             logger.info(f"Training complete. Adapter saved to: {adapter_path}")
-            
-            # Step 4: Evaluate checkpoint
-            logger.info("Step 4: Evaluating checkpoint...")
-            
+
+            # Step 5: Evaluate checkpoint
+            logger.info("Step 5: Evaluating checkpoint...")
+
             should_deploy, metadata = self.model_evaluator.evaluate_checkpoint(
                 adapter_path,
                 val_formatted,
                 checkpoint_id
             )
-            
-            # Step 5: Deploy if validation passed
+
+            # Step 6: Deploy if validation passed
             if should_deploy:
-                logger.info("Step 5: Converting to GGUF and deploying...")
+                logger.info("Step 6: Converting to GGUF and deploying...")
                 try:
                     gguf_path = self._convert_and_deploy(
                         adapter_path, checkpoint_id, checkpoint_dir, metadata
@@ -249,18 +427,18 @@ class TrainerWorker:
                 logger.info(f"Cleaning up failed checkpoint: {checkpoint_id}")
                 self._cleanup_checkpoint_dir(checkpoint_dir)
 
-            # Step 6: Mark training complete
-            self.memory_manager.mark_training_complete()
+            # Step 7: Mark training complete
+            self.memory_manager.mark_training_complete(training_mode=selected_mode)
 
-            # Step 7: Cleanup old memories
-            logger.info("Step 6: Cleaning up old memories...")
+            # Step 8: Cleanup old memories
+            logger.info("Step 8: Cleaning up old memories...")
             self.memory_manager.cleanup_old_memories()
-            
+
             elapsed_time = time.time() - start_time
             logger.info("=" * 80)
-            logger.info(f"TRAINING PIPELINE COMPLETE (took {elapsed_time:.1f}s)")
+            logger.info(f"TRAINING PIPELINE COMPLETE (mode: {selected_mode}, took {elapsed_time:.1f}s)")
             logger.info("=" * 80)
-            
+
         except Exception as e:
             logger.error(f"Training pipeline failed: {e}", exc_info=True)
             logger.info("=" * 80)
@@ -274,6 +452,11 @@ class TrainerWorker:
 
             # Ensure the API model is reloaded even if training crashed
             self._request_api_reload_previous()
+
+        finally:
+            # Restore original config
+            if 'original_enable_dpo' in locals():
+                self.config.training.enable_dpo = original_enable_dpo
     
     def _convert_and_deploy(self, adapter_path, checkpoint_id, checkpoint_dir, metadata):
         """
