@@ -13,12 +13,12 @@ memory:
   min_weight_threshold: 0.5         # Remove entries below this weight during pre-training cleanup
   top_n_weighted_interactions: 1000   # Total interactions (including golden) to include in training
 model:
-  base_model_hf_path: /models/jinx-gpt-oss-20b-base
-  base_model_path: /models/jinx-gpt-oss-20b-Q4_K_M.gguf
+  base_model_hf_path: /models/gpt-oss-20b-base
+  base_model_path: /models/gpt-oss-20b-Q4_K_M.gguf
   response_format: openai # Options: openai (default), openclaw
   context_length: 32768
   max_tokens: 4096
-  model_id: jinx-gpt-oss-20b
+  model_id: gpt-oss:20b
   n_batch: 512
   n_gpu_layers: -1
   n_threads: 48
@@ -35,10 +35,10 @@ sentiment:
 llm_proxy:
   base_url: "http://192.168.10.20:11434"
   endpoint_type: "auto"
-  external_model_name: "jan-fischer-haw/jinx-gpt-oss-20b:Q4_K_M"
+  external_model_name: "gpt-oss:20b"
   api_key: null
   sentiment_enabled_models:
-    - "jan-fischer-haw/jinx-gpt-oss-20b:Q4_K_M"  # Model being trained
+    - "gpt-oss:20b"  # Model being trained
   connect_timeout_seconds: 10
   read_timeout_seconds: 120
   max_retries: 2

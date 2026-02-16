@@ -24,8 +24,8 @@ from pydantic_settings import BaseSettings
 
 
 class ModelConfig(BaseModel):
-    model_id: str = "gpt-oss-20b"  # Model identifier for API responses
-    base_model_path: str = "/models/jinx-gpt-oss-20b-Q4_K_M.gguf"
+    model_id: str = "gpt-oss:20b"  # Model identifier for API responses
+    base_model_path: str = "/models/gpt-oss-20b-Q4_K_M.gguf"
     base_model_hf_path: str = "/models/gpt-oss-20b-base"
     context_length: int = 8192
     temperature: float = 0.7
@@ -147,8 +147,8 @@ class SystemConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_path: str = os.getenv("MODEL_PATH", "/models/jinx-gpt-oss-20b-Q4_K_M.gguf")
-    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/jinx-gpt-oss-20b-base")
+    model_path: str = os.getenv("MODEL_PATH", "/models/gpt-oss-20b-Q4_K_M.gguf")
+    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/gpt-oss-20b-base")
     config_path: str = os.getenv("CONFIG_PATH", "/config/system_config.yaml")
     data_path: str = os.getenv("DATA_PATH", "/data")
     checkpoints_path: str = os.getenv("CHECKPOINTS_PATH", "/checkpoints")
