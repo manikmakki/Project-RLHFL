@@ -73,10 +73,10 @@ def normalize_model_name(model_name: str) -> str:
     """
     Normalize model name by stripping Ollama-style tags.
     Ollama uses 'model:tag' format where tag defaults to 'latest'.
-    This allows clients to request 'jinx-gpt-oss-20b:latest' or just 'jinx-gpt-oss-20b'.
+    This allows clients to request 'gpt-oss:20b' or 'gpt-oss:latest'.
     """
     if ':' in model_name:
-        # Strip the tag part (e.g., 'jinx-gpt-oss-20b:latest' -> 'jinx-gpt-oss-20b')
+        # Strip the tag part (e.g., 'gpt-oss:latest' -> 'gpt-oss')
         return model_name.split(':')[0]
     return model_name
 

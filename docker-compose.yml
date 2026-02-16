@@ -16,8 +16,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - CUDA_VISIBLE_DEVICES=0
-      - MODEL_PATH=/models/jinx-gpt-oss-20b-Q4_K_M.gguf
-      - BASE_MODEL_PATH=/models/jinx-gpt-oss-20b-base
+      - MODEL_PATH=/models/gpt-oss-20b-Q4_K_M.gguf
+      - BASE_MODEL_PATH=/models/gpt-oss-20b-base
       - CONFIG_PATH=/config/system_config.yaml
       - DATA_PATH=/data
       - CHECKPOINTS_PATH=/checkpoints
@@ -49,7 +49,7 @@ services:
       - ./volumes/config:/config
     environment:
       - CUDA_VISIBLE_DEVICES=0
-      - BASE_MODEL_PATH=/models/jinx-gpt-oss-20b-base
+      - BASE_MODEL_PATH=/models/gpt-oss-20b-base
       - CONFIG_PATH=/config/system_config.yaml
       - DATA_PATH=/data
       - CHECKPOINTS_PATH=/checkpoints
