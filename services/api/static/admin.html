@@ -1595,14 +1595,17 @@
             const html = `
                 <div class="card" style="margin-bottom: 20px;">
                     <h2>🤖 Model & Training Controls</h2>
+                    <p style="font-size: 13px; color: #666; margin-bottom: 15px;">
+                        Models are served by the Ollama container with GPU acceleration. Training happens in the trainer container using CPU-based LoRA fine-tuning.
+                    </p>
                     <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start;">
                         <div style="flex: 1; min-width: 280px;">
                             <div class="stat-row">
-                                <span class="stat-label">Model Status</span>
+                                <span class="stat-label">Model Status (Ollama)</span>
                                 <span class="stat-value ${statusClass}">${statusText}</span>
                             </div>
                             ${status.external_model_name ? `<div class="stat-row">
-                                <span class="stat-label">External Model</span>
+                                <span class="stat-label">Model Name</span>
                                 <span class="stat-value">${status.external_model_name}</span>
                             </div>` : ''}
                             <div class="stat-row">
@@ -1636,7 +1639,7 @@
         }
 
         async function triggerTraining() {
-            if (!confirm('Trigger a training run now?\n\nLow-weight entries will be cleaned up before training begins.\nTraining will start within ~30 seconds.')) return;
+            if (!confirm('Trigger a training run now?\n\nLow-weight entries will be cleaned up before training begins.\nAfter training completes, the checkpoint will be converted to GGUF and automatically deployed to Ollama if it passes validation.\n\nTraining will start within ~30 seconds.')) return;
 
             try {
                 const response = await fetch('/admin/api/training/trigger', { method: 'POST' });
@@ -1652,7 +1655,7 @@
         }
 
         async function reloadBaseModel() {
-            if (!confirm('Revert to the original base model?\n\nThis will unload the current fine-tuned model and load the base model.\nFine-tuned checkpoints are preserved and can be re-applied later.')) return;
+            if (!confirm('Revert to the original base model?\n\nThis will deploy the base GGUF model to Ollama, replacing the current fine-tuned model.\nFine-tuned checkpoints are preserved and can be re-deployed later.')) return;
 
             try {
                 const response = await fetch('/admin/api/model/reload-base', { method: 'POST' });
@@ -1670,7 +1673,7 @@
         }
 
         async function rollbackToCheckpoint(checkpointId) {
-            if (!confirm(`Rollback to checkpoint:\n${checkpointId}\n\nThe API will unload the current model and load this checkpoint's GGUF.\nRequests will briefly return 503 during the swap (~5-15s).`)) return;
+            if (!confirm(`Rollback to checkpoint:\n${checkpointId}\n\nThe system will deploy this checkpoint's GGUF to the Ollama container.\nRequests will briefly return 503 during the model swap (~5-15s).`)) return;
 
             try {
                 const response = await fetch(`/admin/api/model/rollback?checkpoint_id=${encodeURIComponent(checkpointId)}`, { method: 'POST' });
@@ -1712,7 +1715,10 @@
                 document.getElementById('checkpoints-content').innerHTML = `
                     <div class="card" style="margin-top: 20px;">
                         <h2>📦 Training Checkpoints</h2>
-                        <p style="text-align: center; color: #999; padding: 20px;">No checkpoints yet. Train the model to create checkpoints.</p>
+                        <p style="text-align: center; color: #999; padding: 20px;">
+                            No checkpoints yet. Click "Trigger Training Now" to create your first checkpoint.<br/>
+                            After training, checkpoints are automatically converted to GGUF and deployed to Ollama.
+                        </p>
                     </div>`;
                 return;
             }
@@ -1751,6 +1757,10 @@
             const html = `
                 <div class="card" style="margin-top: 20px;">
                     <h2>📦 Training Checkpoints</h2>
+                    <p style="font-size: 13px; color: #666; margin-bottom: 15px;">
+                        After each training run, checkpoints are automatically converted to GGUF format and deployed to the Ollama container if they pass validation.
+                        Use the Rollback button to manually deploy a previous checkpoint.
+                    </p>
                     <div style="overflow-x: auto;">
                         <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
                             <thead>

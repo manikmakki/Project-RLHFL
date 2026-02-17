@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pathlib import Path
 
-from shared.config import settings
+from shared.config import settings, load_config
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +437,21 @@ async def get_checkpoints():
                     import json
                     with open(metadata_file, 'r') as f:
                         data = json.load(f)
+
+                    # Auto-detect GGUF files if not in metadata (for manual conversions)
+                    if not data.get("gguf_model_path"):
+                        checkpoint_id = data.get("checkpoint_id")
+                        if checkpoint_id:
+                            checkpoint_dir = checkpoints_path / checkpoint_id
+                            gguf_files = list(checkpoint_dir.glob("*.gguf"))
+                            if gguf_files:
+                                # Prefer Q4_K_M quantized version, then any other GGUF
+                                q4_files = [f for f in gguf_files if "Q4_K_M" in f.name or "q4" in f.name.lower()]
+                                if q4_files:
+                                    data["gguf_model_path"] = str(q4_files[0])
+                                else:
+                                    data["gguf_model_path"] = str(gguf_files[0])
+
                     checkpoints.append(data)
                 except Exception as e:
                     logger.warning(f"Failed to load checkpoint {metadata_file}: {e}")
@@ -1148,6 +1163,161 @@ async def reload_base_model():
     except Exception as e:
         logger.error(f"Error reloading base model: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------------------------------------------ #
+#  Ollama Model Deployment
+# ------------------------------------------------------------------ #
+
+@admin_router.post("/api/ollama/deploy-checkpoint")
+async def deploy_checkpoint_to_ollama(checkpoint_id: str = Query(..., description="Checkpoint ID to deploy")):
+    """
+    Deploy a specific checkpoint to Ollama.
+
+    This will:
+    1. Find the GGUF file for the checkpoint
+    2. Deploy it to Ollama (replaces current model)
+    3. Update config pointer
+    4. Next API request will use the deployed model
+    """
+    try:
+        import sys
+        sys.path.insert(0, '/app/trainer')
+        from shared.ollama_deployer import OllamaDeployer
+
+        # Find checkpoint GGUF
+        checkpoints_path = Path(settings.checkpoints_path)
+        checkpoint_dir = checkpoints_path / checkpoint_id
+
+        if not checkpoint_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Checkpoint directory not found: {checkpoint_id}")
+
+        # Look for GGUF file
+        gguf_files = list(checkpoint_dir.glob("*.gguf"))
+        if not gguf_files:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No GGUF file found in checkpoint {checkpoint_id}. Was GGUF conversion enabled?"
+            )
+
+        gguf_path = str(gguf_files[0])
+
+        # Load config
+        config = load_config()
+
+        # Deploy to Ollama
+        logger.info(f"Admin UI: Deploying checkpoint {checkpoint_id} to Ollama")
+        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
+
+        model_name = config.training.ollama_model_name
+        success = deployer.deploy_model(
+            gguf_path=gguf_path,
+            model_name=model_name,
+            checkpoint_id=checkpoint_id
+        )
+
+        if success:
+            # Update config pointer
+            deployer.update_config_pointer(model_name)
+
+            return {
+                "success": True,
+                "message": f"Checkpoint {checkpoint_id} deployed to Ollama as {model_name}",
+                "checkpoint_id": checkpoint_id,
+                "model_name": model_name,
+                "gguf_path": gguf_path
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Ollama deployment failed. Check trainer logs for details."
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deploying checkpoint to Ollama: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Deployment error: {str(e)}")
+
+
+@admin_router.post("/api/ollama/deploy-base")
+async def deploy_base_model_to_ollama():
+    """
+    Deploy the original base model to Ollama.
+
+    This reverts to the unmodified gpt-oss:20b model.
+    """
+    try:
+        import sys
+        import subprocess
+        sys.path.insert(0, '/app/trainer')
+        from shared.ollama_deployer import OllamaDeployer
+
+        # Load config
+        config = load_config()
+
+        logger.info("Admin UI: Reverting to base model in Ollama")
+        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
+
+        model_name = config.training.ollama_model_name
+
+        # Pull the original base model from Ollama registry
+        # This assumes the base model is available as "gpt-oss:20b" in Ollama
+        try:
+            result = subprocess.run(
+                ["ollama", "pull", "gpt-oss:20b"],
+                capture_output=True,
+                text=True,
+                timeout=600
+            )
+
+            if result.returncode == 0:
+                # Update config to point to base model
+                deployer.update_config_pointer("gpt-oss:20b")
+
+                return {
+                    "success": True,
+                    "message": "Reverted to base gpt-oss:20b model",
+                    "model_name": "gpt-oss:20b"
+                }
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to pull base model: {result.stderr}"
+                )
+
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=500, detail="Timeout pulling base model from Ollama")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deploying base model: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Deployment error: {str(e)}")
+
+
+@admin_router.get("/api/ollama/models")
+async def list_ollama_models():
+    """List all models available in Ollama."""
+    try:
+        import sys
+        sys.path.insert(0, '/app/trainer')
+        from shared.ollama_deployer import OllamaDeployer
+
+        # Load config
+        config = load_config()
+
+        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
+        models = deployer.list_models()
+
+        return {
+            "models": models,
+            "current_model": config.llm_proxy.external_model_name
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing Ollama models: {e}", exc_info=True)
+        return {"models": [], "error": str(e)}
 
 
 # ------------------------------------------------------------------ #

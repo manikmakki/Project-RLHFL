@@ -4,7 +4,7 @@ This document covers the architecture, data flows, training pipeline, and intern
 
 ## System Architecture
 
-The system runs as two Docker containers sharing GPU access, a vector database, and a model directory.
+The system runs as three Docker containers sharing GPU access, a vector database, and shared volumes for models and checkpoints.
 
 ```mermaid
 graph TB
@@ -14,24 +14,31 @@ graph TB
 
     subgraph "API Container (llm-api)"
         FP[FastAPI Server :8000]
-        LE[LLM Engine<br/>llama.cpp + GGUF]
+        LE[LLM Proxy<br/>Ollama client]
         MM[Memory Manager<br/>ChromaDB + Embeddings]
         SA[Sentiment Analyzer<br/>Rule-based patterns]
         AU[Admin UI<br/>/admin dashboard]
+    end
+
+    subgraph "Ollama Container (llm-ollama)"
+        OL[Ollama Server :11434<br/>GPU-accelerated inference]
+        GGUF[GGUF Model<br/>gpt-oss:20b]
     end
 
     subgraph "Trainer Container (llm-trainer)"
         TW[Trainer Worker<br/>Hourly scheduler]
         TS[Training Scheduler<br/>Trigger evaluation]
         DB[Dataset Builder<br/>Weighted sampling]
-        LT[LoRA Trainer<br/>QLoRA + PEFT]
-        ME[Model Evaluator<br/>Validation + rollback]
+        LT[LoRA Trainer<br/>CPU QLoRA + PEFT]
+        ME[Model Evaluator<br/>Validation + deployment]
+        GC[GGUF Converter<br/>HF → F16 → Q4_K_M]
+        OD[Ollama Deployer<br/>Hot-reload to Ollama]
     end
 
     subgraph "Shared Volumes"
-        MOD[(models/)]
+        MOD[(models/<br/>Base HF model)]
         DAT[(data/chromadb)]
-        CKP[(checkpoints/)]
+        CKP[(checkpoints/<br/>Adapters + GGUF)]
         CFG[(config/)]
     end
 
@@ -41,27 +48,39 @@ graph TB
     FP --> SA
     FP --> AU
 
-    LE --- MOD
+    LE -->|HTTP| OL
+    OL --> GGUF
     MM --- DAT
     TW --> TS
     TS --> DB
     DB --> LT
     LT --> ME
+    ME --> GC
+    GC --> OD
+    OD -->|docker exec ollama create| OL
 
     DB --- DAT
     LT --- MOD
     ME --- CKP
+    GC --- CKP
     TW --- CFG
 ```
 
 ### Container Design
 
-| Container | Base Image | Purpose | Key Dependencies |
-|-----------|-----------|---------|-----------------|
-| `llm-api` | `nvidia/cuda:11.8.0-devel-ubuntu22.04` | Serves inference, stores interactions | llama-cpp-python, FastAPI, ChromaDB, sentence-transformers |
-| `llm-trainer` | `nvidia/cuda:11.8.0-devel-ubuntu22.04` | Runs training pipeline on schedule | PyTorch 2.0.1, PEFT, Transformers, BitsAndBytes, TRL, llama.cpp (quantize) |
+| Container | Base Image | Purpose | GPU Access | Key Dependencies |
+|-----------|-----------|---------|------------|------------------|
+| `llm-api` | `nvidia/cuda:11.8.0-devel-ubuntu22.04` | Proxies requests to Ollama, stores interactions | Yes (for embeddings) | FastAPI, ChromaDB, sentence-transformers, httpx |
+| `llm-trainer` | `nvidia/cuda:11.8.0-devel-ubuntu22.04` | Runs CPU-based training pipeline | No (CPU training) | PyTorch 2.0.1, PEFT, Transformers, BitsAndBytes, gguf |
+| `llm-ollama` | `ollama/ollama:latest` | GPU-accelerated GGUF model serving | Yes (for inference) | Ollama, llama.cpp |
 
-Both containers mount the same volumes, so the trainer can read interactions from ChromaDB, write checkpoints, and produce GGUF files that the API service hot-swaps into the running inference engine.
+All containers share volumes:
+- `/checkpoints` - Training outputs, LoRA adapters, and GGUF files
+- `/models` - Base HuggingFace model weights
+- `/data` - ChromaDB vector database
+- `/config` - System configuration
+
+The trainer produces LoRA adapters, merges them with the base model, converts to GGUF format, and deploys to Ollama with zero downtime via hot-reload.
 
 ## Inference Flow
 
