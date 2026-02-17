@@ -44,7 +44,7 @@ from trainer.training_scheduler import TrainingScheduler
 from trainer.dataset_builder import DatasetBuilder
 from trainer.lora_trainer import LoRATrainer
 from trainer.model_evaluator import ModelEvaluator
-from trainer.gguf_converter import GGUFConverter, GGUFConversionError
+from shared.gguf_converter import GGUFConverter, GGUFConversionError
 
 # Configure logging
 logging.basicConfig(
@@ -404,20 +404,32 @@ class TrainerWorker:
 
             # Step 6: Deploy if validation passed
             if should_deploy:
-                logger.info("Step 6: Converting to GGUF and deploying...")
-                try:
-                    gguf_path = self._convert_and_deploy(
-                        adapter_path, checkpoint_id, checkpoint_dir, metadata
-                    )
-                    logger.info(f"Checkpoint {checkpoint_id} deployed as GGUF: {gguf_path}")
+                if self.config.training.enable_gguf_conversion:
+                    logger.info("Step 6: Converting to GGUF and deploying...")
+                    try:
+                        gguf_path = self._convert_and_deploy(
+                            adapter_path, checkpoint_id, checkpoint_dir, metadata
+                        )
+                        logger.info(f"Checkpoint {checkpoint_id} deployed as GGUF: {gguf_path}")
+                        logger.info(f"Metrics: {metadata.metrics}")
+
+                        # Step 6.5: Deploy to Ollama if enabled
+                        if self.config.training.enable_ollama_deployment:
+                            logger.info("Step 6.5: Deploying to Ollama...")
+                            self._deploy_to_ollama(gguf_path, checkpoint_id)
+
+                    except Exception as e:
+                        logger.error(
+                            f"GGUF conversion/deploy failed for {checkpoint_id}: {e}",
+                            exc_info=True,
+                        )
+                        logger.info("Keeping current model; adapter saved for retry")
+                        self._request_api_reload_previous()
+                else:
+                    logger.info("Step 6: GGUF conversion disabled (using external inference)")
+                    logger.info(f"Adapter saved at: {adapter_path}")
+                    logger.info(f"To use this adapter, load it with PEFT or create an Ollama Modelfile")
                     logger.info(f"Metrics: {metadata.metrics}")
-                except Exception as e:
-                    logger.error(
-                        f"GGUF conversion/deploy failed for {checkpoint_id}: {e}",
-                        exc_info=True,
-                    )
-                    logger.info("Keeping current model; adapter saved for retry")
-                    self._request_api_reload_previous()
             else:
                 logger.warning("Checkpoint failed validation, not deployed")
                 logger.info(f"Metrics: {metadata.metrics}")
@@ -638,6 +650,50 @@ class TrainerWorker:
             scheduler.start()
         except (KeyboardInterrupt, SystemExit):
             logger.info("Training worker stopped")
+
+    def _deploy_to_ollama(self, gguf_path: str, checkpoint_id: str) -> bool:
+        """
+        Deploy GGUF model to Ollama.
+
+        Steps:
+        1. Create Modelfile pointing to GGUF
+        2. Force unload old model from Ollama
+        3. Create/replace model in Ollama
+        4. Update config pointer
+        5. Rotate checkpoints (keep only 2)
+        """
+        try:
+            from shared.ollama_deployer import OllamaDeployer
+
+            deployer = OllamaDeployer(
+                ollama_base_url=self.config.llm_proxy.base_url
+            )
+
+            model_name = self.config.training.ollama_model_name
+
+            # Deploy (handles Modelfile creation, unload, create)
+            success = deployer.deploy_model(
+                gguf_path=gguf_path,
+                model_name=model_name,
+                checkpoint_id=checkpoint_id
+            )
+
+            if success:
+                # Update config pointer
+                deployer.update_config_pointer(model_name)
+
+                # Rotate checkpoints (keep base + current + previous)
+                deployer.rotate_checkpoints(keep_count=2)
+
+                logger.info(f"✓ Ollama deployment complete: {model_name}")
+                return True
+            else:
+                logger.error("Ollama deployment failed")
+                return False
+
+        except Exception as e:
+            logger.error(f"Ollama deployment error: {e}", exc_info=True)
+            return False
 
 
 def main():

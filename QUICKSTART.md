@@ -192,7 +192,10 @@ This builds two Docker images -- one for the API and one for the trainer. First 
 docker-compose up -d
 ```
 
-This starts both containers in the background. The API service starts first, and the trainer waits for the API to be healthy before starting.
+This starts all three containers in the background:
+- **llm-api** - FastAPI server (port 8000)
+- **llm-trainer** - Background training worker
+- **llm-ollama** - GPU-accelerated model serving (port 11434)
 
 Watch the startup logs:
 
@@ -205,9 +208,10 @@ You're looking for these lines in the logs:
 ```
 llm-api     | INFO: LLM API service ready!
 llm-trainer | INFO: Training scheduler started (checking every 3600s)
+llm-ollama  | Listening on [::]:11434 (version 0.15.4)
 ```
 
-**Startup takes about 30-60 seconds** as the model loads into GPU memory.
+**Startup takes about 30-60 seconds** as Ollama pulls and loads the base model into GPU memory.
 
 Press `Ctrl+C` to stop watching logs (the services keep running).
 
@@ -531,6 +535,130 @@ schedule_timezone: "America/New_York"  # Your timezone
 **Higher thresholds** = less frequent training (slower learning, less resource usage)
 
 ---
+
+## Manual GGUF Conversion
+
+If you need to manually convert a trained model to GGUF format (for testing, debugging, or custom deployment), you can use the conversion script directly.
+
+### Prerequisites
+
+Make sure the `gguf` library is installed in your trainer container:
+
+```bash
+docker exec -it llm-trainer pip install gguf==0.10.0
+```
+
+### Finding Your Trained Model
+
+First, list your training checkpoints:
+
+```bash
+ls -lh volumes/checkpoints/
+```
+
+You'll see directories like `checkpoint_20260217_050631`. Each contains:
+- `adapter_sequential_final/` - The merged model (HuggingFace format)
+- `*.gguf` - The GGUF file (if conversion already ran)
+
+### Converting a Merged Model to GGUF
+
+Run the conversion script with the merged model:
+
+```bash
+# Example: Convert checkpoint from 2026-02-17 05:06
+docker exec -it llm-trainer python3 /app/scripts/convert_hf_to_gguf.py \
+  /checkpoints/checkpoint_20260217_050631/adapter_sequential_final \
+  --outfile /checkpoints/checkpoint_20260217_050631/manual_convert.gguf \
+  --outtype f16
+```
+
+**Parameters:**
+- **First argument**: Path to the merged HuggingFace model directory
+- `--outfile`: Where to save the GGUF file
+- `--outtype`: Output data type:
+  - `f16` - 16-bit float (recommended, ~14GB for 20B model)
+  - `f32` - 32-bit float (larger, more precise)
+  - `q8_0` - 8-bit quantized (smaller, faster)
+
+### Quantizing to Q4_K_M (Production Format)
+
+After creating the F16 GGUF, quantize it to Q4_K_M for production use:
+
+```bash
+# Quantize F16 → Q4_K_M (reduces ~14GB → ~12GB)
+docker exec -it llm-trainer /app/bin/llama-quantize \
+  /checkpoints/checkpoint_20260217_050631/manual_convert.gguf \
+  /checkpoints/checkpoint_20260217_050631/manual_convert_Q4_K_M.gguf \
+  Q4_K_M
+```
+
+### Deploying to Ollama
+
+Once you have the GGUF file, deploy it to the containerized Ollama service:
+
+**Via Admin UI (Recommended):**
+1. Go to [http://localhost:8000/admin](http://localhost:8000/admin)
+2. Find your checkpoint in the "Training Checkpoints" table
+3. Click the "Deploy" button next to your checkpoint
+4. The fine-tuned model will hot-reload into Ollama
+
+**Via API:**
+```bash
+curl -X POST "http://localhost:8000/admin/api/ollama/deploy-checkpoint?checkpoint_id=checkpoint_20260217_050631"
+```
+
+**Via CLI (Advanced):**
+```bash
+# Create a Modelfile and deploy directly to the Ollama container
+docker exec llm-ollama sh -c 'cat > /tmp/Modelfile <<EOF
+FROM /checkpoints/checkpoint_20260217_050631/manual_convert_Q4_K_M.gguf
+EOF
+ollama create gpt-oss:20b -f /tmp/Modelfile'
+```
+
+The model will be immediately available at `http://localhost:11434` and through your API at `http://localhost:8000/v1/chat/completions`.
+
+### Verifying the Conversion
+
+Check the file size and verify it's reasonable:
+
+```bash
+# F16 should be ~14GB for a 20B model
+ls -lh volumes/checkpoints/checkpoint_*/manual_convert.gguf
+
+# Q4_K_M should be ~12GB
+ls -lh volumes/checkpoints/checkpoint_*/manual_convert_Q4_K_M.gguf
+```
+
+### Troubleshooting
+
+**"Model GptOssForCausalLM is not supported"**
+- The conversion script needs the `gguf` library. Install it:
+  ```bash
+  docker exec -it llm-trainer pip install gguf==0.10.0
+  ```
+
+**"No such file or directory"**
+- Make sure you're using the full path inside the container (`/checkpoints/...`)
+- List files first: `docker exec -it llm-trainer ls -la /checkpoints/`
+
+**Conversion fails with memory error**
+- The conversion needs ~50GB RAM
+- Your system has 256GB, so this shouldn't happen
+- If it does, check available RAM: `free -h`
+
+### Automatic vs Manual Conversion
+
+**Automatic (recommended):**
+- Happens after every successful training
+- Includes quantization
+- Deploys to Ollama automatically
+- Configured in `system_config.yaml`
+
+**Manual (for testing/debugging):**
+- Full control over output format
+- Useful for experimenting with different quantization levels
+- Good for troubleshooting deployment issues
 
 ## What's Next
 

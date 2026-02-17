@@ -14,7 +14,7 @@ No cloud services. No manual labeling. No thumbs-up buttons. Just natural conver
 - **OpenAI-compatible API** -- Point any OpenAI client at `localhost:8000` and it just works.
 - **Automatic learning** -- Infers feedback from conversation patterns (praise, corrections, instructions) without any manual labeling.
 - **Safe training** -- Every training run is validated against the previous checkpoint. If performance degrades, the system rolls back automatically.
-- **Hot model reload** -- After training, the fine-tuned model is converted to GGUF and hot-swapped into the running API with automatic rollback on failure. No restart required.
+- **Hot model reload** -- After training, the fine-tuned model is automatically converted to GGUF and deployed to the containerized Ollama service with zero downtime. Automatic rollback on failure.
 - **RAG-powered context** -- Retrieves relevant past interactions to inform responses using ChromaDB and semantic search.
 - **Checkpoint management** -- Full version history of model adapters with rollback support.
 - **Admin dashboard** -- Web UI at `/admin` for monitoring, triggering training, rolling back checkpoints, and managing the database.
@@ -72,7 +72,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="mistral-7b-instruct",
+    model="gpt-oss:20b",
     messages=[{"role": "user", "content": "Explain quicksort in plain English."}]
 )
 
@@ -85,7 +85,7 @@ print(response.choices[0].message.content)
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mistral-7b-instruct",
+    "model": "gpt-oss:20b",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
@@ -151,9 +151,9 @@ Restart after changes: `docker-compose restart`
 ```
 project-rlhfl/
 ├── services/
-│   ├── api/                  # Inference API (FastAPI + llama.cpp)
+│   ├── api/                  # Inference API (FastAPI + Ollama proxy)
 │   │   ├── main.py           # API endpoints and request handling
-│   │   ├── llm_engine.py     # Model loading and text generation
+│   │   ├── llm_engine.py     # Ollama client and streaming
 │   │   ├── memory_manager.py # ChromaDB interaction storage and RAG
 │   │   ├── sentiment_analyzer.py  # Conversation sentiment inference
 │   │   └── admin_ui.py       # Admin dashboard endpoints
@@ -162,27 +162,36 @@ project-rlhfl/
 │   │   ├── training_scheduler.py  # Trigger evaluation logic
 │   │   ├── dataset_builder.py     # Builds weighted training datasets
 │   │   ├── lora_trainer.py   # QLoRA fine-tuning with PEFT
-│   │   ├── model_evaluator.py    # Validation and deployment decisions
-│   │   └── gguf_converter.py # LoRA → GGUF conversion pipeline
-│   └── shared/               # Shared config and data models
+│   │   └── model_evaluator.py    # Validation and deployment decisions
+│   └── shared/               # Shared modules
+│       ├── config.py         # System configuration
+│       ├── gguf_converter.py # LoRA → GGUF conversion pipeline
+│       └── ollama_deployer.py # GGUF → Ollama deployment
 ├── volumes/
-│   ├── models/               # Model weights (GGUF + HuggingFace)
+│   ├── models/               # Base model weights (HuggingFace format)
 │   ├── data/                 # ChromaDB vector database
-│   ├── checkpoints/          # Training checkpoints and adapters
+│   ├── checkpoints/          # Training checkpoints, adapters, and GGUF files
 │   └── config/               # system_config.yaml
-├── scripts/                  # Utilities (health check, model download, example client)
-├── docker-compose.yml        # Service orchestration
+├── scripts/                  # Utilities (health check, model download, GGUF conversion)
+├── docker-compose.yml        # Service orchestration (API + Trainer + Ollama)
 ├── Dockerfile.api            # API container
 └── Dockerfile.trainer        # Training container
 ```
+
+### Docker Services
+
+- **llm-api** (port 8000) - FastAPI server that proxies requests to Ollama
+- **llm-trainer** - Background training worker with CPU-based LoRA fine-tuning
+- **llm-ollama** (port 11434) - GPU-accelerated model serving via Ollama
 
 ## Monitoring
 
 ### Logs
 
 ```bash
-docker-compose logs -f api       # Inference service
+docker-compose logs -f api       # FastAPI proxy service
 docker-compose logs -f trainer   # Training service
+docker-compose logs -f ollama    # Ollama model serving
 docker stats                     # Resource usage
 ```
 
@@ -229,5 +238,5 @@ I feel the need to add this statement:
 
 ## Acknowledgments
 
-Built on [llama.cpp](https://github.com/ggerganov/llama.cpp), [PyTorch](https://pytorch.org/), [PEFT](https://github.com/huggingface/peft), [ChromaDB](https://www.trychroma.com/), and [Mistral AI](https://mistral.ai/)'s Mistral 7B Instruct model. GGUF quantizations by [TheBloke](https://huggingface.co/TheBloke).
+Built on [Ollama](https://ollama.com/), [llama.cpp](https://github.com/ggerganov/llama.cpp), [PyTorch](https://pytorch.org/), [PEFT](https://github.com/huggingface/peft), [ChromaDB](https://www.trychroma.com/), and OpenAI's [GPT-OSS 20B](https://huggingface.co/openai/gpt-oss-20b) model.
 

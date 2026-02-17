@@ -84,6 +84,11 @@ class TrainingConfig(BaseModel):
     schedule_timezone: str = "America/New_York"  # Timezone for schedule_time
     schedule_window_minutes: int = 60           # Execute if within N minutes of scheduled time
 
+    # GGUF conversion and deployment
+    enable_gguf_conversion: bool = True   # Convert to GGUF format
+    enable_ollama_deployment: bool = False  # Deploy to Ollama after training
+    ollama_model_name: str = "gpt-oss:20b"  # Ollama model name to update
+
 
 class MemoryConfig(BaseModel):
     golden_examples_count: int = 20
