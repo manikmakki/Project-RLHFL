@@ -273,7 +273,7 @@ class LoRATrainer:
         val_ds = Dataset.from_list(val_dataset)
         logger.info(f"DPO datasets: {len(train_ds)} train, {len(val_ds)} val")
 
-        training_args = TrainingArguments(
+        dpo_config = DPOConfig(
             output_dir=str(checkpoint_path),
             num_train_epochs=self.config.training.num_epochs,
             per_device_train_batch_size=self.config.training.batch_size,
@@ -293,17 +293,17 @@ class LoRATrainer:
             report_to="none",
             remove_unused_columns=False,
             use_cpu=True,
+            beta=self.config.training.dpo_beta,
+            max_length=self.config.training.max_seq_length,
+            max_prompt_length=self.config.training.max_seq_length // 2,
         )
 
         trainer = DPOTrainer(
             model=model,
-            args=training_args,
+            args=dpo_config,
             train_dataset=train_ds,
             eval_dataset=val_ds,
-            tokenizer=tokenizer,
-            beta=self.config.training.dpo_beta,
-            max_length=self.config.training.max_seq_length,
-            max_prompt_length=self.config.training.max_seq_length // 2,
+            processing_class=tokenizer,
         )
         logger.info(f"DPOTrainer created with beta={self.config.training.dpo_beta}")
 
