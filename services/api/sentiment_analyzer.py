@@ -6,18 +6,11 @@ from shared.config import SystemConfig
 
 logger = logging.getLogger(__name__)
 
-# Try to import ML sentiment analyzer
-_ml_analyzer = None
-try:
-    from .ml_sentiment_analyzer import MLSentimentAnalyzer
-    _ml_analyzer = MLSentimentAnalyzer()
-    logger.info("ML sentiment analyzer loaded successfully")
-except Exception as e:
-    logger.warning(f"ML sentiment analyzer not available, using regex-only: {e}")
+# Ollama-based sentiment analyzer (initialized lazily per-instance)
 
 
 class SentimentAnalyzer:
-    """Infer sentiment from user messages using hybrid ML + regex approach."""
+    """Infer sentiment from user messages using Ollama + regex fallback."""
     
     # Strong indicators
     STRONG_POSITIVE = [
@@ -57,8 +50,19 @@ class SentimentAnalyzer:
         self.negative_threshold = config.sentiment.negative_threshold
         self.instruction_boost = config.sentiment.explicit_instruction_boost
         self.continuation_baseline = config.sentiment.continuation_baseline
-        self.ml_analyzer = _ml_analyzer
-        self.use_ml = _ml_analyzer is not None
+
+        # Initialize Ollama sentiment analyzer
+        self._ollama_analyzer = None
+        try:
+            from .ollama_sentiment import OllamaSentimentAnalyzer
+            ollama_url = config.llm_proxy.base_url
+            sentiment_model = config.llm_proxy.sentiment_model
+            self._ollama_analyzer = OllamaSentimentAnalyzer(
+                ollama_url=ollama_url, model=sentiment_model
+            )
+            logger.info(f"Ollama sentiment analyzer initialized (model: {sentiment_model})")
+        except Exception as e:
+            logger.warning(f"Ollama sentiment not available, using regex-only: {e}")
     
     def analyze(
         self,
@@ -67,44 +71,19 @@ class SentimentAnalyzer:
         conversation_continuing: bool = True
     ) -> float:
         """
-        Analyze sentiment using hybrid ML + regex approach.
-
-        Primary: ML-based sentiment analysis (RoBERTa)
-        Fallback: Regex-based pattern matching
+        Analyze sentiment. Primary: Ollama API. Fallback: regex patterns.
 
         Returns:
             float: Sentiment score from -1.0 (very negative) to +1.0 (very positive)
         """
-        # Try ML-based analysis first
-        if self.use_ml:
+        if self._ollama_analyzer:
             try:
-                ml_sentiment = self.ml_analyzer.analyze(
-                    user_message,
-                    assistant_response,
-                    conversation_continuing
+                return self._ollama_analyzer.analyze(
+                    user_message, assistant_response, conversation_continuing
                 )
-
-                # Also run regex for comparison logging during transition
-                regex_sentiment = self._analyze_regex(
-                    user_message,
-                    assistant_response,
-                    conversation_continuing
-                )
-
-                # Log comparison for validation
-                diff = abs(ml_sentiment - regex_sentiment)
-                if diff > 0.3:
-                    logger.info(
-                        f"Sentiment divergence: ML={ml_sentiment:.2f}, "
-                        f"Regex={regex_sentiment:.2f}, diff={diff:.2f}"
-                    )
-
-                return ml_sentiment
-
             except Exception as e:
-                logger.warning(f"ML sentiment failed, falling back to regex: {e}")
+                logger.warning(f"Ollama sentiment failed, falling back to regex: {e}")
 
-        # Fallback to regex-based analysis
         return self._analyze_regex(user_message, assistant_response, conversation_continuing)
 
     def _analyze_regex(

@@ -27,7 +27,6 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
 import httpx
-import torch
 
 from shared.config import load_config, settings, SystemConfig
 from shared.models import (

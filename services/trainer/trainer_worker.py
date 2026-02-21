@@ -1,40 +1,26 @@
 """
 Project RLHFL - Training Worker
 
-This module orchestrates the automatic training pipeline. It runs as a
-background service that:
-
-1. Periodically checks if training should be triggered based on:
-   - Number of new interactions
-   - Time since last interaction
-   - Time since last training
-   - User-initiated requests
-
-2. When triggered, executes the full training pipeline:
-   - Pulls interactions from memory
-   - Builds training dataset with weighting
-   - Trains LoRA adapter using QLoRA
-   - Validates checkpoint
-   - Deploys if validation passes
-
-3. Maintains checkpoints and enables rollback if needed
-
-The worker runs continuously with hourly checks, ensuring the model
-continuously improves based on user interactions without manual intervention.
+Orchestrates the automatic training pipeline:
+1. Checks training triggers (sentiment thresholds, schedule, manual)
+2. Builds datasets from stored interactions
+3. Trains LoRA adapters (CPU-only, SFT or DPO)
+4. Evaluates checkpoints and deploys via Ollama
+5. Manages checkpoint storage
 """
 
 import gc
 import logging
+import shutil
 import time
 import sys
-import torch
+import json
 import requests
 from pathlib import Path
 from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-# Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.config import load_config, settings
@@ -44,9 +30,7 @@ from trainer.training_scheduler import TrainingScheduler
 from trainer.dataset_builder import DatasetBuilder
 from trainer.lora_trainer import LoRATrainer
 from trainer.model_evaluator import ModelEvaluator
-from shared.gguf_converter import GGUFConverter, GGUFConversionError
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -56,45 +40,34 @@ logger = logging.getLogger(__name__)
 
 class TrainerWorker:
     """Main training worker that orchestrates the training pipeline."""
-    
+
     def __init__(self):
         logger.info("Initializing training worker...")
-        
-        # Load configuration
         self.config = load_config()
-        
-        # Initialize components
         self.memory_manager = MemoryManager(self.config)
         self.scheduler = TrainingScheduler(self.config)
         self.dataset_builder = DatasetBuilder(self.config)
         self.lora_trainer = LoRATrainer(self.config, settings.base_model_path)
         self.model_evaluator = ModelEvaluator(
-            self.config,
-            settings.base_model_path,
-            settings.checkpoints_path
+            self.config, settings.base_model_path, settings.checkpoints_path
         )
-        
         logger.info("Training worker initialized successfully")
-    
+
     def check_and_train(self):
         """Check if training should be triggered and execute if needed."""
         try:
             logger.info("Checking training conditions...")
-
-            # Check for pending training request
             request = self.memory_manager.get_training_request()
 
             if request:
                 reason = request["reason"]
                 requested_mode = request.get("training_mode", "auto")
 
-                # Manual requests bypass schedule
                 if reason == "manual":
                     logger.info("Manual training requested, bypassing schedule")
                     self._execute_training(requested_mode=requested_mode)
                     return
 
-                # Automatic triggers check schedule
                 if self._is_within_schedule():
                     logger.info(f"Training triggered: {reason}")
                     self._execute_training(requested_mode=requested_mode)
@@ -106,21 +79,14 @@ class TrainerWorker:
                     )
                 return
 
-            # No pending request, check if conditions are met
             stats = self.memory_manager.get_training_stats()
-
-            # Log status
             status_message = self.scheduler.get_status_message(stats)
             logger.info(f"Training status:\n{status_message}")
 
-            # Check if training should be triggered
             should_train, reason, mode = self.scheduler.should_trigger_training(stats)
-
             if should_train:
-                # Create request for scheduled execution
                 logger.info(f"Training conditions met: {reason} (mode: {mode})")
                 self.memory_manager.request_training(reason=reason, training_mode=mode)
-                logger.info("Training request created for next schedule window")
             else:
                 logger.info("No training trigger conditions met")
 
@@ -128,176 +94,76 @@ class TrainerWorker:
             logger.error(f"Error in training check: {e}", exc_info=True)
 
     def _is_within_schedule(self) -> bool:
-        """
-        Check if current time is within configured training schedule.
-
-        Returns:
-            True if schedule disabled OR current time matches schedule window
-        """
+        """Check if current time is within configured training schedule."""
         if not self.config.training.schedule_enabled:
-            return True  # Schedule disabled, always allow
+            return True
 
         try:
             import pytz
-            from datetime import datetime
 
-            # Get configured timezone
             tz = pytz.timezone(self.config.training.schedule_timezone)
             now = datetime.now(tz)
-
-            # Parse schedule time (e.g., "01:00")
             schedule_hour, schedule_minute = map(int, self.config.training.schedule_time.split(':'))
-
-            # Calculate window
             window_minutes = self.config.training.schedule_window_minutes
-
-            # Check if current time is within window of scheduled time
             scheduled_time = now.replace(hour=schedule_hour, minute=schedule_minute, second=0, microsecond=0)
             time_diff_minutes = abs((now - scheduled_time).total_seconds() / 60)
 
-            # Handle day boundary (e.g., schedule at 01:00, current time 23:50)
-            if time_diff_minutes > 12 * 60:  # More than 12 hours diff means crossed midnight
+            if time_diff_minutes > 12 * 60:
                 time_diff_minutes = 24 * 60 - time_diff_minutes
 
             within_window = time_diff_minutes <= window_minutes
-
             if within_window:
-                logger.info(
-                    f"Within training schedule window "
-                    f"({time_diff_minutes:.1f} min from {self.config.training.schedule_time})"
-                )
-            else:
-                logger.debug(
-                    f"Outside training schedule window "
-                    f"({time_diff_minutes:.1f} min from {self.config.training.schedule_time})"
-                )
-
+                logger.info(f"Within training schedule window ({time_diff_minutes:.1f} min from {self.config.training.schedule_time})")
             return within_window
 
         except Exception as e:
             logger.error(f"Error checking schedule (allowing training): {e}")
-            return True  # On error, allow training
-    
-    def _request_api_reload_previous(self):
-        """Tell the API to reload its previous model (after training didn't produce a new deployment)."""
-        try:
-            checkpoint_file = Path("/data/current_checkpoint.json")
-            if checkpoint_file.exists():
-                import json
-                data = json.loads(checkpoint_file.read_text())
-                gguf_path = data.get("gguf_model_path")
-                cp_id = data.get("checkpoint_id")
-                if gguf_path and Path(gguf_path).exists():
-                    logger.info(f"Reloading previous model: {gguf_path}")
-                    self._notify_api_reload(gguf_path, cp_id, {})
-                    return
-            # Fallback: reload base GGUF model from config
-            base_model = settings.model_path
-            if Path(base_model).exists():
-                logger.info(f"Reloading base model: {base_model}")
-                self._notify_api_reload(base_model, None, {})
-            else:
-                logger.warning(f"No model found to reload after training (tried {base_model})")
-        except Exception as e:
-            logger.warning(f"Failed to reload previous model (poller will recover): {e}")
-
-    def _request_api_unload(self):
-        """Ask the API to unload its model so the trainer gets full GPU vRAM."""
-        try:
-            response = requests.post(
-                "http://api:8000/v1/model/unload",
-                timeout=30,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("success"):
-                    logger.info("API model unloaded, full GPU vRAM available for training")
-                    return True
-                else:
-                    logger.warning(f"API unload returned failure: {data.get('message')}")
-            else:
-                logger.warning(f"API unload returned {response.status_code}")
-        except Exception as e:
-            logger.warning(f"Could not reach API for model unload: {e}")
-        return False
+            return True
 
     def _execute_training(self, requested_mode: str = "auto"):
-        """
-        Execute the complete training pipeline.
-
-        Args:
-            requested_mode: Training mode ("auto", "sft", or "dpo")
-                          "auto" = select based on data sentiment distribution
-        """
+        """Execute the complete training pipeline."""
         logger.info("=" * 80)
         logger.info("STARTING TRAINING PIPELINE")
         logger.info("=" * 80)
 
         start_time = time.time()
-        selected_mode = "sft"  # Default fallback
+        selected_mode = "sft"
 
         try:
-            # Step 0: Free GPU vRAM (only needed for GPU training)
-            if self.config.training.enable_cpu_training:
-                logger.info("Step 0: SKIPPED - CPU training mode enabled, GPU model stays loaded for inference")
-                logger.info("Training will proceed on CPU while GPU serves requests")
-            else:
-                logger.info("Step 0: Requesting API model unload to free GPU vRAM...")
-                self._request_api_unload()
-
             # Step 1: Collect training data
             logger.info("Step 1: Collecting training data...")
-
-            # Get golden examples first to reserve space in top_n
             golden_examples = self.memory_manager.get_golden_examples()
-
-            # Adjust top_n to include golden examples in total count
             top_n = self.config.memory.top_n_weighted_interactions
             top_n_adjusted = max(0, top_n - len(golden_examples))
-            logger.info(
-                f"Top-N interactions: {top_n} total "
-                f"({top_n_adjusted} weighted + {len(golden_examples)} golden)"
-            )
-
             interactions = self.memory_manager.get_top_interactions_by_weight(top_n_adjusted)
 
             if not interactions and not golden_examples:
                 logger.warning("No training data available, skipping training")
                 return
 
-            # Step 1.5: Select training mode
-            logger.info("Step 1.5: Selecting training mode...")
-
+            # Step 2: Select training mode
+            logger.info("Step 2: Selecting training mode...")
             if requested_mode == "auto":
-                # Auto-select based on sentiment distribution
                 stats = self.memory_manager.get_training_stats()
                 selected_mode = self.scheduler._select_mode_from_stats(stats)
-                logger.info(f"Auto-selected mode: {selected_mode}")
             elif requested_mode in ["sft", "dpo"]:
                 selected_mode = requested_mode
-                logger.info(f"Using requested mode: {selected_mode}")
             else:
-                logger.warning(f"Unknown mode '{requested_mode}', defaulting to SFT")
                 selected_mode = "sft"
+            logger.info(f"Selected mode: {selected_mode}")
 
-            # Temporarily override config for this training run
             original_enable_dpo = self.config.training.enable_dpo
             self.config.training.enable_dpo = (selected_mode == "dpo")
 
-            # Step 2: Generate synthetic rejections for DPO (if DPO mode selected)
+            # Step 3: Generate rejections for DPO
             rejections = {}
             if self.config.training.enable_dpo:
-                logger.info("Step 1.5: Generating synthetic rejections for DPO...")
-
+                logger.info("Step 3: Generating synthetic rejections for DPO...")
                 from trainer.rejection_generator import RejectionGenerator
 
-                # Initialize generator (uses Ollama API)
                 generator = RejectionGenerator(ollama_url="http://api:8000")
-
-                # Collect all prompts that need rejections
                 all_prompts = []
 
-                # Positive and neutral interactions
                 positive = [i for i in interactions if i.sentiment > self.config.sentiment.positive_threshold]
                 neutral = [
                     i for i in interactions
@@ -306,307 +172,237 @@ class TrainerWorker:
                         abs(self.config.sentiment.negative_threshold)
                     )
                 ]
-
                 for interaction in positive + neutral:
                     all_prompts.append(interaction.user_message)
-
-                # Golden examples (critical for preventing catastrophic forgetting)
                 for example in golden_examples:
                     all_prompts.append(example.user_message)
 
                 logger.info(f"Generating rejections for {len(all_prompts)} prompts...")
-
-                # Batch generate rejections using currently loaded model
                 rejections = generator.generate_rejections(
                     all_prompts,
                     batch_size=self.config.training.dpo_batch_size,
                     timeout=self.config.training.dpo_rejection_timeout
                 )
+                logger.info(f"Rejections: {len(rejections)}/{len(all_prompts)} success")
 
-                logger.info(
-                    f"Rejection generation complete: {len(rejections)}/{len(all_prompts)} "
-                    f"({len(rejections)/len(all_prompts)*100:.1f}% success rate)"
-                )
-
-            # Step 2: Build dataset
-            logger.info("Step 2: Building dataset...")
-
+            # Step 4: Build dataset
+            logger.info("Step 4: Building dataset...")
             if self.config.training.enable_dpo and rejections:
-                logger.info("Using DPO dataset builder (preference pairs)")
-                dataset = self.dataset_builder.build_dpo_dataset(
-                    interactions,
-                    golden_examples,
-                    rejections
-                )
+                dataset = self.dataset_builder.build_dpo_dataset(interactions, golden_examples, rejections)
             else:
-                logger.info("Using SFT dataset builder (supervised fine-tuning)")
-                dataset = self.dataset_builder.build_training_dataset(
-                    interactions,
-                    golden_examples
-                )
+                dataset = self.dataset_builder.build_training_dataset(interactions, golden_examples)
 
             if not dataset:
-                logger.warning("Empty dataset after preparation, skipping training")
+                logger.warning("Empty dataset, skipping training")
                 return
 
-            # Step 3: Split into train/validation
-            logger.info("Step 3: Creating train/validation split...")
-
+            # Step 5: Train/validation split
+            logger.info("Step 5: Creating train/validation split...")
             train_data, val_data = self.dataset_builder.create_validation_split(
-                dataset,
-                self.config.training.validation_split
+                dataset, self.config.training.validation_split
             )
 
-            # Format for training (DPO or SFT)
             if self.config.training.enable_dpo:
-                logger.info("Formatting dataset for DPO training...")
                 train_formatted = self.dataset_builder.format_for_dpo_training(train_data)
                 val_formatted = self.dataset_builder.format_for_dpo_training(val_data)
             else:
-                logger.info("Formatting dataset for SFT training...")
                 train_formatted = self.dataset_builder.format_for_training(train_data)
                 val_formatted = self.dataset_builder.format_for_training(val_data)
-            
-            # Step 4: Train LoRA adapter (DPO or SFT mode)
+
+            # Step 6: Train LoRA adapter
             checkpoint_id = f"checkpoint_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             checkpoint_dir = f"{settings.checkpoints_path}/{checkpoint_id}"
-
-            # Determine training mode
             training_mode = "DPO" if self.config.training.enable_dpo else "SFT"
+            logger.info(f"Step 6: Training LoRA adapter ({training_mode})...")
 
-            # Check if sequential training is enabled (memory-efficient mode)
-            if self.config.training.enable_sequential_training:
-                logger.info(f"Step 4: Training LoRA adapter ({training_mode}, SEQUENTIAL MODE)...")
-                logger.info(f"Sequential training enabled: {self.config.training.layers_per_pass} layers per pass")
-                adapter_path = self.lora_trainer.train_sequential(
-                    train_formatted,
-                    val_formatted,
-                    checkpoint_dir
-                )
-            else:
-                logger.info(f"Step 4: Training LoRA adapter ({training_mode}, STANDARD MODE)...")
-                adapter_path = self.lora_trainer.train(
-                    train_formatted,
-                    val_formatted,
-                    checkpoint_dir
-                )
+            adapter_path, train_metrics = self.lora_trainer.train(
+                train_formatted, val_formatted, checkpoint_dir
+            )
+            logger.info(f"Training complete. Adapter: {adapter_path}")
 
-            logger.info(f"Training complete. Adapter saved to: {adapter_path}")
-
-            # Step 5: Evaluate checkpoint
-            logger.info("Step 5: Evaluating checkpoint...")
-
+            # Step 7: Evaluate checkpoint
+            logger.info("Step 7: Evaluating checkpoint...")
             should_deploy, metadata = self.model_evaluator.evaluate_checkpoint(
-                adapter_path,
-                val_formatted,
-                checkpoint_id
+                adapter_path, val_formatted, checkpoint_id,
+                training_metrics=train_metrics
             )
 
-            # Step 6: Deploy if validation passed
-            if should_deploy:
-                if self.config.training.enable_gguf_conversion:
-                    logger.info("Step 6: Converting to GGUF and deploying...")
-                    try:
-                        gguf_path = self._convert_and_deploy(
-                            adapter_path, checkpoint_id, checkpoint_dir, metadata
-                        )
-                        logger.info(f"Checkpoint {checkpoint_id} deployed as GGUF: {gguf_path}")
-                        logger.info(f"Metrics: {metadata.metrics}")
-
-                        # Step 6.5: Deploy to Ollama if enabled
-                        if self.config.training.enable_ollama_deployment:
-                            logger.info("Step 6.5: Deploying to Ollama...")
-                            self._deploy_to_ollama(gguf_path, checkpoint_id)
-
-                    except Exception as e:
-                        logger.error(
-                            f"GGUF conversion/deploy failed for {checkpoint_id}: {e}",
-                            exc_info=True,
-                        )
-                        logger.info("Keeping current model; adapter saved for retry")
-                        self._request_api_reload_previous()
-                else:
-                    logger.info("Step 6: GGUF conversion disabled (using external inference)")
-                    logger.info(f"Adapter saved at: {adapter_path}")
-                    logger.info(f"To use this adapter, load it with PEFT or create an Ollama Modelfile")
-                    logger.info(f"Metrics: {metadata.metrics}")
+            # Step 8: Deploy if validation passed
+            if should_deploy and self.config.training.enable_ollama_deployment:
+                logger.info("Step 8: Merging and deploying to Ollama...")
+                try:
+                    self._merge_and_deploy(adapter_path, checkpoint_id, checkpoint_dir, metadata)
+                except Exception as e:
+                    logger.error(f"Deployment failed: {e}", exc_info=True)
+                    logger.info("Keeping current model; adapter saved for retry")
+                    self._notify_api_reload()
+            elif should_deploy:
+                logger.info(f"Step 8: Adapter saved at {adapter_path} (Ollama deployment disabled)")
             else:
                 logger.warning("Checkpoint failed validation, not deployed")
-                logger.info(f"Metrics: {metadata.metrics}")
-                self._request_api_reload_previous()
-
-                # Cleanup failed checkpoint directory
-                logger.info(f"Cleaning up failed checkpoint: {checkpoint_id}")
+                self._notify_api_reload()
                 self._cleanup_checkpoint_dir(checkpoint_dir)
 
-            # Step 7: Mark training complete
+            # Step 9: Cleanup
             self.memory_manager.mark_training_complete(training_mode=selected_mode)
-
-            # Step 8: Cleanup old memories
-            logger.info("Step 8: Cleaning up old memories...")
             self.memory_manager.cleanup_old_memories()
+            self._cleanup_old_checkpoints()
 
-            elapsed_time = time.time() - start_time
+            elapsed = time.time() - start_time
             logger.info("=" * 80)
-            logger.info(f"TRAINING PIPELINE COMPLETE (mode: {selected_mode}, took {elapsed_time:.1f}s)")
+            logger.info(f"TRAINING PIPELINE COMPLETE (mode: {selected_mode}, took {elapsed:.1f}s)")
             logger.info("=" * 80)
 
         except Exception as e:
             logger.error(f"Training pipeline failed: {e}", exc_info=True)
-            logger.info("=" * 80)
-            logger.info("TRAINING PIPELINE FAILED")
-            logger.info("=" * 80)
-
-            # Cleanup failed checkpoint if it was created
             if 'checkpoint_dir' in locals():
-                logger.info(f"Cleaning up failed checkpoint directory: {checkpoint_dir}")
                 self._cleanup_checkpoint_dir(checkpoint_dir)
-
-            # Ensure the API model is reloaded even if training crashed
-            self._request_api_reload_previous()
+            self._notify_api_reload()
 
         finally:
-            # Restore original config
             if 'original_enable_dpo' in locals():
                 self.config.training.enable_dpo = original_enable_dpo
-    
-    def _convert_and_deploy(self, adapter_path, checkpoint_id, checkpoint_dir, metadata):
-        """
-        Convert adapter to GGUF and notify the API to reload.
+            gc.collect()
 
-        1. Merge adapter + base model → HF model
-        2. Convert HF → FP16 GGUF
-        3. Quantize to Q4_K_M
-        4. Update checkpoint metadata with GGUF path
-        5. Free all trainer GPU memory
-        6. Notify API to reload
-        7. Clean up old GGUF files
-        """
-        converter = GGUFConverter(base_model_path=settings.base_model_path)
+    def _merge_and_deploy(self, adapter_path, checkpoint_id, checkpoint_dir, metadata):
+        """Merge adapter with base model and deploy to Ollama via native import + quantization."""
+        from shared.ollama_deployer import OllamaDeployer
 
+        # Step 1: Merge adapter into full model (safetensors)
         merged_dir = f"{checkpoint_dir}/merged_model"
-        gguf_filename = f"model-{checkpoint_id}.Q4_K_M.gguf"
-        gguf_path = f"/models/{gguf_filename}"
+        logger.info(f"Merging adapter with base model -> {merged_dir}")
+        self.lora_trainer.merge_adapter(adapter_path, merged_dir)
 
-        # Stages 1-3: merge, convert, quantize
-        converter.convert_adapter_to_gguf(
-            adapter_path=adapter_path,
-            merged_model_dir=merged_dir,
-            output_gguf_path=gguf_path,
-            quantization_type="Q4_K_M",
-            lora_trainer=self.lora_trainer,
+        # Step 2: Deploy to Ollama (handles Modelfile, quantization, create)
+        deployer = OllamaDeployer(ollama_base_url=self.config.llm_proxy.base_url)
+        model_name = self.config.training.ollama_model_name
+
+        success = deployer.deploy_model(
+            merged_model_path=merged_dir,
+            model_name=model_name,
+            checkpoint_id=checkpoint_id,
         )
 
-        # Verify output
-        gguf_file = Path(gguf_path)
-        if not gguf_file.exists() or gguf_file.stat().st_size < 100_000_000:
-            raise GGUFConversionError(
-                f"GGUF output missing or too small: {gguf_path}"
-            )
+        if not success:
+            raise RuntimeError("Ollama deployment failed")
 
-        # Update checkpoint metadata with GGUF path
-        metadata.gguf_model_path = gguf_path
+        # Update metadata and config
+        metadata.deployed = True
         self.model_evaluator._save_checkpoint_metadata(metadata)
         self.model_evaluator._set_current_checkpoint(checkpoint_id, metadata)
+        deployer.update_config_pointer(model_name)
 
-        # Free all trainer GPU memory before API attempts reload
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            logger.info("Trainer GPU memory fully cleared before API reload")
+        # Notify API to resume inference
+        self._notify_api_reload()
 
-        # Notify API to reload (best-effort; poller is the safety net)
-        self._notify_api_reload(gguf_path, checkpoint_id, metadata.metrics)
+        # Clean up merged model directory (large, ~14GB+)
+        logger.info(f"Cleaning up merged model: {merged_dir}")
+        shutil.rmtree(merged_dir, ignore_errors=True)
 
-        # Clean up old GGUF files
-        max_old = self.config.model.max_old_gguf_files
-        self._cleanup_old_gguf_files(keep_count=max_old, current_gguf=gguf_path)
+        # Rotate old checkpoints
+        deployer.rotate_checkpoints(keep_count=self.config.training.max_checkpoint_count)
 
-        return gguf_path
+        logger.info(f"Deployed {model_name} from checkpoint {checkpoint_id}")
 
-    def _notify_api_reload(self, gguf_path, checkpoint_id, metrics):
-        """Send HTTP POST to the API service to trigger model reload."""
+    def _notify_api_reload(self):
+        """Notify API to reload model from Ollama."""
         try:
             response = requests.post(
                 "http://api:8000/v1/model/reload",
-                json={
-                    "gguf_model_path": gguf_path,
-                    "checkpoint_id": checkpoint_id,
-                    "metrics": metrics,
-                },
+                json={"checkpoint_id": None},
                 timeout=60,
             )
             if response.status_code == 200:
-                data = response.json()
-                if data.get("success"):
-                    logger.info("API notified successfully, model reload confirmed")
-                else:
-                    logger.warning(f"API reload returned failure: {data.get('message')}")
+                logger.info("API notified to reload model")
             else:
-                logger.warning(
-                    f"API reload notification returned {response.status_code}: "
-                    f"{response.text[:200]}"
-                )
+                logger.warning(f"API reload returned {response.status_code}")
         except Exception as e:
-            logger.warning(
-                f"Failed to notify API of new model (poller will pick it up): {e}"
-            )
+            logger.warning(f"Failed to notify API: {e}")
 
     def _cleanup_checkpoint_dir(self, checkpoint_dir: str):
-        """
-        Remove a failed checkpoint directory, metadata, and any associated files.
-
-        Args:
-            checkpoint_dir: Path to the checkpoint directory to remove
-        """
-        import shutil
-
+        """Remove a failed checkpoint directory and its metadata."""
         checkpoint_path = Path(checkpoint_dir)
         checkpoint_id = checkpoint_path.name
 
-        # Clean up checkpoint directory
         if checkpoint_path.exists():
+            # Preserve logs before deletion
+            logs_dir = checkpoint_path / "logs"
+            if logs_dir.exists():
+                persistent_logs = Path(settings.checkpoints_path) / "logs" / checkpoint_id
+                persistent_logs.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copytree(logs_dir, persistent_logs, dirs_exist_ok=True)
+                    logger.info(f"Preserved training logs to {persistent_logs}")
+                except Exception as e:
+                    logger.warning(f"Failed to preserve logs: {e}")
+
             try:
                 shutil.rmtree(checkpoint_path)
-                logger.info(f"Cleaned up checkpoint directory: {checkpoint_dir}")
+                logger.info(f"Cleaned up checkpoint: {checkpoint_dir}")
             except Exception as e:
-                logger.warning(f"Failed to clean up checkpoint directory {checkpoint_dir}: {e}")
+                logger.warning(f"Failed to clean up {checkpoint_dir}: {e}")
 
-        # Clean up metadata file (saved in checkpoints_path root)
         metadata_file = Path(settings.checkpoints_path) / f"{checkpoint_id}_metadata.json"
         if metadata_file.exists():
             try:
                 metadata_file.unlink()
-                logger.info(f"Cleaned up checkpoint metadata: {metadata_file}")
-            except Exception as e:
-                logger.warning(f"Failed to clean up metadata {metadata_file}: {e}")
+            except Exception:
+                pass
 
-    def _cleanup_old_gguf_files(self, keep_count=2, current_gguf=""):
-        """Remove old fine-tuned GGUF files, keeping base model + N most recent."""
-        models_dir = Path("/models")
+    def _cleanup_old_checkpoints(self):
+        """Remove old checkpoint directories, preserving logs."""
+        max_count = self.config.training.max_checkpoint_count
+        checkpoints_dir = Path(settings.checkpoints_path)
 
-        # Find all fine-tuned GGUF files (pattern: model-checkpoint_*.gguf)
-        gguf_files = sorted(
-            list(models_dir.glob("model-checkpoint_*.gguf")),
-            key=lambda f: f.stat().st_mtime,
+        checkpoint_dirs = sorted(
+            [d for d in checkpoints_dir.iterdir()
+             if d.is_dir() and d.name.startswith("checkpoint_")],
+            key=lambda x: x.stat().st_mtime,
             reverse=True,
         )
 
-        # Always keep the base model and the current deployment
-        files_to_keep = {current_gguf}
-        for f in gguf_files[:keep_count]:
-            files_to_keep.add(str(f))
+        # Read current checkpoint to always preserve it
+        current_id = None
+        current_file = checkpoints_dir / "current_checkpoint.json"
+        if current_file.exists():
+            try:
+                current_id = json.loads(current_file.read_text()).get("checkpoint_id")
+            except Exception:
+                pass
 
-        for f in gguf_files:
-            if str(f) not in files_to_keep:
+        to_delete = []
+        kept = 0
+        for d in checkpoint_dirs:
+            if d.name == current_id:
+                continue  # Always keep current
+            if kept < max_count:
+                kept += 1
+                continue
+            to_delete.append(d)
+
+        for d in to_delete:
+            logger.info(f"Removing old checkpoint: {d.name}")
+            # Preserve logs
+            logs_dir = d / "logs"
+            if logs_dir.exists():
+                persistent_logs = checkpoints_dir / "logs" / d.name
+                persistent_logs.mkdir(parents=True, exist_ok=True)
                 try:
-                    f.unlink()
-                    logger.info(f"Cleaned up old GGUF: {f}")
-                except Exception as e:
-                    logger.warning(f"Failed to clean up {f}: {e}")
+                    shutil.copytree(logs_dir, persistent_logs, dirs_exist_ok=True)
+                except Exception:
+                    pass
+            shutil.rmtree(d, ignore_errors=True)
+
+            # Clean up metadata
+            meta = checkpoints_dir / f"{d.name}_metadata.json"
+            if meta.exists():
+                meta.unlink(missing_ok=True)
+
+        if to_delete:
+            logger.info(f"Cleaned up {len(to_delete)} old checkpoints")
 
     def check_user_requested_training(self):
-        """Fast-poll check: only runs training if a user explicitly requested it."""
+        """Fast-poll: run training if user explicitly requested it."""
         try:
             stats = self.memory_manager.get_training_stats()
             if stats.user_requested_training:
@@ -618,32 +414,25 @@ class TrainerWorker:
     def run(self):
         """Run the training worker with scheduled checks."""
         logger.info("Starting training worker scheduler...")
-
-        # Create scheduler
         scheduler = BlockingScheduler()
 
-        # Schedule training checks every hour
         scheduler.add_job(
             self.check_and_train,
             trigger=IntervalTrigger(hours=1),
             id='training_check',
             name='Check training conditions',
-            replace_existing=True
+            replace_existing=True,
         )
-
-        # Fast poll (every 30s) for user-requested training only
         scheduler.add_job(
             self.check_user_requested_training,
             trigger=IntervalTrigger(seconds=30),
             id='user_request_check',
             name='Check for user-requested training',
-            replace_existing=True
+            replace_existing=True,
         )
 
-        # Run an immediate check on startup
         logger.info("Running initial training check...")
         self.check_and_train()
-
         logger.info("Training worker running. Hourly checks + 30s user-request poll.")
 
         try:
@@ -651,62 +440,15 @@ class TrainerWorker:
         except (KeyboardInterrupt, SystemExit):
             logger.info("Training worker stopped")
 
-    def _deploy_to_ollama(self, gguf_path: str, checkpoint_id: str) -> bool:
-        """
-        Deploy GGUF model to Ollama.
-
-        Steps:
-        1. Create Modelfile pointing to GGUF
-        2. Force unload old model from Ollama
-        3. Create/replace model in Ollama
-        4. Update config pointer
-        5. Rotate checkpoints (keep only 2)
-        """
-        try:
-            from shared.ollama_deployer import OllamaDeployer
-
-            deployer = OllamaDeployer(
-                ollama_base_url=self.config.llm_proxy.base_url
-            )
-
-            model_name = self.config.training.ollama_model_name
-
-            # Deploy (handles Modelfile creation, unload, create)
-            success = deployer.deploy_model(
-                gguf_path=gguf_path,
-                model_name=model_name,
-                checkpoint_id=checkpoint_id
-            )
-
-            if success:
-                # Update config pointer
-                deployer.update_config_pointer(model_name)
-
-                # Rotate checkpoints (keep base + current + previous)
-                deployer.rotate_checkpoints(keep_count=2)
-
-                logger.info(f"✓ Ollama deployment complete: {model_name}")
-                return True
-            else:
-                logger.error("Ollama deployment failed")
-                return False
-
-        except Exception as e:
-            logger.error(f"Ollama deployment error: {e}", exc_info=True)
-            return False
-
 
 def main():
-    """Main entry point."""
     logger.info("=" * 80)
-    logger.info("LOCAL LLM TRAINING SERVICE")
+    logger.info("LOCAL LLM TRAINING SERVICE (CPU-only)")
     logger.info("=" * 80)
-    
-    # Wait a bit for API service to start
+
     logger.info("Waiting 30 seconds for API service to initialize...")
     time.sleep(30)
-    
-    # Create and run worker
+
     worker = TrainerWorker()
     worker.run()
 
