@@ -26,19 +26,11 @@ from pydantic_settings import BaseSettings
 class ModelConfig(BaseModel):
     model_id: str = "gpt-oss:20b"  # Model identifier for API responses
     base_model_path: str = "/models/gpt-oss-20b-Q4_K_M.gguf"
-    base_model_hf_path: str = "/models/gpt-oss-20b-base"
     context_length: int = 8192
     temperature: float = 0.7
     top_p: float = 0.9
     max_tokens: int = 2048
-    n_gpu_layers: int = -1  # Use all GPU layers
-    n_batch: int = 512
     n_threads: int = 4
-    kv_cache_type: str = "q8_0"
-    use_mmap: bool = True
-    use_mlock: bool = True
-    checkpoint_poll_interval_seconds: int = 30
-    max_old_gguf_files: int = 2
     response_format: str = "openai"  # "openai" or "openclaw"
 
 
@@ -58,14 +50,8 @@ class TrainingConfig(BaseModel):
     weight_decay: float = 0.01
     max_seq_length: int = 256  # Reduced from 512 for attention mask compatibility
 
-    # Sequential layer training parameters (for memory-constrained training)
-    enable_sequential_training: bool = False  # Toggle sequential mode
-    layers_per_pass: int = 5  # How many layers to train per pass
-    sequential_merge_checkpoints: bool = True  # Auto-merge between passes
-
-    # CPU training mode (for systems with limited VRAM but abundant RAM/cores)
-    enable_cpu_training: bool = False  # Train on CPU instead of GPU
-    cpu_threads: int = 32  # Number of CPU threads to use (leave room for inference)
+    # CPU training threads (leave room for inference on the same machine)
+    cpu_threads: int = 32
 
     # DPO (Direct Preference Optimization) settings
     enable_dpo: bool = False  # Master DPO toggle (if false, always use SFT)
@@ -84,22 +70,19 @@ class TrainingConfig(BaseModel):
     schedule_timezone: str = "America/New_York"  # Timezone for schedule_time
     schedule_window_minutes: int = 60           # Execute if within N minutes of scheduled time
 
-    # GGUF conversion and deployment
-    enable_gguf_conversion: bool = True   # Convert to GGUF format
+    # Ollama deployment
     enable_ollama_deployment: bool = False  # Deploy to Ollama after training
     ollama_model_name: str = "gpt-oss:20b"  # Ollama model name to update
 
+    # Checkpoint storage management
+    max_checkpoint_count: int = 3  # Max checkpoint dirs to keep
+    max_gguf_files: int = 2  # Max old GGUF files in Ollama
+
 
 class MemoryConfig(BaseModel):
-    golden_examples_count: int = 20
     max_memory_age_days: int = 90
     embedding_model: str = "all-MiniLM-L6-v2"
     batch_size: int = 32
-    similarity_threshold: float = 0.7
-    # RAG (Retrieval Augmented Generation) settings - DEPRECATED
-    # System now operates in transparent proxy mode, focusing on RLHF without RAG
-    rag_enabled: bool = False  # Default changed from True (deprecated)
-    rag_top_k: int = 5  # Number of similar interactions to retrieve for context (deprecated)
     # Memory management settings
     max_db_size_gb: float = 10.0  # Maximum database size before auto-cleanup
     auto_cleanup_threshold: float = 0.9  # Trigger cleanup at 90% of max size
@@ -118,7 +101,7 @@ class SentimentConfig(BaseModel):
 class LLMProxyConfig(BaseModel):
     """Configuration for HTTP proxy to external LLM services."""
     # External LLM endpoint URL
-    base_url: str = "http://ollama:11434"  # Override with LLM_BASE_URL env var
+    base_url: str = "http://llm-ollama:11434"  # Override with LLM_BASE_URL env var
 
     # Endpoint type: "auto" (detect from URL), "ollama", "openai"
     endpoint_type: str = "auto"
@@ -128,6 +111,9 @@ class LLMProxyConfig(BaseModel):
 
     # API key for authenticated endpoints (OpenAI, etc.)
     api_key: Optional[str] = None  # Override with OPENAI_API_KEY env var
+
+    # Lightweight model for sentiment analysis via Ollama
+    sentiment_model: str = "qwen2.5:0.5b"
 
     # Model whitelist for sentiment analysis + storage
     # Empty list = analyze all models (default for single-model setups)
@@ -163,7 +149,6 @@ class Settings(BaseSettings):
     llm_model_name: str = os.getenv("LLM_MODEL_NAME", "")
     openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
 
-    cuda_visible_devices: str = os.getenv("CUDA_VISIBLE_DEVICES", "0")
     log_level: str = os.getenv("LOG_LEVEL", "DEBUG")
 
 

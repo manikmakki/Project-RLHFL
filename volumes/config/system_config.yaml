@@ -1,29 +1,19 @@
 memory:
   batch_size: 32
   embedding_model: all-MiniLM-L6-v2
-  golden_examples_count: 20
   max_memory_age_days: 90
-  similarity_threshold: 0.7
-  rag_enabled: false
-  rag_top_k: 5
   max_db_size_gb: 25
   auto_cleanup_threshold: 0.9
   auto_cleanup_percentage: 0.1
   min_weight_threshold: 0.5
   top_n_weighted_interactions: 1000
 model:
-  base_model_hf_path: /models/gpt-oss-20b-base
-  base_model_path: /models/gpt-oss-20b-Q4_K_M.gguf
+  base_model_path: /models/gpt-oss-20b-base
   response_format: openai
   context_length: 32768
   max_tokens: 4096
   model_id: gpt-oss:20b
-  n_batch: 512
-  n_gpu_layers: -1
   n_threads: 48
-  kv_cache_type: q8_0
-  use_mmap: true
-  use_mlock: true
   temperature: 0.7
   top_p: 0.9
 sentiment:
@@ -32,9 +22,10 @@ sentiment:
   negative_threshold: -0.3
   positive_threshold: 0.3
 llm_proxy:
-  base_url: http://ollama:11434
+  base_url: http://llm-ollama:11434
   endpoint_type: auto
   external_model_name: gpt-oss:20b
+  sentiment_model: qwen2.5:0.5b
   api_key: null
   sentiment_enabled_models:
   - gpt-oss:20b
@@ -49,7 +40,7 @@ training:
   gradient_accumulation_steps: 4
   inactivity_threshold_hours: 8
   learning_rate: 5.0e-05
-  lora_alpha: 16
+  lora_alpha: 32
   lora_rank: 8
   max_days_between_training: 7
   max_grad_norm: 1.0
@@ -58,10 +49,6 @@ training:
   validation_split: 0.1
   warmup_steps: 100
   weight_decay: 0.01
-  enable_sequential_training: true
-  layers_per_pass: 5
-  sequential_merge_checkpoints: true
-  enable_cpu_training: true
   cpu_threads: 32
   enable_dpo: true
   dpo_beta: 0.1
@@ -71,9 +58,10 @@ training:
   dpo_trigger_threshold: 5
   dpo_mode_threshold: 5
   schedule_enabled: true
-  schedule_time: 01:00
+  schedule_time: "01:00"
   schedule_timezone: America/New_York
   schedule_window_minutes: 60
-  enable_gguf_conversion: true
   enable_ollama_deployment: true
   ollama_model_name: gpt-oss:20b
+  max_checkpoint_count: 3
+  max_gguf_files: 2

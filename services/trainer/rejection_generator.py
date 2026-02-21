@@ -26,7 +26,7 @@ class RejectionGenerator:
             ollama_url: Base URL for Ollama API (defaults to API service)
         """
         self.ollama_url = ollama_url
-        self.model_name = None  # Will be fetched from current loaded model
+        self.model_name = 'gpt-oss:20b'  # Will be fetched from current loaded model
 
     def generate_rejections(
         self,
