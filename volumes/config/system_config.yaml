@@ -1,30 +1,19 @@
 memory:
   batch_size: 32
   embedding_model: all-MiniLM-L6-v2
-  golden_examples_count: 20
   max_memory_age_days: 90
-  similarity_threshold: 0.7
-  rag_enabled: false
-  rag_top_k: 5
-  # Memory management settings
-  max_db_size_gb: 25                # Maximum database size before auto-cleanup (increased for full-context storage)
-  auto_cleanup_threshold: 0.9       # Trigger cleanup at 90% of max size
-  auto_cleanup_percentage: 0.1      # Remove bottom 10% by weight during auto-cleanup
-  min_weight_threshold: 0.5         # Remove entries below this weight during pre-training cleanup
-  top_n_weighted_interactions: 1000   # Total interactions (including golden) to include in training
+  max_db_size_gb: 25
+  auto_cleanup_threshold: 0.9
+  auto_cleanup_percentage: 0.1
+  min_weight_threshold: 0.5
+  top_n_weighted_interactions: 1000
 model:
-  base_model_hf_path: /models/gpt-oss-20b-base
-  base_model_path: /models/gpt-oss-20b-Q4_K_M.gguf
-  response_format: openai # Options: openai (default), openclaw
+  base_model_path: /models/gpt-oss-20b-base
+  response_format: openai
   context_length: 32768
   max_tokens: 4096
   model_id: gpt-oss:20b
-  n_batch: 512
-  n_gpu_layers: -1
   n_threads: 48
-  kv_cache_type: q8_0
-  use_mmap: true
-  use_mlock: true
   temperature: 0.7
   top_p: 0.9
 sentiment:
@@ -33,12 +22,13 @@ sentiment:
   negative_threshold: -0.3
   positive_threshold: 0.3
 llm_proxy:
-  base_url: "http://192.168.10.20:11434"
-  endpoint_type: "auto"
-  external_model_name: "gpt-oss:20b"
+  base_url: http://llm-ollama:11434
+  endpoint_type: auto
+  external_model_name: gpt-oss:20b
+  sentiment_model: qwen2.5:0.5b
   api_key: null
   sentiment_enabled_models:
-    - "gpt-oss:20b"  # Model being trained
+  - gpt-oss:20b
   connect_timeout_seconds: 10
   read_timeout_seconds: 120
   max_retries: 2
@@ -50,8 +40,8 @@ training:
   gradient_accumulation_steps: 4
   inactivity_threshold_hours: 8
   learning_rate: 5.0e-05
-  lora_alpha: 16  # Halved to match reduced rank (maintains 1:1 ratio)
-  lora_rank: 8  # Reduced from 16 to fit in VRAM (less FP32 conversion overhead)
+  lora_alpha: 32
+  lora_rank: 8
   max_days_between_training: 7
   max_grad_norm: 1.0
   min_interactions_threshold: 50
@@ -59,24 +49,19 @@ training:
   validation_split: 0.1
   warmup_steps: 100
   weight_decay: 0.01
-  # Sequential layer training (memory-efficient mode for large models)
-  enable_sequential_training: true  # Train layers in batches to reduce VRAM
-  layers_per_pass: 5  # Number of layers to train per pass
-  sequential_merge_checkpoints: true  # Auto-merge adapters between passes
-  # CPU training mode (slow but allows GPU for inference)
-  enable_cpu_training: true  # Train on CPU instead of GPU (50-200x slower)
-  cpu_threads: 32  # Use half of 64 cores (leave room for inference + system)
-  # DPO (Direct Preference Optimization) settings
-  enable_dpo: true  # Master DPO toggle (auto-selection can still use SFT)
-  dpo_beta: 0.1  # DPO temperature parameter (lower = stronger preference, higher = softer)
-  dpo_batch_size: 8  # Batch size for synthetic rejection generation
-  dpo_rejection_timeout: 300  # Timeout per rejection generation request (seconds)
-  # Sentiment-based training triggers (implicit learning from user feedback)
-  sft_trigger_threshold: 20  # Trigger SFT training when ≥20 new positive/golden examples
-  dpo_trigger_threshold: 5   # Trigger DPO training when ≥5 new negative sentiments
-  dpo_mode_threshold: 5      # Use DPO mode if ≥5 negatives exist in dataset
-  # Training schedule (run during off-peak hours)
-  schedule_enabled: true                # Enable scheduled training execution
-  schedule_time: "01:00"                # Run training at 1:00 AM (24-hour format)
-  schedule_timezone: "America/New_York"  # Timezone for schedule_time
-  schedule_window_minutes: 60           # Execute if within ±60 minutes of scheduled time
+  cpu_threads: 32
+  enable_dpo: true
+  dpo_beta: 0.1
+  dpo_batch_size: 8
+  dpo_rejection_timeout: 300
+  sft_trigger_threshold: 20
+  dpo_trigger_threshold: 5
+  dpo_mode_threshold: 5
+  schedule_enabled: true
+  schedule_time: "01:00"
+  schedule_timezone: America/New_York
+  schedule_window_minutes: 60
+  enable_ollama_deployment: true
+  ollama_model_name: gpt-oss:20b
+  max_checkpoint_count: 3
+  max_gguf_files: 2

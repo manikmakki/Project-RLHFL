@@ -28,6 +28,9 @@ llama-cpp-python==0.2.27
 # Scheduling
 apscheduler==3.10.4
 
+# GGUF Conversion
+gguf==0.10.0  # GGUF file format for model conversion
+
 # Utilities
 pydantic==2.5.0
 pydantic-settings==2.1.0

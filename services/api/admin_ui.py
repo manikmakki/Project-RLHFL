@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pathlib import Path
 
-from shared.config import settings
+from shared.config import settings, load_config
 
 logger = logging.getLogger(__name__)
 
@@ -22,16 +22,16 @@ admin_router = APIRouter(prefix="/admin", tags=["admin"])
 
 # These will be set by main.py
 memory_manager = None
-llm_engine = None
+llm_proxy = None
 api_request_log = None
 prompt_interceptor = None
 
 
-def set_dependencies(mm, engine, request_log=None, interceptor=None):
+def set_dependencies(mm, proxy, request_log=None, interceptor=None):
     """Set global dependencies from main.py."""
-    global memory_manager, llm_engine, api_request_log, prompt_interceptor
+    global memory_manager, llm_proxy, api_request_log, prompt_interceptor
     memory_manager = mm
-    llm_engine = engine
+    llm_proxy = proxy
     api_request_log = request_log
     prompt_interceptor = interceptor
 
@@ -56,9 +56,9 @@ async def admin_dashboard():
 @admin_router.get("/api/stats")
 async def get_admin_stats():
     """Get comprehensive system statistics."""
-    logger.info(f"admin_ui: memory_manager={memory_manager}, llm_engine={llm_engine}")
+    logger.info(f"admin_ui: memory_manager={memory_manager}, llm_proxy={llm_proxy}")
     try:
-        if not memory_manager or not llm_engine:
+        if not memory_manager or not llm_proxy:
             return {
                 "training": {"total_interactions": 0, "new_since_training": 0, "hours_since_interaction": 0, "days_since_training": 0, "last_training": None},
                 "memory": {"total_interactions": 0, "golden_examples": 0, "sentiment_distribution": {"positive": 0, "negative": 0, "neutral": 0}},
@@ -99,10 +99,10 @@ async def get_admin_stats():
                 }
             },
             "system": {
-                "model_loaded": llm_engine.is_loaded(),
-                "is_reloading": getattr(llm_engine, 'is_reloading', lambda: False)(),
-                "current_checkpoint": getattr(llm_engine, 'current_checkpoint_id', None),
-                "model_path": getattr(llm_engine, 'model_path', None),
+                "model_loaded": llm_proxy.is_loaded(),
+                "is_reloading": getattr(llm_proxy, 'is_reloading', lambda: False)(),
+                "current_checkpoint": getattr(llm_proxy, 'current_checkpoint_id', None),
+                "model_path": getattr(llm_proxy, 'model_path', None),
                 "memory_usage_mb": round(memory_info.rss / 1024 / 1024, 2),
                 "cpu_percent": psutil.cpu_percent(interval=0.1)
             }
@@ -437,6 +437,21 @@ async def get_checkpoints():
                     import json
                     with open(metadata_file, 'r') as f:
                         data = json.load(f)
+
+                    # Auto-detect GGUF files if not in metadata (for manual conversions)
+                    if not data.get("gguf_model_path"):
+                        checkpoint_id = data.get("checkpoint_id")
+                        if checkpoint_id:
+                            checkpoint_dir = checkpoints_path / checkpoint_id
+                            gguf_files = list(checkpoint_dir.glob("*.gguf"))
+                            if gguf_files:
+                                # Prefer Q4_K_M quantized version, then any other GGUF
+                                q4_files = [f for f in gguf_files if "Q4_K_M" in f.name or "q4" in f.name.lower()]
+                                if q4_files:
+                                    data["gguf_model_path"] = str(q4_files[0])
+                                else:
+                                    data["gguf_model_path"] = str(gguf_files[0])
+
                     checkpoints.append(data)
                 except Exception as e:
                     logger.warning(f"Failed to load checkpoint {metadata_file}: {e}")
@@ -762,16 +777,16 @@ async def get_model_status():
             "external_model_name": None,
         }
 
-        if llm_engine:
+        if llm_proxy:
             # Proxy mode
-            result["model_loaded"] = llm_engine.is_loaded() and not training_in_progress
+            result["model_loaded"] = llm_proxy.is_loaded() and not training_in_progress
             result["is_reloading"] = training_in_progress  # Training = reloading in proxy mode
-            result["current_checkpoint_id"] = getattr(llm_engine, "current_checkpoint_id", None)
-            result["model_path"] = getattr(llm_engine, "model_path", None)
+            result["current_checkpoint_id"] = getattr(llm_proxy, "current_checkpoint_id", None)
+            result["model_path"] = getattr(llm_proxy, "model_path", None)
 
             # Add external model name for Ollama
-            if hasattr(llm_engine, "model_name"):
-                result["external_model_name"] = llm_engine.model_name
+            if hasattr(llm_proxy, "model_name"):
+                result["external_model_name"] = llm_proxy.model_name
             elif config:
                 result["external_model_name"] = config.llm_proxy.external_model_name
 
@@ -1049,105 +1064,175 @@ async def get_training_progress():
 
 @admin_router.post("/api/model/rollback")
 async def rollback_model(checkpoint_id: str = Query(..., description="Checkpoint ID to rollback to")):
-    """Rollback to a previous checkpoint and reload the model."""
-    try:
-        if not llm_engine:
-            raise HTTPException(status_code=503, detail="LLM engine not initialized")
-
-        checkpoints_path = Path(settings.checkpoints_path)
-        metadata_file = checkpoints_path / f"{checkpoint_id}_metadata.json"
-
-        if not metadata_file.exists():
-            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {checkpoint_id}")
-
-        with open(metadata_file, "r") as f:
-            data = json.load(f)
-
-        gguf_path = data.get("gguf_model_path")
-        if not gguf_path:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Checkpoint {checkpoint_id} has no GGUF model (adapter-only checkpoint)"
-            )
-
-        if not Path(gguf_path).exists():
-            raise HTTPException(
-                status_code=404,
-                detail=f"GGUF file not found on disk: {gguf_path}"
-            )
-
-        # Update current_checkpoint.json
-        current_cp_file = checkpoints_path / "current_checkpoint.json"
-        current_data = {
-            "checkpoint_id": checkpoint_id,
-            "adapter_path": data.get("adapter_path"),
-            "gguf_model_path": gguf_path,
-            "metrics": data.get("metrics", {}),
-            "deployed_at": datetime.now().isoformat(),
-        }
-        with open(current_cp_file, "w") as f:
-            json.dump(current_data, f, indent=2)
-
-        # Trigger model reload
-        success = await asyncio.to_thread(
-            llm_engine.reload_model,
-            new_model_path=gguf_path,
-            checkpoint_id=checkpoint_id,
-        )
-
-        if success:
-            return {
-                "success": True,
-                "message": f"Rolled back to checkpoint {checkpoint_id}",
-                "checkpoint_id": checkpoint_id,
-                "gguf_model_path": gguf_path,
-            }
-        else:
-            return {
-                "success": False,
-                "message": "Rollback failed; previous model restored. Check API logs.",
-                "checkpoint_id": checkpoint_id,
-            }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error during rollback: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    """Rollback to a previous checkpoint. In proxy mode, model management is handled by Ollama via the trainer."""
+    raise HTTPException(
+        status_code=501,
+        detail="Model rollback is managed by the trainer service via Ollama. Use the trainer's deployment pipeline to roll back."
+    )
 
 
 @admin_router.post("/api/model/reload-base")
 async def reload_base_model():
-    """Reload the original base model (undo all fine-tuning)."""
+    """Reload the original base model. In proxy mode, model management is handled by Ollama."""
+    raise HTTPException(
+        status_code=501,
+        detail="Model reload is managed by the trainer service via Ollama."
+    )
+
+
+# ------------------------------------------------------------------ #
+#  Ollama Model Deployment
+# ------------------------------------------------------------------ #
+
+@admin_router.post("/api/ollama/deploy-checkpoint")
+async def deploy_checkpoint_to_ollama(checkpoint_id: str = Query(..., description="Checkpoint ID to deploy")):
+    """
+    Deploy a specific checkpoint to Ollama.
+
+    This will:
+    1. Find the GGUF file for the checkpoint
+    2. Deploy it to Ollama (replaces current model)
+    3. Update config pointer
+    4. Next API request will use the deployed model
+    """
     try:
-        if not llm_engine:
-            raise HTTPException(status_code=503, detail="LLM engine not initialized")
+        import sys
+        sys.path.insert(0, '/app/trainer')
+        from shared.ollama_deployer import OllamaDeployer
 
-        base_path = settings.model_path
-        if not Path(base_path).exists():
-            raise HTTPException(status_code=404, detail=f"Base model not found: {base_path}")
+        # Find checkpoint GGUF
+        checkpoints_path = Path(settings.checkpoints_path)
+        checkpoint_dir = checkpoints_path / checkpoint_id
 
-        success = await asyncio.to_thread(
-            llm_engine.reload_model,
-            new_model_path=base_path,
-            checkpoint_id=None,
+        if not checkpoint_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Checkpoint directory not found: {checkpoint_id}")
+
+        # Look for GGUF file
+        gguf_files = list(checkpoint_dir.glob("*.gguf"))
+        if not gguf_files:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No GGUF file found in checkpoint {checkpoint_id}. Was GGUF conversion enabled?"
+            )
+
+        gguf_path = str(gguf_files[0])
+
+        # Load config
+        config = load_config()
+
+        # Deploy to Ollama
+        logger.info(f"Admin UI: Deploying checkpoint {checkpoint_id} to Ollama")
+        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
+
+        model_name = config.training.ollama_model_name
+        success = deployer.deploy_model(
+            gguf_path=gguf_path,
+            model_name=model_name,
+            checkpoint_id=checkpoint_id
         )
 
         if success:
+            # Update config pointer
+            deployer.update_config_pointer(model_name)
+
             return {
                 "success": True,
-                "message": "Reverted to base model (no fine-tuning)",
-                "model_path": base_path,
+                "message": f"Checkpoint {checkpoint_id} deployed to Ollama as {model_name}",
+                "checkpoint_id": checkpoint_id,
+                "model_name": model_name,
+                "gguf_path": gguf_path
             }
         else:
-            return {
-                "success": False,
-                "message": "Failed to reload base model; check API logs",
-            }
+            raise HTTPException(
+                status_code=500,
+                detail="Ollama deployment failed. Check trainer logs for details."
+            )
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error reloading base model: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error deploying checkpoint to Ollama: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Deployment error: {str(e)}")
+
+
+@admin_router.post("/api/ollama/deploy-base")
+async def deploy_base_model_to_ollama():
+    """
+    Deploy the original base model to Ollama.
+
+    This reverts to the unmodified gpt-oss:20b model.
+    """
+    try:
+        import sys
+        import subprocess
+        sys.path.insert(0, '/app/trainer')
+        from shared.ollama_deployer import OllamaDeployer
+
+        # Load config
+        config = load_config()
+
+        logger.info("Admin UI: Reverting to base model in Ollama")
+        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
+
+        model_name = config.training.ollama_model_name
+
+        # Pull the original base model from Ollama registry
+        # This assumes the base model is available as "gpt-oss:20b" in Ollama
+        try:
+            result = subprocess.run(
+                ["ollama", "pull", "gpt-oss:20b"],
+                capture_output=True,
+                text=True,
+                timeout=600
+            )
+
+            if result.returncode == 0:
+                # Update config to point to base model
+                deployer.update_config_pointer("gpt-oss:20b")
+
+                return {
+                    "success": True,
+                    "message": "Reverted to base gpt-oss:20b model",
+                    "model_name": "gpt-oss:20b"
+                }
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to pull base model: {result.stderr}"
+                )
+
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=500, detail="Timeout pulling base model from Ollama")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deploying base model: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Deployment error: {str(e)}")
+
+
+@admin_router.get("/api/ollama/models")
+async def list_ollama_models():
+    """List all models available in Ollama."""
+    try:
+        import sys
+        sys.path.insert(0, '/app/trainer')
+        from shared.ollama_deployer import OllamaDeployer
+
+        # Load config
+        config = load_config()
+
+        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
+        models = deployer.list_models()
+
+        return {
+            "models": models,
+            "current_model": config.llm_proxy.external_model_name
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing Ollama models: {e}", exc_info=True)
+        return {"models": [], "error": str(e)}
 
 
 # ------------------------------------------------------------------ #

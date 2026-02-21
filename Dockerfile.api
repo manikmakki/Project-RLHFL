@@ -1,54 +1,17 @@
-FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
+FROM python:3.10-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV CUDA_DOCKER_ARCH=all
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies
+# Install minimal system dependencies
 RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3-pip \
-    git \
-    wget \
     curl \
-    build-essential \
-    cmake \
-    ninja-build \
-    docker.io \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
 RUN python3 -m pip install --upgrade pip
 
-# Install NumPy < 2.0 BEFORE other packages (fixes ChromaDB compatibility)
-# Pin to specific version to prevent upgrades during later installs
-RUN pip install --no-cache-dir "numpy>=1.24,<2.0"
-
-# Install llama.cpp with CUDA 6.1 support (Pascal architecture - Tesla P40)
-# Set CUDA paths to help CMake find CUDA toolkit
-ENV CUDA_PATH=/usr/local/cuda
-ENV CUDACXX=/usr/local/cuda/bin/nvcc
-ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
-ENV PATH=/usr/local/cuda-11.8/compat/:$PATH
-# FORCE_CMAKE=1 ensures rebuild, CMAKE_ARGS enables CUDA with compute capability 6.1
-ENV CMAKE_ARGS="-DLLAMA_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=61"
-ENV FORCE_CMAKE=1
-
-
-# !! CLAUDE CODE'S NON FUNCTIONAL ATTEMPT TO INSTALL LLAMA.CPP PYTHON BINDINGS WITH CUDA SUPPORT !!
-# Build llama-cpp-python from source (bypassing PyPI wheels entirely)
-# Clone specific version tag with submodules and build directly
-# RUN git clone --branch v0.2.27 --depth 1 --recurse-submodules https://github.com/abetlen/llama-cpp-python.git /tmp/llama-cpp-python && \
-#     cd /tmp/llama-cpp-python && \
-#     CMAKE_ARGS="-DLLAMA_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=61" FORCE_CMAKE=1 pip install --no-cache-dir --upgrade-strategy=only-if-needed . && \
-#     cd / && \
-#     rm -rf /tmp/llama-cpp-python
-
-RUN pip install llama-cpp-python \
-  --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu118
-
-# Install Python packages with compatible versions
-# Include numpy constraint to prevent upgrades by chromadb/sentence-transformers
+# Install Python packages (no GPU/ML dependencies)
 RUN pip install --no-cache-dir \
     "numpy>=1.24,<2.0" \
     fastapi==0.104.1 \
@@ -86,7 +49,6 @@ RUN echo '#!/bin/bash\ncurl -f http://localhost:8000/health || exit 1' > /health
 ENV ANONYMIZED_TELEMETRY=False
 
 # Configure asyncio thread pool size for blocking operations
-# With 64 cores, we can handle multiple concurrent inference requests
 ENV ASYNCIO_THREAD_POOL_SIZE=16
 
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info", "--limit-concurrency", "10", "--timeout-keep-alive", "75"]
