@@ -286,42 +286,62 @@ class TrainerWorker:
 
             # Step 2: Generate synthetic rejections for DPO (if DPO mode selected)
             rejections = {}
+            rejections_cache = Path(settings.checkpoints_path) / "rejections_cache.json"
             if self.config.training.enable_dpo:
-                logger.info("Step 1.5: Generating synthetic rejections for DPO...")
+                logger.info("Step 3: Generating synthetic rejections for DPO...")
 
-                from trainer.rejection_generator import RejectionGenerator
+                # Try loading cached rejections first
+                if rejections_cache.exists():
+                    try:
+                        with open(rejections_cache) as f:
+                            rejections = json.load(f)
+                        logger.info(f"Loaded {len(rejections)} cached rejections")
+                    except Exception as e:
+                        logger.warning(f"Failed to load rejection cache: {e}")
+                        rejections = {}
 
-                # Initialize generator (uses Ollama API)
-                generator = RejectionGenerator(ollama_url="http://api:8000")
+                if not rejections:
+                    from trainer.rejection_generator import RejectionGenerator
 
-                # Collect all prompts that need rejections
-                all_prompts = []
-
-                # Positive and neutral interactions
-                positive = [i for i in interactions if i.sentiment > self.config.sentiment.positive_threshold]
-                neutral = [
-                    i for i in interactions
-                    if abs(i.sentiment) <= max(
-                        self.config.sentiment.positive_threshold,
-                        abs(self.config.sentiment.negative_threshold)
+                    generator = RejectionGenerator(
+                        ollama_url="http://llm-api:8000",
+                        model_name=self.config.training.ollama_model_name,
                     )
-                ]
+                    all_prompts = []
 
-                for interaction in positive + neutral:
-                    all_prompts.append(interaction.user_message)
+                    positive = [i for i in interactions if i.sentiment > self.config.sentiment.positive_threshold]
+                    neutral = [
+                        i for i in interactions
+                        if abs(i.sentiment) <= max(
+                            self.config.sentiment.positive_threshold,
+                            abs(self.config.sentiment.negative_threshold)
+                        )
+                    ]
+                    for interaction in positive + neutral:
+                        all_prompts.append(interaction.user_message)
+                    for example in golden_examples:
+                        all_prompts.append(example.user_message)
 
-                # Golden examples (critical for preventing catastrophic forgetting)
-                for example in golden_examples:
-                    all_prompts.append(example.user_message)
+                    logger.info(f"Generating rejections for {len(all_prompts)} prompts...")
+                    rejections = generator.generate_rejections(
+                        all_prompts,
+                        batch_size=self.config.training.dpo_batch_size,
+                        timeout=self.config.training.dpo_rejection_timeout
+                    )
+                    logger.info(f"Rejections: {len(rejections)}/{len(all_prompts)} success")
 
-                logger.info(f"Generating rejections for {len(all_prompts)} prompts...")
+                    # Cache rejections for retry on failure
+                    if rejections:
+                        try:
+                            with open(rejections_cache, "w") as f:
+                                json.dump(rejections, f)
+                            logger.info(f"Cached {len(rejections)} rejections to {rejections_cache}")
+                        except Exception as e:
+                            logger.warning(f"Failed to cache rejections: {e}")
 
-                # Batch generate rejections using currently loaded model
-                rejections = generator.generate_rejections(
-                    all_prompts,
-                    batch_size=self.config.training.dpo_batch_size,
-                    timeout=self.config.training.dpo_rejection_timeout
-                )
+                if not rejections:
+                    logger.warning("All rejections failed, falling back to SFT mode")
+                    self.config.training.enable_dpo = False
 
                 logger.info(
                     f"Rejection generation complete: {len(rejections)}/{len(all_prompts)} "
@@ -429,6 +449,11 @@ class TrainerWorker:
 
             # Step 7: Mark training complete
             self.memory_manager.mark_training_complete(training_mode=selected_mode)
+            self.memory_manager.cleanup_old_memories()
+            self._cleanup_old_checkpoints()
+            if rejections_cache.exists():
+                rejections_cache.unlink()
+                logger.info("Cleared rejections cache after successful training")
 
             # Step 8: Cleanup old memories
             logger.info("Step 8: Cleaning up old memories...")

@@ -323,294 +323,171 @@ class LoRATrainer:
             is_dpo_mode = self.config.training.enable_dpo and DPO_AVAILABLE
 
             if is_dpo_mode:
-                # DPO MODE: Direct Preference Optimization
-                logger.info("Using DPO (Direct Preference Optimization) training mode")
-
-                # DPO expects raw datasets with prompt, chosen, rejected fields
-                # No need to tokenize in advance - DPOTrainer handles it
-                train_ds = Dataset.from_list(train_dataset)
-                val_ds = Dataset.from_list(val_dataset)
-
-                logger.info(f"DPO datasets prepared: {len(train_ds)} train, {len(val_ds)} val")
-
-                # DPO training arguments
-                training_args = TrainingArguments(
-                    output_dir=str(checkpoint_path),
-                    num_train_epochs=self.config.training.num_epochs,
-                    per_device_train_batch_size=self.config.training.batch_size,
-                    per_device_eval_batch_size=self.config.training.batch_size,
-                    gradient_accumulation_steps=self.config.training.gradient_accumulation_steps,
-                    learning_rate=self.config.training.learning_rate,
-                    warmup_steps=self.config.training.warmup_steps,
-                    max_grad_norm=self.config.training.max_grad_norm,
-                    weight_decay=self.config.training.weight_decay,
-                    logging_steps=10,
-                    logging_dir=f"{checkpoint_path}/logs",
-                    eval_strategy="epoch",
-                    save_strategy="epoch",
-                    save_total_limit=3,
-                    bf16=not self.config.training.enable_cpu_training,
-                    gradient_checkpointing=False,
-                    report_to="none",
-                    remove_unused_columns=False,
-                    use_cpu=self.config.training.enable_cpu_training,
+                adapter_path, metrics = self._train_dpo(
+                    model, tokenizer, train_dataset, val_dataset, checkpoint_path
                 )
-
-                # Create DPO trainer
-                trainer = DPOTrainer(
-                    model=model,
-                    args=training_args,
-                    train_dataset=train_ds,
-                    eval_dataset=val_ds,
-                    tokenizer=tokenizer,
-                    beta=self.config.training.dpo_beta,  # DPO temperature parameter
-                    max_length=self.config.training.max_seq_length,
-                    max_prompt_length=self.config.training.max_seq_length // 2,
-                )
-
-                logger.info(f"DPOTrainer created with beta={self.config.training.dpo_beta}")
-
             else:
-                # SFT MODE: Supervised Fine-Tuning (standard mode)
-                logger.info("Using SFT (Supervised Fine-Tuning) training mode")
-
-                # Prepare datasets (tokenize)
-                train_ds = self._prepare_dataset(train_dataset, tokenizer)
-                val_ds = self._prepare_dataset(val_dataset, tokenizer)
-
-                # Training arguments
-                training_args = TrainingArguments(
-                    output_dir=str(checkpoint_path),
-                    num_train_epochs=self.config.training.num_epochs,
-                    per_device_train_batch_size=self.config.training.batch_size,
-                    per_device_eval_batch_size=self.config.training.batch_size,
-                    gradient_accumulation_steps=self.config.training.gradient_accumulation_steps,
-                    learning_rate=self.config.training.learning_rate,
-                    warmup_steps=self.config.training.warmup_steps,
-                    max_grad_norm=self.config.training.max_grad_norm,
-                    weight_decay=self.config.training.weight_decay,
-                    logging_steps=10,
-                    logging_dir=f"{checkpoint_path}/logs",
-                    eval_strategy="epoch",
-                    save_strategy="epoch",
-                    save_total_limit=3,
-                    bf16=not self.config.training.enable_cpu_training,
-                    gradient_checkpointing=False,
-                    report_to="none",
-                    remove_unused_columns=False,
-                    dataloader_drop_last=False,
-                    use_cpu=self.config.training.enable_cpu_training,
+                adapter_path, metrics = self._train_sft(
+                    model, tokenizer, train_dataset, val_dataset, checkpoint_path
                 )
 
-                # Custom data collator for causal LM that pads and masks prompt tokens
-                class DataCollatorForCausalLM:
-                    def __init__(self, tokenizer, max_length=None):
-                        self.tokenizer = tokenizer
-                        self.max_length = max_length
-
-                    def __call__(self, features):
-                        # features is a list of dicts with keys: input_ids, attention_mask, prompt_len
-                        batch = self.tokenizer.pad(
-                            features,
-                            padding=True,
-                            max_length=self.max_length,
-                            return_tensors="pt",
-                        )
-
-                        input_ids = batch["input_ids"]
-                        attention_mask = batch["attention_mask"]
-
-                        # Build labels and mask prompt portion with -100
-                        labels = input_ids.clone()
-                        prompt_lens = [f.get("prompt_len", 0) for f in features]
-                        for i, p_len in enumerate(prompt_lens):
-                            if p_len > 0:
-                                labels[i, :p_len] = -100
-
-                        return {
-                            "input_ids": input_ids,
-                            "attention_mask": attention_mask,
-                            "labels": labels,
-                        }
-
-                data_collator = DataCollatorForCausalLM(tokenizer=tokenizer, max_length=self.config.training.max_seq_length)
-
-                # Create trainer
-                trainer = Trainer(
-                    model=model,
-                    args=training_args,
-                    train_dataset=train_ds,
-                    eval_dataset=val_ds,
-                    data_collator=data_collator,
-                )
-            
-            # Train
-            logger.info("Starting training...")
-            train_result = trainer.train()
-            
-            # Save adapter
-            adapter_path = f"{checkpoint_path}/adapter"
-            logger.info(f"Saving adapter to {adapter_path}")
-            model.save_pretrained(adapter_path)
-            tokenizer.save_pretrained(adapter_path)
-            
             # Save training metadata
             metadata = {
-                "train_loss": train_result.training_loss,
+                "train_loss": metrics.get("train_loss", 0.0),
+                "eval_loss": metrics.get("eval_loss", 0.0),
                 "train_samples": len(train_dataset),
                 "val_samples": len(val_dataset),
                 "epochs": self.config.training.num_epochs,
-                "timestamp": datetime.now().isoformat()
+                "mode": "dpo" if is_dpo_mode else "sft",
+                "timestamp": datetime.now().isoformat(),
             }
-            
             with open(f"{checkpoint_path}/training_metadata.json", "w") as f:
                 json.dump(metadata, f, indent=2)
-            
-            logger.info(f"Training complete. Final loss: {train_result.training_loss:.4f}")
-            
-            return adapter_path
-            
+
+            logger.info(
+                f"Training complete. Loss: {metrics.get('train_loss', 0):.4f} "
+                f"(eval: {metrics.get('eval_loss', 0):.4f})"
+            )
+            return adapter_path, metrics
+
         except Exception as e:
             logger.error(f"Training failed: {e}", exc_info=True)
             raise
+        finally:
+            gc.collect()
 
-    def train_sequential(
-        self,
-        train_dataset: List[Dict[str, Any]],
-        val_dataset: List[Dict[str, Any]],
-        checkpoint_dir: str
-    ) -> str:
-        """
-        Train LoRA adapters sequentially across layer groups to reduce VRAM usage.
+    def _train_sft(self, model, tokenizer, train_dataset, val_dataset, checkpoint_path):
+        """SFT training path using HuggingFace Trainer."""
+        logger.info("Using SFT (Supervised Fine-Tuning) mode")
 
-        This method trains the model in multiple passes, each targeting a subset of layers.
-        Between passes, adapters are merged to create an incrementally fine-tuned base model.
-        This drastically reduces peak VRAM by only allocating LoRA parameters for a subset of layers.
+        train_ds = self._prepare_dataset(train_dataset, tokenizer)
+        val_ds = self._prepare_dataset(val_dataset, tokenizer)
 
-        Args:
-            train_dataset: Training examples in Harmony format
-            val_dataset: Validation examples in Harmony format
-            checkpoint_dir: Directory to save checkpoints and intermediate merged models
+        training_args = TrainingArguments(
+            output_dir=str(checkpoint_path),
+            num_train_epochs=self.config.training.num_epochs,
+            per_device_train_batch_size=self.config.training.batch_size,
+            per_device_eval_batch_size=self.config.training.batch_size,
+            gradient_accumulation_steps=self.config.training.gradient_accumulation_steps,
+            learning_rate=self.config.training.learning_rate,
+            warmup_steps=self.config.training.warmup_steps,
+            max_grad_norm=self.config.training.max_grad_norm,
+            weight_decay=self.config.training.weight_decay,
+            logging_steps=10,
+            logging_dir=f"{checkpoint_path}/logs",
+            eval_strategy="epoch",
+            save_strategy="epoch",
+            save_total_limit=2,
+            bf16=False,
+            gradient_checkpointing=False,
+            report_to="none",
+            remove_unused_columns=False,
+            dataloader_drop_last=False,
+            use_cpu=True,
+        )
 
-        Returns:
-            Path to final merged adapter containing all trained layers
-        """
-        checkpoint_path = Path(checkpoint_dir)
-        num_layers = 24  # GPT-OSS 20B layer count
-        layers_per_pass = self.config.training.layers_per_pass
+        class DataCollatorForCausalLM:
+            def __init__(self, tok, max_length=None):
+                self.tokenizer = tok
+                self.max_length = max_length
 
-        # Calculate layer ranges for each training pass
-        layer_ranges = []
-        for start in range(0, num_layers, layers_per_pass):
-            end = min(start + layers_per_pass - 1, num_layers - 1)
-            layer_ranges.append((start, end))
-
-        logger.info("=" * 80)
-        logger.info("SEQUENTIAL LAYER TRAINING STARTING")
-        logger.info("=" * 80)
-        logger.info(f"Total layers: {num_layers}")
-        logger.info(f"Layers per pass: {layers_per_pass}")
-        logger.info(f"Number of passes: {len(layer_ranges)}")
-        logger.info(f"Layer groups: {layer_ranges}")
-        logger.info("=" * 80)
-
-        # Track adapter paths for each pass
-        adapter_paths = []
-        merged_model_path = None  # Base model for next pass
-        original_base_path = self.base_model_path  # Save original for restoration
-
-        try:
-            for pass_idx, (start_layer, end_layer) in enumerate(layer_ranges):
-                logger.info("")
-                logger.info("=" * 80)
-                logger.info(f"PASS {pass_idx + 1}/{len(layer_ranges)}: Training layers {start_layer}-{end_layer}")
-                logger.info("=" * 80)
-
-                # Create LoRA config for this layer subset
-                layers_to_train = list(range(start_layer, end_layer + 1))
-                self.lora_config = self._create_lora_config(layers_to_train)
-
-                # Create checkpoint directory for this pass
-                pass_checkpoint_dir = checkpoint_path / f"pass_{pass_idx + 1}_layers_{start_layer}_{end_layer}"
-                pass_checkpoint_dir.mkdir(exist_ok=True, parents=True)
-
-                # If we have a merged model from previous pass, use it as base
-                if merged_model_path:
-                    logger.info(f"Using merged model from previous pass: {merged_model_path}")
-                    self.base_model_path = str(merged_model_path)
-
-                # Run standard training for this layer subset
-                logger.info(f"Starting training for layers {start_layer}-{end_layer}...")
-                adapter_path = self.train(train_dataset, val_dataset, str(pass_checkpoint_dir))
-                adapter_paths.append(adapter_path)
-                logger.info(f"Pass {pass_idx + 1} complete! Adapter saved to: {adapter_path}")
-
-                # Restore original base model path for merging
-                self.base_model_path = original_base_path
-
-                # Merge this adapter with base model for next pass
-                if pass_idx < len(layer_ranges) - 1:  # Not the last pass
-                    logger.info(f"Merging adapter from pass {pass_idx + 1} with base model...")
-                    merged_model_path = checkpoint_path / f"merged_through_pass_{pass_idx + 1}"
-
-                    # Use existing merge_adapter method
-                    self.merge_adapter(
-                        adapter_path=adapter_path,
-                        output_path=str(merged_model_path)
-                    )
-                    logger.info(f"Merged model saved to: {merged_model_path}")
-                    logger.info(f"Next pass will use this merged model as base")
-
-                # Clear GPU cache between passes
-                logger.info("Clearing GPU cache...")
-                torch.cuda.empty_cache()
-
-            # Final merge: The last adapter already incorporates all previous training
-            logger.info("")
-            logger.info("=" * 80)
-            logger.info("FINAL MERGE: Preparing final adapter")
-            logger.info("=" * 80)
-
-            final_adapter_path = checkpoint_path / "adapter_sequential_final"
-
-            # If we have a merged model, merge the last adapter with it
-            if merged_model_path:
-                logger.info("Merging final adapter with accumulated base model...")
-                # The last adapter was trained on the merged model, so we need to merge it back
-                self.base_model_path = str(merged_model_path)
-                self.merge_adapter(
-                    adapter_path=adapter_paths[-1],
-                    output_path=str(final_adapter_path)
+            def __call__(self, features):
+                batch = self.tokenizer.pad(
+                    features, padding=True, max_length=self.max_length, return_tensors="pt"
                 )
-            else:
-                # Only one pass, just copy the adapter
-                logger.info("Single pass training, copying adapter as final...")
-                shutil.copytree(adapter_paths[-1], final_adapter_path, dirs_exist_ok=True)
+                labels = batch["input_ids"].clone()
+                for i, f in enumerate(features):
+                    p_len = f.get("prompt_len", 0)
+                    if p_len > 0:
+                        labels[i, :p_len] = -100
+                return {
+                    "input_ids": batch["input_ids"],
+                    "attention_mask": batch["attention_mask"],
+                    "labels": labels,
+                }
 
-            # Restore original base model path
-            self.base_model_path = original_base_path
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_ds,
+            eval_dataset=val_ds,
+            data_collator=DataCollatorForCausalLM(tokenizer, self.config.training.max_seq_length),
+        )
 
-            logger.info("=" * 80)
-            logger.info("SEQUENTIAL TRAINING COMPLETE!")
-            logger.info(f"Final adapter path: {final_adapter_path}")
-            logger.info(f"Total passes completed: {len(layer_ranges)}")
-            logger.info("=" * 80)
+        result = trainer.train()
 
-            return str(final_adapter_path)
+        # Save adapter
+        adapter_path = f"{checkpoint_path}/adapter"
+        model.save_pretrained(adapter_path)
+        tokenizer.save_pretrained(adapter_path)
 
-        except Exception as e:
-            # Restore original base model path on error
-            self.base_model_path = original_base_path
-            logger.error(f"Sequential training failed: {e}", exc_info=True)
-            raise
+        # Extract metrics
+        eval_metrics = trainer.evaluate()
+        metrics = {
+            "train_loss": result.training_loss,
+            "eval_loss": eval_metrics.get("eval_loss", 0.0),
+        }
+        return adapter_path, metrics
 
-    def _prepare_dataset(
-        self,
-        dataset: List[Dict[str, Any]],
-        tokenizer
-    ) -> Dataset:
-        """Prepare dataset for training."""
-        
+    def _train_dpo(self, model, tokenizer, train_dataset, val_dataset, checkpoint_path):
+        """DPO training path using TRL DPOTrainer."""
+        logger.info("Using DPO (Direct Preference Optimization) mode")
+
+        train_ds = Dataset.from_list(train_dataset)
+        val_ds = Dataset.from_list(val_dataset)
+        logger.info(f"DPO datasets: {len(train_ds)} train, {len(val_ds)} val")
+
+        dpo_config = DPOConfig(
+            output_dir=str(checkpoint_path),
+            num_train_epochs=self.config.training.num_epochs,
+            per_device_train_batch_size=self.config.training.batch_size,
+            per_device_eval_batch_size=self.config.training.batch_size,
+            gradient_accumulation_steps=self.config.training.gradient_accumulation_steps,
+            learning_rate=self.config.training.learning_rate,
+            warmup_steps=self.config.training.warmup_steps,
+            max_grad_norm=self.config.training.max_grad_norm,
+            weight_decay=self.config.training.weight_decay,
+            logging_steps=10,
+            logging_dir=f"{checkpoint_path}/logs",
+            eval_strategy="epoch",
+            save_strategy="epoch",
+            save_total_limit=2,
+            bf16=False,
+            gradient_checkpointing=False,
+            report_to="none",
+            remove_unused_columns=False,
+            use_cpu=True,
+            beta=self.config.training.dpo_beta,
+            max_length=self.config.training.max_seq_length,
+            max_prompt_length=self.config.training.max_seq_length // 2,
+        )
+
+        trainer = DPOTrainer(
+            model=model,
+            args=dpo_config,
+            train_dataset=train_ds,
+            eval_dataset=val_ds,
+            processing_class=tokenizer,
+        )
+        logger.info(f"DPOTrainer created with beta={self.config.training.dpo_beta}")
+
+        result = trainer.train()
+
+        # Save adapter
+        adapter_path = f"{checkpoint_path}/adapter"
+        model.save_pretrained(adapter_path)
+        tokenizer.save_pretrained(adapter_path)
+
+        eval_metrics = trainer.evaluate()
+        metrics = {
+            "train_loss": result.training_loss,
+            "eval_loss": eval_metrics.get("eval_loss", 0.0),
+        }
+        return adapter_path, metrics
+
+    def _prepare_dataset(self, dataset: List[Dict[str, Any]], tokenizer) -> Dataset:
+        """Tokenize SFT dataset using GPT-OSS Harmony format."""
+
         def format_example(example):
             """Format a single example for training using GPT-OSS Harmony format."""
             prompt = example['prompt']

@@ -480,7 +480,7 @@ async def chat_completions(request: ChatCompletionRequest):
         # Normalize model name to handle Ollama-style tags (e.g., 'model:latest')
         normalized_model = normalize_model_name(request_model)
 
-        if normalized_model not in [configured_model_id, "local-llm"]:  # Allow legacy "local-llm" for compatibility
+        if normalized_model not in [configured_model_id, normalize_model_name(configured_model_id), "local-llm"]:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model '{request_model}' not found. Available model: {configured_model_id}"
