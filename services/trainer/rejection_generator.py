@@ -18,15 +18,16 @@ logger = logging.getLogger(__name__)
 class RejectionGenerator:
     """Generates synthetic rejected responses via Ollama API."""
 
-    def __init__(self, ollama_url: str = "http://api:8000"):
+    def __init__(self, ollama_url: str = "http://llm-api:8000", model_name: str = "gpt-oss:20b"):
         """
         Initialize rejection generator.
 
         Args:
             ollama_url: Base URL for Ollama API (defaults to API service)
+            model_name: Model name for generation requests
         """
         self.ollama_url = ollama_url
-        self.model_name = 'gpt-oss:20b'  # Will be fetched from current loaded model
+        self.model_name = model_name
 
     def generate_rejections(
         self,
@@ -54,10 +55,7 @@ class RejectionGenerator:
             return {}
 
         logger.info(f"Generating {len(prompts)} rejection samples...")
-        logger.info("Using currently loaded model with degraded sampling parameters")
-
-        # Get currently loaded model name
-        self._detect_model()
+        logger.info(f"Using model '{self.model_name}' with degraded sampling parameters")
 
         rejections = {}
         failed_count = 0
@@ -89,28 +87,6 @@ class RejectionGenerator:
 
         return rejections
 
-    def _detect_model(self) -> None:
-        """Detect currently loaded model name from API."""
-        try:
-            # Try to get model info from API status endpoint
-            response = requests.get(
-                f"{self.ollama_url}/health",
-                timeout=10
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                # Model name might be in different fields depending on API version
-                self.model_name = data.get("model") or "current"
-                logger.info(f"Detected model for rejection generation: {self.model_name}")
-            else:
-                logger.warning(f"Could not detect model name, using 'current'")
-                self.model_name = "current"
-
-        except Exception as e:
-            logger.warning(f"Error detecting model name: {e}, using 'current'")
-            self.model_name = "current"
-
     def _generate_single(self, prompt: str, timeout: int) -> Optional[str]:
         """
         Generate a single rejected response using degraded sampling.
@@ -131,12 +107,9 @@ class RejectionGenerator:
                     "messages": [
                         {"role": "user", "content": prompt}
                     ],
-                    "temperature": 1.5,      # High randomness (worse quality)
-                    "top_p": 0.6,           # Reduced vocabulary diversity
-                    "top_k": 20,            # Limit token choices
-                    "frequency_penalty": 0.0,  # Allow repetition
-                    "presence_penalty": 0.0,   # Allow repetition
-                    "max_tokens": 200,      # Shorter responses than normal
+                    "temperature": 1.0,      # Higher randomness (worse quality)
+                    "top_p": 0.7,           # Reduced vocabulary diversity
+                    "max_tokens": 512,      # Enough for thinking + content
                     "stream": False
                 },
                 timeout=timeout
@@ -144,12 +117,31 @@ class RejectionGenerator:
 
             if response.status_code == 200:
                 data = response.json()
-                rejection = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                message = data.get("choices", [{}])[0].get("message", {})
+                content = message.get("content", "")
+                thinking = message.get("thinking", "")
 
-                if rejection and len(rejection.strip()) > 10:
-                    return rejection.strip()
+                # Handle content as array of blocks
+                if isinstance(content, list):
+                    content = " ".join(
+                        block.get("text", "") for block in content
+                        if isinstance(block, dict) and block.get("type") == "text"
+                    )
+                elif not isinstance(content, str):
+                    content = str(content) if content else ""
+
+                rejection = content.strip()
+
+                # If content is empty but thinking is present, the model
+                # spent all its tokens on chain-of-thought — use thinking
+                if not rejection and thinking:
+                    rejection = thinking.strip()
+                    logger.debug("Using thinking field as rejection (content was empty)")
+
+                if len(rejection) > 10:
+                    return rejection
                 else:
-                    logger.warning(f"Generated rejection too short: {len(rejection)} chars")
+                    logger.warning(f"Generated rejection too short ({len(rejection)} chars)")
                     return None
             else:
                 logger.error(

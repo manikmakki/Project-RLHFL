@@ -176,34 +176,32 @@ class SentimentAnalyzer:
     ) -> float:
         """
         Calculate the weight/importance of this interaction.
-        
+
         Returns:
             float: Weight multiplier (1.0 = normal, higher = more important)
         """
         weight = 1.0
         text = user_message.lower()
-        
-        # Boost 1: Explicit instructions
+
+        # Boost 1: Explicit persistent instructions (must match 2+ patterns to avoid noise)
         instruction_matches = sum(1 for p in self.INSTRUCTION_PATTERNS if re.search(p, text))
-        if instruction_matches > 0:
+        if instruction_matches >= 2:
             weight *= self.instruction_boost
-        
+        elif instruction_matches == 1:
+            weight *= 1.3
+
         # Boost 2: Strong sentiment (both positive and negative are important)
         weight *= (1.0 + abs(sentiment) * 0.5)
-        
+
         # Boost 3: Message length (substantive interactions matter more)
         msg_length = len(user_message)
-        if msg_length > 200:
-            weight *= 1.5
-        elif msg_length > 500:
+        if msg_length > 500:
             weight *= 2.0
+        elif msg_length > 200:
+            weight *= 1.5
         elif msg_length < 20:
             weight *= 0.7  # Very short messages less important
-        
-        # Boost 4: Specific directives
-        if any(word in text for word in ['prefer', 'want', 'need', 'should', 'must', 'always', 'never']):
-            weight *= 1.3
-        
+
         # Cap maximum weight
         return min(weight, 5.0)
     
@@ -215,28 +213,29 @@ class SentimentAnalyzer:
     ) -> bool:
         """
         Determine if this interaction should be a golden example.
+        Golden examples are high-signal interactions that should be
+        preserved and always included in training data.
         """
         text = user_message.lower()
-        
-        # Criterion 1: High-weight interactions (important instructions)
-        if weight >= 3.0:
+
+        # Criterion 1: Very high weight (multiple instruction signals + strong sentiment)
+        if weight >= 4.0:
             return True
-        
-        # Criterion 2: Strong explicit feedback
-        if abs(sentiment) >= 0.7:
+
+        # Criterion 2: Very strong explicit feedback
+        if abs(sentiment) >= 0.8:
             return True
-        
-        # Criterion 3: Explicit preference/instruction statements
-        preference_phrases = [
-            'i prefer', 'i want', 'i need', 'i like when',
-            'always do', 'never do', 'remember to', 'make sure',
-            'from now on', 'going forward'
+
+        # Criterion 3: Explicit persistent directives (strict phrases only)
+        directive_phrases = [
+            'from now on', 'going forward', 'in the future',
+            'always do', 'never do', 'remember to',
         ]
-        if any(phrase in text for phrase in preference_phrases):
+        if any(phrase in text for phrase in directive_phrases):
             return True
-        
-        # Criterion 4: Detailed corrections (long negative feedback)
-        if sentiment < -0.3 and len(user_message) > 100:
+
+        # Criterion 4: Detailed corrections (strongly negative + substantive)
+        if sentiment < -0.5 and len(user_message) > 200:
             return True
-        
+
         return False
