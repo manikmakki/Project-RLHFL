@@ -59,17 +59,19 @@ class MemoryManager:
         assistant_response: str,
         sentiment: float = 0.0,
         weight: float = 1.0,
-        is_golden: bool = False
+        is_golden: bool = False,
+        is_refusal: bool = False,
+        psyche_metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Store an interaction in the vector database."""
         try:
             timestamp = datetime.now()
             interaction_id = f"{conversation_id}_{timestamp.timestamp()}"
-            
+
             # Create embedding from user message + response
             text = f"User: {user_message}\nAssistant: {assistant_response}"
             embedding = self.embedder.encode(text).tolist()
-            
+
             # Store full messages for maximum training fidelity
             # Handle edge case of extremely long messages (ChromaDB metadata limit: ~64KB)
             user_msg_stored = user_message
@@ -93,8 +95,13 @@ class MemoryManager:
                 "sentiment": sentiment,
                 "weight": weight,
                 "is_golden": is_golden,
+                "is_refusal": is_refusal,
                 "truncated": truncated
             }
+
+            # Store psyche metadata as JSON string (ChromaDB doesn't support nested dicts)
+            if psyche_metadata:
+                metadata["psyche_metadata"] = json.dumps(psyche_metadata)
             
             # Store in main collection
             self.collection.add(
@@ -140,6 +147,14 @@ class MemoryManager:
                 if timestamp and interaction_timestamp <= timestamp:
                     continue
                 
+                # Parse psyche_metadata from JSON string if present
+                psyche_meta = {}
+                if metadata.get('psyche_metadata'):
+                    try:
+                        psyche_meta = json.loads(metadata['psyche_metadata'])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
                 interaction = Interaction(
                     id=results['ids'][i],
                     conversation_id=metadata['conversation_id'],
@@ -148,7 +163,8 @@ class MemoryManager:
                     assistant_response=metadata['assistant_response'],
                     sentiment=metadata.get('sentiment', 0.0),
                     weight=metadata.get('weight', 1.0),
-                    metadata=metadata
+                    metadata=metadata,
+                    psyche_metadata=psyche_meta,
                 )
                 interactions.append(interaction)
             
@@ -280,14 +296,22 @@ class MemoryManager:
             new_golden = sum(1 for i in new_interactions_list
                            if i.metadata.get('is_golden', False))
 
+            # Count refusals in new interactions
+            new_refusal_count = sum(1 for i in new_interactions_list
+                                    if i.metadata.get('is_refusal', False))
+
             # Calculate DPO-specific stats (new negatives since last DPO training)
             if last_dpo_training:
                 new_negative_since_dpo = sum(1 for i in all_interactions
                                              if i.timestamp > last_dpo_training and
                                              i.sentiment < self.config.sentiment.negative_threshold)
+                new_refusals_since_dpo = sum(1 for i in all_interactions
+                                              if i.timestamp > last_dpo_training and
+                                              i.metadata.get('is_refusal', False))
                 days_since_dpo = (now - last_dpo_training).total_seconds() / 86400
             else:
                 new_negative_since_dpo = new_negative
+                new_refusals_since_dpo = new_refusal_count
                 days_since_dpo = 999.0
 
             return TrainingStats(
@@ -303,7 +327,9 @@ class MemoryManager:
                 new_golden_count=new_golden,
                 last_dpo_training_timestamp=last_dpo_training,
                 new_negative_since_dpo=new_negative_since_dpo,
-                days_since_dpo_training=days_since_dpo
+                days_since_dpo_training=days_since_dpo,
+                new_refusal_count=new_refusal_count,
+                new_refusals_since_dpo=new_refusals_since_dpo
             )
 
         except Exception as e:

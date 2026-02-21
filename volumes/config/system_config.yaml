@@ -65,3 +65,34 @@ training:
   ollama_model_name: gpt-oss:20b
   max_checkpoint_count: 3
   max_gguf_files: 2
+psyche:
+  enabled: true
+  # Id Engine (reward-driven)
+  id_enabled: true
+  id_session_window: 10
+  id_reward_prompt_threshold: 0.3
+  # Ego Fast (per-request reasoning)
+  ego_fast_enabled: true
+  ego_reasoning_prompt: true
+  ego_parse_reflection: true
+  # Ego Slow (background strategy)
+  ego_slow_enabled: true
+  ego_pattern_analysis_interval_hours: 4
+  # Superego (discrimination layer)
+  superego_enabled: true
+  superego_judge_model: ""
+  superego_permissive_framing: true
+  superego_refusal_retry: true
+  superego_max_retries: 1
+  superego_judge_timeout_seconds: 15
+  superego_danger_patterns:
+  - "rm -rf /"
+  - ":(){ :|:& };:"
+  - "mkfs."
+  - "dd if=/dev/zero"
+  - "> /dev/sda"
+  superego_safe_patterns:
+  - "localhost"
+  - "127.0.0.1"
+  - "0.0.0.0"
+  - "::1"

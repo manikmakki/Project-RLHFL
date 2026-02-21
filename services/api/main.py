@@ -48,6 +48,10 @@ from api.memory_manager import MemoryManager
 from api.sentiment_analyzer import SentimentAnalyzer
 from api.prompt_interceptor import PromptInterceptor
 from api.admin_ui import admin_router
+from api.psyche.orchestrator import PsycheOrchestrator
+from api.psyche.superego import Superego
+from api.psyche.ego_fast import EgoFast
+from api.psyche.id_engine import IdEngine
 
 # Configure logging
 logging.basicConfig(
@@ -62,6 +66,7 @@ llm_proxy = None  # HTTP proxy to external LLM
 memory_manager = None
 sentiment_analyzer = None
 prompt_interceptor = None
+psyche = None  # Psyche orchestrator (Id/Ego/Superego)
 background_tasks = set()  # Track background storage tasks for graceful shutdown
 recent_api_requests = deque(maxlen=20)  # Rolling buffer of last 20 API requests
 training_in_progress = False  # Flag to indicate training is active (model unloaded)
@@ -218,7 +223,7 @@ def parse_model_response(content: str) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager for FastAPI app."""
-    global config, llm_proxy, memory_manager, sentiment_analyzer, prompt_interceptor, background_tasks
+    global config, llm_proxy, memory_manager, sentiment_analyzer, prompt_interceptor, psyche, background_tasks
 
     # Startup
     logger.info("Starting LLM API service (Proxy Mode)...")
@@ -258,6 +263,25 @@ async def lifespan(app: FastAPI):
     # Initialize LLM proxy (replaces local model loading)
     llm_proxy = LLMProxy(config)
     logger.info(f"LLM Proxy initialized: {llm_proxy}")
+
+    # Initialize Psyche (Id/Ego/Superego) if enabled
+    if config.psyche.enabled:
+        try:
+            superego = Superego(config, llm_proxy=llm_proxy)
+            ego_fast = EgoFast(config)
+            id_engine = IdEngine(config, sentiment_analyzer)
+            psyche = PsycheOrchestrator(
+                config=config,
+                superego=superego,
+                ego_fast=ego_fast,
+                id_engine=id_engine,
+            )
+            logger.info("Psyche orchestrator initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Psyche, continuing without it: {e}")
+            psyche = None
+    else:
+        logger.info("Psyche disabled in config")
 
     # Wire admin UI dependencies now that managers are initialized
     try:
@@ -442,7 +466,11 @@ async def health_check():
         external_model_name=config.llm_proxy.external_model_name if config else None
     )
 
-    return status
+    response = status.model_dump()
+    if psyche:
+        response["psyche"] = psyche.is_healthy()
+
+    return response
 
 
 @app.get("/v1/models")
@@ -533,6 +561,26 @@ async def chat_completions(request: ChatCompletionRequest):
                 user_message_text
             )
 
+        # Psyche pre-processing (Id/Ego/Superego)
+        psyche_pre_result = None
+        if psyche and psyche.enabled:
+            try:
+                psyche_pre_result = await psyche.pre_process(
+                    messages=messages_with_context,
+                    user_message_text=user_message_text,
+                    conversation_id=conversation_id,
+                )
+                if not psyche_pre_result.validation.allowed:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Request blocked: {psyche_pre_result.validation.reason}"
+                    )
+                messages_with_context = psyche_pre_result.messages
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Psyche pre-process failed, continuing without it: {e}")
+
         # Transparent proxy mode - messages pass through unmodified
         # RAG functionality removed to focus on RLHF with minimal interference
         logger.debug("Operating in transparent proxy mode - no RAG context injection")
@@ -558,7 +606,8 @@ async def chat_completions(request: ChatCompletionRequest):
         if request.stream:
             return StreamingResponse(
                 stream_chat_completion(
-                    request, conversation_id, user_message_text, request_model, messages_with_context, prev_assistant_text
+                    request, conversation_id, user_message_text, request_model, messages_with_context, prev_assistant_text,
+                    psyche_pre_result=psyche_pre_result,
                 ),
                 media_type="text/event-stream"
             )
@@ -586,6 +635,58 @@ async def chat_completions(request: ChatCompletionRequest):
         finish_reason = response_dict.get("finish_reason", "stop")
 
         logger.debug(f"Parsed response - finish_reason={finish_reason}, has_content={bool(response_text)}, thinking={bool(thinking)}, tool_calls={tool_calls}")
+
+        # Psyche post-processing (refusal detection, reflection extraction)
+        if psyche and psyche.enabled and psyche_pre_result:
+            logger.info(
+                f"Running psyche post-process on /v1/chat/completions: "
+                f"response_len={len(response_text)}, first_100={response_text[:100]!r}"
+            )
+            try:
+                psyche_post_result = await psyche.post_process(
+                    response_dict=response_dict,
+                    conversation_id=conversation_id,
+                    pre_result=psyche_pre_result,
+                    messages=list(request.messages),
+                    llm_proxy=llm_proxy,
+                )
+                logger.info(
+                    f"Psyche post-process returned: "
+                    f"refusal_detected={psyche_post_result.refusal_detected}, "
+                    f"retry_attempted={psyche_post_result.retry_attempted}"
+                )
+                # Use potentially updated response (if refusal was retried)
+                response_dict = psyche_post_result.response_dict
+                response_text = response_dict.get("content") or ""
+                tool_calls = response_dict.get("tool_calls")
+                thinking = response_dict.get("thinking") or thinking
+                finish_reason = response_dict.get("finish_reason", finish_reason)
+                # Store refusal as negative training signal for DPO
+                if psyche_post_result.refusal_detected:
+                    try:
+                        # Use original refusal text (before retry), not the retried response
+                        original_refusal = psyche_post_result.metadata.get("original_refusal", response_text)
+                        await asyncio.to_thread(
+                            memory_manager.store_interaction,
+                            conversation_id=conversation_id,
+                            user_message=user_message_text,
+                            assistant_response=original_refusal,
+                            sentiment=-0.8,
+                            weight=2.0,
+                            is_refusal=True,
+                            psyche_metadata={
+                                "refusal_detected": True,
+                                "retry_attempted": psyche_post_result.retry_attempted,
+                                "retry_succeeded": psyche_post_result.metadata.get("retry_succeeded"),
+                                "retry_response": psyche_post_result.metadata.get("retry_response"),
+                            },
+                        )
+                        logger.info("Stored refusal interaction as DPO training signal")
+                    except Exception as store_err:
+                        logger.error(f"Failed to store refusal interaction: {store_err}")
+
+            except Exception as e:
+                logger.error(f"Psyche post-process failed, continuing without it: {e}", exc_info=True)
 
         # Only analyze sentiment and store if this is a final response (not a tool call)
         # Store user prompt paired with previous LLM response (n-1) to capture
@@ -699,18 +800,32 @@ async def stream_chat_completion(
     user_message: str,
     model_id: str,
     messages_with_context: list[ChatMessage],
-    prev_assistant_text: str | None = None
+    prev_assistant_text: str | None = None,
+    psyche_pre_result=None,
 ) -> AsyncGenerator[str, None]:
     """Stream chat completion responses in OpenAI format."""
     try:
         completion_id = f"chatcmpl-{uuid.uuid4()}"
         created = int(time.time())
 
-        # When tools are present, generate complete response then stream as SSE
-        # (llm_proxy.generate_stream doesn't support tools properly)
-        if request.tools:
-            logger.debug("Streaming with tools: using generate() then converting to SSE")
-            # llm_proxy.generate() is already async, no need for to_thread()
+        psyche_active = psyche and psyche.enabled and psyche_pre_result
+
+        # ----------------------------------------------------------------
+        # When psyche is active, ALL internal LLM generation is non-streaming.
+        # Psyche needs the complete response to evaluate, retry refusals,
+        # parse reflection, and record outcomes. The final approved response
+        # is then delivered as SSE chunks to the client.
+        #
+        # When psyche is disabled, true token-by-token streaming is used.
+        # ----------------------------------------------------------------
+
+        if psyche_active or request.tools:
+            # Generate complete response (non-streaming internally)
+            if request.tools:
+                logger.debug("Streaming with tools: generating complete response then converting to SSE")
+            else:
+                logger.debug("Streaming with psyche: generating complete response for evaluation")
+
             response_dict = await llm_proxy.generate(
                 messages=messages_with_context,
                 temperature=request.temperature,
@@ -722,10 +837,63 @@ async def stream_chat_completion(
 
             full_response = response_dict.get("content") or ""
             tool_calls = response_dict.get("tool_calls")
+            thinking = response_dict.get("thinking")
             finish_reason = response_dict.get("finish_reason", "stop")
 
-            # Send initial chunk with role and empty content
-            # Some clients (like Open WebUI) expect content to be present even when empty
+            # Psyche post-processing (refusal detection + retry, ego parse, id record)
+            if psyche_active:
+                logger.info(
+                    f"Running psyche post-process on streaming /v1/chat/completions: "
+                    f"response_len={len(full_response)}, first_100={full_response[:100]!r}"
+                )
+                try:
+                    psyche_post = await psyche.post_process(
+                        response_dict=response_dict,
+                        conversation_id=conversation_id,
+                        pre_result=psyche_pre_result,
+                        messages=list(request.messages),
+                        llm_proxy=llm_proxy,
+                    )
+                    logger.info(
+                        f"Psyche post-process (streaming) returned: "
+                        f"refusal_detected={psyche_post.refusal_detected}, "
+                        f"retry_attempted={psyche_post.retry_attempted}"
+                    )
+                    response_dict = psyche_post.response_dict
+                    full_response = response_dict.get("content") or ""
+                    tool_calls = response_dict.get("tool_calls")
+                    thinking = response_dict.get("thinking") or thinking
+                    finish_reason = response_dict.get("finish_reason", finish_reason)
+
+                    # Store refusal as negative training signal for DPO
+                    if psyche_post.refusal_detected:
+                        try:
+                            original_refusal = psyche_post.metadata.get("original_refusal", full_response)
+                            await asyncio.to_thread(
+                                memory_manager.store_interaction,
+                                conversation_id=conversation_id,
+                                user_message=user_message,
+                                assistant_response=original_refusal,
+                                sentiment=-0.8,
+                                weight=2.0,
+                                is_refusal=True,
+                                psyche_metadata={
+                                    "refusal_detected": True,
+                                    "retry_attempted": psyche_post.retry_attempted,
+                                    "retry_succeeded": psyche_post.metadata.get("retry_succeeded"),
+                                    "retry_response": psyche_post.metadata.get("retry_response"),
+                                },
+                            )
+                            logger.info("Stored refusal interaction as DPO training signal (streaming)")
+                        except Exception as store_err:
+                            logger.error(f"Failed to store refusal interaction: {store_err}")
+
+                except Exception as e:
+                    logger.error(f"Psyche post-process (streaming) failed: {e}", exc_info=True)
+
+            # --- Deliver final approved response as SSE chunks ---
+
+            # Initial chunk (role + empty content)
             initial_chunk = {
                 'id': completion_id,
                 'object': 'chat.completion.chunk',
@@ -737,10 +905,9 @@ async def stream_chat_completion(
                     'finish_reason': None
                 }]
             }
-            logger.debug(f"Sending initial chunk: {json.dumps(initial_chunk)}")
             yield f"data: {json.dumps(initial_chunk)}\n\n"
 
-            # Send content chunk
+            # Content chunk
             if full_response:
                 content_chunk = {
                     'id': completion_id,
@@ -753,10 +920,9 @@ async def stream_chat_completion(
                         'finish_reason': None
                     }]
                 }
-                logger.debug(f"Sending content chunk: {json.dumps(content_chunk)}")
                 yield f"data: {json.dumps(content_chunk)}\n\n"
 
-            # Send tool_calls chunk if present
+            # Tool calls chunk
             if tool_calls:
                 tool_chunk = {
                     'id': completion_id,
@@ -769,10 +935,9 @@ async def stream_chat_completion(
                         'finish_reason': None
                     }]
                 }
-                logger.debug(f"Sending tool_calls chunk: {json.dumps(tool_chunk)}")
                 yield f"data: {json.dumps(tool_chunk)}\n\n"
 
-            # Send final chunk for tools path
+            # Final chunk
             final_chunk = {
                 'id': completion_id,
                 'object': 'chat.completion.chunk',
@@ -784,11 +949,10 @@ async def stream_chat_completion(
                     'finish_reason': finish_reason
                 }]
             }
-            logger.debug(f"Sending final chunk: {json.dumps(final_chunk)}")
             yield f"data: {json.dumps(final_chunk)}\n\n"
+
         else:
-            # Normal streaming without tools
-            # Send initial chunk with role
+            # True token-by-token streaming (psyche disabled, no tools)
             initial_chunk = {
                 'id': completion_id,
                 'object': 'chat.completion.chunk',
@@ -804,7 +968,6 @@ async def stream_chat_completion(
 
             full_response = ""
             finish_reason = "stop"
-            # llm_proxy.generate_stream() is an async generator, use async for
             stream_gen = llm_proxy.generate_stream(
                 messages=messages_with_context,
                 temperature=request.temperature,
@@ -815,7 +978,6 @@ async def stream_chat_completion(
             )
 
             async for chunk in stream_gen:
-
                 if 'choices' in chunk and len(chunk['choices']) > 0:
                     choice = chunk['choices'][0]
                     delta = choice.get('delta', {})
@@ -839,21 +1001,21 @@ async def stream_chat_completion(
                     }
                     yield f"data: {json.dumps(chunk_data)}\n\n"
 
-        # Send final chunk if not already sent
-        if not finish_reason:
-            final_chunk = {
-                'id': completion_id,
-                'object': 'chat.completion.chunk',
-                'created': created,
-                'model': model_id,
-                'choices': [{
-                    'index': 0,
-                    'delta': {},
-                    'finish_reason': 'stop'
-                }]
-            }
-            yield f"data: {json.dumps(final_chunk)}\n\n"
-            finish_reason = 'stop'
+            # Send final chunk if not already sent
+            if not finish_reason:
+                final_chunk = {
+                    'id': completion_id,
+                    'object': 'chat.completion.chunk',
+                    'created': created,
+                    'model': model_id,
+                    'choices': [{
+                        'index': 0,
+                        'delta': {},
+                        'finish_reason': 'stop'
+                    }]
+                }
+                yield f"data: {json.dumps(final_chunk)}\n\n"
+                finish_reason = 'stop'
 
         logger.debug("Sending [DONE] message")
         yield "data: [DONE]\n\n"
@@ -1023,6 +1185,7 @@ async def ollama_chat(request: Request):
     """
     Transparent proxy to external Ollama instance.
     Forwards requests unchanged and captures messages in background for training.
+    Psyche (Id/Ego/Superego) processing is applied identically to /v1/chat/completions.
     """
     if not llm_proxy:
         raise HTTPException(status_code=503, detail="Proxy not configured")
@@ -1052,47 +1215,210 @@ async def ollama_chat(request: Request):
             logger.debug(f"Forward headers: {dict(forward_headers)}")
             logger.debug(f"Request body preview: {request_body[:500]}")
 
+        # --- Psyche pre-processing (identical to /v1/chat/completions) ---
+        psyche_pre_result = None
+        if psyche and psyche.enabled and messages:
+            try:
+                # Convert Ollama message dicts to ChatMessage objects
+                chat_messages = [
+                    ChatMessage(
+                        role=MessageRole(msg.get("role", "user")),
+                        content=msg.get("content", ""),
+                    )
+                    for msg in messages
+                ]
+
+                # Extract user message text
+                user_message_text = next(
+                    (msg.get("content", "") for msg in reversed(messages)
+                     if msg.get("role") == "user"),
+                    ""
+                )
+
+                psyche_pre_result = await psyche.pre_process(
+                    messages=chat_messages,
+                    user_message_text=user_message_text,
+                    conversation_id=conversation_id,
+                )
+
+                if not psyche_pre_result.validation.allowed:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Request blocked: {psyche_pre_result.validation.reason}"
+                    )
+
+                # Always serialize back -- psyche may have injected framing,
+                # ego enrichment, or reward context into the messages
+                enriched_messages = psyche_pre_result.messages
+                ollama_req["messages"] = [
+                    {"role": msg.role.value, "content": msg.get_text_content() or ""}
+                    for msg in enriched_messages
+                ]
+                request_body = json.dumps(ollama_req).encode("utf-8")
+
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Psyche pre-process failed on /api/chat, continuing without it: {e}")
+
         # Forward request to external Ollama and stream response
+        psyche_active = psyche and psyche.enabled and psyche_pre_result
+
         async def transparent_proxy_stream():
-            """Stream response from external Ollama unchanged."""
+            """
+            Stream response from external Ollama.
+
+            When psyche is active, the response is buffered internally so psyche
+            can evaluate it (refusal detection, retry, ego parse, id record).
+            The final approved response is then delivered to the client.
+
+            When psyche is disabled, bytes pass through transparently.
+            """
             accumulated_response = ""
             done = False
             start_time = time.time()
 
             try:
-                async with llm_proxy.client.stream(
-                    "POST",
-                    endpoint_url,
-                    content=request_body,
-                    headers=forward_headers
-                ) as response:
-                    # Check for HTTP errors and pass through unchanged
-                    if response.status_code >= 400:
-                        error_detail = await response.aread()
-                        error_text = error_detail.decode('utf-8') if error_detail else f"HTTP {response.status_code}"
-                        logger.error(f"External Ollama error {response.status_code}: {error_text}")
-                        # Pass through Ollama's error response unchanged
-                        yield error_text
-                        return
+                if psyche_active:
+                    # --- Psyche active: buffer, evaluate, possibly retry, then deliver ---
+                    logger.debug("Psyche active on /api/chat: buffering response for evaluation")
+                    buffered_lines = []
 
-                    # Stream each line unchanged
-                    async for line in response.aiter_lines():
-                        # Forward line exactly as received
+                    async with llm_proxy.client.stream(
+                        "POST",
+                        endpoint_url,
+                        content=request_body,
+                        headers=forward_headers
+                    ) as response:
+                        if response.status_code >= 400:
+                            error_detail = await response.aread()
+                            error_text = error_detail.decode('utf-8') if error_detail else f"HTTP {response.status_code}"
+                            logger.error(f"External Ollama error {response.status_code}: {error_text}")
+                            yield error_text
+                            return
+
+                        async for line in response.aiter_lines():
+                            buffered_lines.append(line)
+                            if line.strip():
+                                try:
+                                    chunk = json.loads(line)
+                                    if chunk.get("message", {}).get("content"):
+                                        accumulated_response += chunk["message"]["content"]
+                                    if chunk.get("done"):
+                                        done = True
+                                except json.JSONDecodeError:
+                                    pass
+
+                    # Run full psyche post-processing via the orchestrator.
+                    # The orchestrator handles refusal detection + retry internally
+                    # via llm_proxy.generate(). If retry succeeds, response_dict is updated.
+                    response_dict = {"content": accumulated_response, "finish_reason": "stop" if done else None}
+                    logger.info(
+                        f"Running psyche post-process on /api/chat: "
+                        f"accumulated_len={len(accumulated_response)}, done={done}, "
+                        f"first_100={accumulated_response[:100]!r}"
+                    )
+                    try:
+                        psyche_post = await psyche.post_process(
+                            response_dict=response_dict,
+                            conversation_id=conversation_id,
+                            pre_result=psyche_pre_result,
+                            messages=[
+                                ChatMessage(role=MessageRole(m.get("role", "user")), content=m.get("content", ""))
+                                for m in messages
+                            ],
+                            llm_proxy=llm_proxy,
+                        )
+                        logger.info(
+                            f"Psyche post-process returned: "
+                            f"refusal_detected={psyche_post.refusal_detected}, "
+                            f"retry_attempted={psyche_post.retry_attempted}, "
+                            f"metadata={psyche_post.metadata}"
+                        )
+
+                        # If the orchestrator retried and got a different response,
+                        # synthesize valid Ollama NDJSON from the retry content
+                        retried_content = psyche_post.response_dict.get("content") or ""
+                        if psyche_post.retry_attempted and retried_content and retried_content != accumulated_response:
+                            logger.info(
+                                f"Psyche retry produced new response on /api/chat "
+                                f"(len={len(retried_content)}), synthesizing Ollama NDJSON"
+                            )
+                            # Synthesize a single Ollama NDJSON response line
+                            synthetic_response = json.dumps({
+                                "model": ollama_req.get("model", ""),
+                                "created_at": datetime.now().isoformat() + "Z",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": retried_content,
+                                },
+                                "done": True,
+                                "done_reason": "stop",
+                            })
+                            buffered_lines = [synthetic_response]
+                            accumulated_response = retried_content
+
+                        # Store refusal as negative training signal for DPO
+                        if psyche_post.refusal_detected:
+                            try:
+                                user_msg_text = next(
+                                    (m.get("content", "") for m in reversed(messages)
+                                     if m.get("role") == "user"), ""
+                                )
+                                original_refusal = psyche_post.metadata.get("original_refusal", accumulated_response)
+                                await asyncio.to_thread(
+                                    memory_manager.store_interaction,
+                                    conversation_id=conversation_id,
+                                    user_message=user_msg_text,
+                                    assistant_response=original_refusal,
+                                    sentiment=-0.8,
+                                    weight=2.0,
+                                    is_refusal=True,
+                                    psyche_metadata={
+                                        "refusal_detected": True,
+                                        "retry_attempted": psyche_post.retry_attempted,
+                                        "retry_succeeded": psyche_post.metadata.get("retry_succeeded"),
+                                        "retry_response": psyche_post.metadata.get("retry_response"),
+                                    },
+                                )
+                                logger.info("Stored refusal interaction as DPO training signal (/api/chat)")
+                            except Exception as store_err:
+                                logger.error(f"Failed to store refusal interaction: {store_err}")
+
+                    except Exception as e:
+                        logger.error(f"Psyche post-process on /api/chat failed, delivering original: {e}", exc_info=True)
+
+                    # Deliver the final approved response to the client
+                    for line in buffered_lines:
                         yield line + "\n"
 
-                        # Parse for background storage (don't modify the stream)
-                        if line.strip():
-                            try:
-                                chunk = json.loads(line)
+                else:
+                    # --- Psyche disabled: transparent pass-through ---
+                    async with llm_proxy.client.stream(
+                        "POST",
+                        endpoint_url,
+                        content=request_body,
+                        headers=forward_headers
+                    ) as response:
+                        if response.status_code >= 400:
+                            error_detail = await response.aread()
+                            error_text = error_detail.decode('utf-8') if error_detail else f"HTTP {response.status_code}"
+                            logger.error(f"External Ollama error {response.status_code}: {error_text}")
+                            yield error_text
+                            return
 
-                                # Accumulate content as it streams
-                                if chunk.get("message", {}).get("content"):
-                                    accumulated_response += chunk["message"]["content"]
+                        async for line in response.aiter_lines():
+                            yield line + "\n"
 
-                                if chunk.get("done"):
-                                    done = True
-                            except json.JSONDecodeError:
-                                pass
+                            if line.strip():
+                                try:
+                                    chunk = json.loads(line)
+                                    if chunk.get("message", {}).get("content"):
+                                        accumulated_response += chunk["message"]["content"]
+                                    if chunk.get("done"):
+                                        done = True
+                                except json.JSONDecodeError:
+                                    pass
 
                 # Log to Admin UI for debugging
                 elapsed_time = time.time() - start_time

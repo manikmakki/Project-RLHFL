@@ -1,3 +1,4 @@
+import json
 import logging
 import random
 from typing import List, Dict, Any
@@ -138,8 +139,11 @@ class DatasetBuilder:
         """
         Build DPO dataset with chosen/rejected pairs.
 
-        Creates preference pairs by combining positive/golden interactions
-        (chosen responses) with synthetically generated rejections.
+        Creates preference pairs from three sources:
+        1. Positive/golden interactions paired with synthetic rejections
+        2. Refusal interactions: the refusal text is "rejected", the retry
+           response (if available) is "chosen"
+        3. Neutral interactions paired with synthetic rejections
 
         Args:
             interactions: Top-N weighted interactions
@@ -149,19 +153,24 @@ class DatasetBuilder:
         Returns:
             Dataset with (prompt, chosen, rejected) triplets for DPO training
         """
+        # Separate refusal interactions (stored by psyche post-process)
+        refusal_interactions = [i for i in interactions if i.metadata.get('is_refusal', False)]
+        non_refusal_interactions = [i for i in interactions if not i.metadata.get('is_refusal', False)]
+
         logger.info(
-            f"Building DPO dataset from {len(interactions)} interactions, "
+            f"Building DPO dataset from {len(non_refusal_interactions)} interactions, "
+            f"{len(refusal_interactions)} refusal interactions, "
             f"{len(golden_examples)} golden examples, "
             f"{len(rejections)} synthetic rejections"
         )
 
         dataset = []
 
-        # Separate interactions by sentiment
-        positive = [i for i in interactions if i.sentiment > self.config.sentiment.positive_threshold]
-        negative = [i for i in interactions if i.sentiment < self.config.sentiment.negative_threshold]
+        # Separate non-refusal interactions by sentiment
+        positive = [i for i in non_refusal_interactions if i.sentiment > self.config.sentiment.positive_threshold]
+        negative = [i for i in non_refusal_interactions if i.sentiment < self.config.sentiment.negative_threshold]
         neutral = [
-            i for i in interactions
+            i for i in non_refusal_interactions
             if abs(i.sentiment) <= max(
                 self.config.sentiment.positive_threshold,
                 abs(self.config.sentiment.negative_threshold)
@@ -171,6 +180,39 @@ class DatasetBuilder:
         logger.info(
             f"Sentiment distribution - Positive: {len(positive)}, "
             f"Negative: {len(negative)}, Neutral: {len(neutral)}"
+        )
+
+        # Refusal interactions: the stored response IS the refusal (rejected).
+        # If a retry succeeded, psyche_metadata contains the good response (chosen).
+        for interaction in refusal_interactions:
+            psyche_meta = interaction.psyche_metadata or {}
+            retry_response = psyche_meta.get("retry_response")
+
+            if retry_response:
+                # Best case: we have both the refusal (rejected) and retry (chosen)
+                dataset.append({
+                    "prompt": interaction.user_message,
+                    "chosen": retry_response,
+                    "rejected": interaction.assistant_response,
+                    "weight": interaction.weight,
+                    "sentiment": interaction.sentiment,
+                    "type": "refusal_dpo"
+                })
+            else:
+                # No retry response available - store as rejected-only for now.
+                # Can be paired with synthetic chosen responses in the future.
+                dataset.append({
+                    "prompt": interaction.user_message,
+                    "chosen": None,
+                    "rejected": interaction.assistant_response,
+                    "weight": interaction.weight,
+                    "sentiment": interaction.sentiment,
+                    "type": "refusal_rejected_only"
+                })
+
+        logger.info(
+            f"Refusal DPO pairs: {sum(1 for d in dataset if d['type'] == 'refusal_dpo')}, "
+            f"Refusal rejected-only: {sum(1 for d in dataset if d['type'] == 'refusal_rejected_only')}"
         )
 
         # Positive examples with synthetic rejections (DPO pairs)
@@ -233,7 +275,7 @@ class DatasetBuilder:
                     "type": "golden_sft"
                 })
 
-        # Negative examples: use actual bad responses as rejections
+        # Negative examples (non-refusal): use actual bad responses as rejections
         # Pair with similar positive response or skip if no good alternative
         for interaction in negative:
             # For now, skip negative-only examples in DPO

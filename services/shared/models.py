@@ -322,6 +322,10 @@ class Interaction(BaseModel):
     sentiment: float = 0.0
     weight: float = 1.0
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    psyche_metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Metadata from Id/Ego/Superego layers for training analysis"
+    )
 
 
 class TrainingStats(BaseModel):
@@ -343,6 +347,10 @@ class TrainingStats(BaseModel):
     last_dpo_training_timestamp: Optional[datetime] = None
     new_negative_since_dpo: int = 0
     days_since_dpo_training: float = 0.0
+
+    # Refusal tracking (detected by Superego, stored for DPO training)
+    new_refusal_count: int = 0
+    new_refusals_since_dpo: int = 0
 
 
 class TrainingDatasetSample(BaseModel):

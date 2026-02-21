@@ -15,7 +15,7 @@ class TrainingScheduler:
         self.inactivity_hours = config.training.inactivity_threshold_hours
         self.max_days_between = config.training.max_days_between_training
     
-    def should_trigger_training(self, stats: TrainingStats) -> tuple[bool, str, str]:
+    def should_trigger_training(self, stats: TrainingStats, pattern_analysis=None) -> tuple[bool, str, str]:
         """
         Determine if training should be triggered and which mode to use.
 
@@ -24,10 +24,22 @@ class TrainingScheduler:
         - Positive/golden accumulation → SFT (reinforce good behavior)
         - Inactivity consolidation → auto-select based on data
 
+        Args:
+            stats: Training statistics
+            pattern_analysis: Optional PatternAnalysis from Ego Slow (psyche module).
+                If provided, its recommendations are logged but do not override
+                the existing trigger logic. Future versions may use this to
+                adjust thresholds dynamically.
+
         Returns:
             tuple[bool, str, str]: (should_train, reason, mode)
             mode = "sft" | "dpo" | "auto"
         """
+        # Log Ego Slow recommendations if available
+        if pattern_analysis and pattern_analysis.recommendation_notes:
+            logger.info(
+                f"Ego Slow recommendations: {pattern_analysis.recommendation_notes}"
+            )
 
         # Priority 1: User manual request (mode selected based on data)
         if stats.user_requested_training:
@@ -35,15 +47,17 @@ class TrainingScheduler:
             logger.info(f"Training trigger: User request (mode: {mode})")
             return True, "user_request", mode
 
-        # Priority 2: Negative sentiment accumulation → DPO to correct behavior
-        # Use new_negative_since_dpo to avoid triggering too frequently
+        # Priority 2: Negative sentiment + refusal accumulation → DPO to correct behavior
+        # Refusals are high-value DPO signals (model refusing safe requests)
         dpo_threshold = self.config.training.dpo_trigger_threshold
-        if stats.new_negative_since_dpo >= dpo_threshold:
+        dpo_signals = stats.new_negative_since_dpo + stats.new_refusals_since_dpo
+        if dpo_signals >= dpo_threshold:
             logger.info(
-                f"Training trigger: {stats.new_negative_since_dpo} new negative sentiments "
-                f"(>= {dpo_threshold}) → DPO mode"
+                f"Training trigger: {dpo_signals} DPO signals "
+                f"({stats.new_negative_since_dpo} negative + {stats.new_refusals_since_dpo} refusals "
+                f">= {dpo_threshold}) → DPO mode"
             )
-            return True, f"{stats.new_negative_since_dpo}_negative_sentiments", "dpo"
+            return True, f"{dpo_signals}_dpo_signals", "dpo"
 
         # Priority 3: Positive/golden accumulation → SFT to reinforce behavior
         new_positive_total = stats.new_positive_count + stats.new_golden_count
@@ -79,12 +93,14 @@ class TrainingScheduler:
         Returns:
             "sft" or "dpo"
         """
-        # DPO for correcting bad behavior (use new_negative_since_dpo for DPO-specific tracking)
+        # DPO for correcting bad behavior (negatives + refusals)
         dpo_mode_threshold = self.config.training.dpo_mode_threshold
-        if stats.new_negative_since_dpo >= dpo_mode_threshold:
+        dpo_signals = stats.new_negative_since_dpo + stats.new_refusals_since_dpo
+        if dpo_signals >= dpo_mode_threshold:
             logger.info(
-                f"Selecting DPO mode: {stats.new_negative_since_dpo} negatives to train out "
-                f"(>= {dpo_mode_threshold})"
+                f"Selecting DPO mode: {dpo_signals} signals to train out "
+                f"({stats.new_negative_since_dpo} negative + {stats.new_refusals_since_dpo} refusals "
+                f">= {dpo_mode_threshold})"
             )
             return "dpo"
 
@@ -125,15 +141,18 @@ class TrainingScheduler:
         # Check sentiment-based trigger conditions
         messages.append("\nTrigger Status:")
 
-        # DPO trigger
+        # DPO trigger (negatives + refusals)
         dpo_threshold = self.config.training.dpo_trigger_threshold
-        if stats.new_negative_since_dpo >= dpo_threshold:
+        dpo_signals = stats.new_negative_since_dpo + stats.new_refusals_since_dpo
+        if dpo_signals >= dpo_threshold:
             messages.append(
-                f"✓ DPO threshold met: {stats.new_negative_since_dpo}/{dpo_threshold} negatives"
+                f"✓ DPO threshold met: {dpo_signals}/{dpo_threshold} "
+                f"({stats.new_negative_since_dpo} negative + {stats.new_refusals_since_dpo} refusals)"
             )
         else:
             messages.append(
-                f"  DPO threshold: {stats.new_negative_since_dpo}/{dpo_threshold} negatives"
+                f"  DPO threshold: {dpo_signals}/{dpo_threshold} "
+                f"({stats.new_negative_since_dpo} negative + {stats.new_refusals_since_dpo} refusals)"
             )
 
         # SFT trigger

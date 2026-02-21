@@ -129,12 +129,53 @@ class LLMProxyConfig(BaseModel):
     max_keepalive_connections: int = 5
 
 
+class PsycheConfig(BaseModel):
+    """Configuration for the Psyche module (Id / Ego / Superego)."""
+    enabled: bool = True
+
+    # Id Engine (reward-driven)
+    id_enabled: bool = True
+    id_session_window: int = 10  # Recent interactions to track per session
+    id_reward_prompt_threshold: float = 0.3  # Only inject reward context above this magnitude
+
+    # Ego Fast (per-request reasoning)
+    ego_fast_enabled: bool = True
+    ego_reasoning_prompt: bool = True  # Inject think-plan-act-reflect template
+    ego_parse_reflection: bool = True  # Parse self-critique from output
+
+    # Ego Slow (background strategy)
+    ego_slow_enabled: bool = True
+    ego_pattern_analysis_interval_hours: int = 4
+
+    # Superego (discrimination layer)
+    superego_enabled: bool = True
+    superego_judge_model: str = ""  # Empty = use same model as main proxy
+    superego_permissive_framing: bool = True  # Inject developer-context to reduce refusals
+    superego_refusal_retry: bool = True  # Detect and retry refusals with stronger framing
+    superego_max_retries: int = 1  # Max refusal retries before accepting the refusal
+    superego_judge_timeout_seconds: int = 15  # Timeout for out-of-band judge calls
+    superego_danger_patterns: list[str] = [
+        "rm -rf /",
+        ":(){ :|:& };:",  # Fork bomb
+        "mkfs.",
+        "dd if=/dev/zero",
+        "> /dev/sda",
+    ]
+    superego_safe_patterns: list[str] = [
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+    ]
+
+
 class SystemConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     sentiment: SentimentConfig = Field(default_factory=SentimentConfig)
     llm_proxy: LLMProxyConfig = Field(default_factory=LLMProxyConfig)
+    psyche: PsycheConfig = Field(default_factory=PsycheConfig)
 
 
 class Settings(BaseSettings):
