@@ -286,7 +286,7 @@ async def lifespan(app: FastAPI):
     # Wire admin UI dependencies now that managers are initialized
     try:
         from api import admin_ui
-        admin_ui.set_dependencies(memory_manager, llm_proxy, recent_api_requests, prompt_interceptor)
+        admin_ui.set_dependencies(memory_manager, llm_proxy, recent_api_requests, prompt_interceptor, sentiment_analyzer)
     except Exception:
         logger.warning("Failed to set admin UI dependencies at startup")
     

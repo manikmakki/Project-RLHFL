@@ -213,29 +213,26 @@ class SentimentAnalyzer:
     ) -> bool:
         """
         Determine if this interaction should be a golden example.
-        Golden examples are high-signal interactions that should be
-        preserved and always included in training data.
+        Golden examples are rare, high-signal interactions that should be
+        preserved and always included in training data. Designed to be
+        triggered sparingly (<20% of interactions).
         """
         text = user_message.lower()
 
-        # Criterion 1: Very high weight (multiple instruction signals + strong sentiment)
-        if weight >= 4.0:
+        # Criterion 1: Maxed-out weight (strong sentiment + instructions + substantive)
+        if weight >= 5.0:
             return True
 
-        # Criterion 2: Very strong explicit feedback
-        if abs(sentiment) >= 0.8:
-            return True
-
-        # Criterion 3: Explicit persistent directives (strict phrases only)
+        # Criterion 2: Explicit persistent directives with clear sentiment
         directive_phrases = [
             'from now on', 'going forward', 'in the future',
             'always do', 'never do', 'remember to',
         ]
-        if any(phrase in text for phrase in directive_phrases):
+        if abs(sentiment) >= 0.3 and any(phrase in text for phrase in directive_phrases):
             return True
 
-        # Criterion 4: Detailed corrections (strongly negative + substantive)
-        if sentiment < -0.5 and len(user_message) > 200:
+        # Criterion 3: Detailed corrections (strongly negative + substantive)
+        if sentiment < -0.6 and len(user_message) > 300:
             return True
 
         return False

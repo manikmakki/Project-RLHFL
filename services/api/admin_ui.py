@@ -25,15 +25,17 @@ memory_manager = None
 llm_proxy = None
 api_request_log = None
 prompt_interceptor = None
+sentiment_analyzer = None
 
 
-def set_dependencies(mm, proxy, request_log=None, interceptor=None):
+def set_dependencies(mm, proxy, request_log=None, interceptor=None, analyzer=None):
     """Set global dependencies from main.py."""
-    global memory_manager, llm_proxy, api_request_log, prompt_interceptor
+    global memory_manager, llm_proxy, api_request_log, prompt_interceptor, sentiment_analyzer
     memory_manager = mm
     llm_proxy = proxy
     api_request_log = request_log
     prompt_interceptor = interceptor
+    sentiment_analyzer = analyzer
 
 
 @admin_router.get("/", response_class=HTMLResponse)
@@ -351,6 +353,80 @@ async def toggle_golden(interaction_id: str):
         raise
     except Exception as e:
         logger.error(f"Error toggling golden status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/api/golden/re-evaluate")
+async def reevaluate_golden_examples():
+    """Re-evaluate all golden examples against current is_golden_example() criteria.
+    Un-goldens any that no longer qualify."""
+    try:
+        if not memory_manager:
+            raise HTTPException(status_code=503, detail="Memory manager not initialized")
+        if not sentiment_analyzer:
+            raise HTTPException(status_code=503, detail="Sentiment analyzer not initialized")
+
+        # Get all golden examples
+        golden_results = memory_manager.golden_collection.get(
+            include=["metadatas", "documents"]
+        )
+
+        if not golden_results['ids']:
+            return {"status": "complete", "total_golden": 0, "removed": 0, "kept": 0}
+
+        removed_ids = []
+        kept_count = 0
+
+        for i, interaction_id in enumerate(golden_results['ids']):
+            metadata = golden_results['metadatas'][i] if golden_results['metadatas'] else {}
+            document = golden_results['documents'][i] if golden_results['documents'] else ""
+
+            user_message = metadata.get('user_message', document or '')
+            stored_sentiment = float(metadata.get('sentiment', 0.0))
+            stored_weight = float(metadata.get('weight', 1.0))
+
+            # Re-evaluate with current criteria
+            still_golden = sentiment_analyzer.is_golden_example(
+                user_message=user_message,
+                sentiment=stored_sentiment,
+                weight=stored_weight,
+            )
+
+            if not still_golden:
+                removed_ids.append(interaction_id)
+                # Update metadata in main collection to reflect non-golden status
+                try:
+                    main_results = memory_manager.collection.get(
+                        ids=[interaction_id], include=["metadatas"]
+                    )
+                    if main_results['ids']:
+                        main_meta = main_results['metadatas'][0]
+                        main_meta['is_golden'] = False
+                        memory_manager.collection.update(
+                            ids=[interaction_id], metadatas=[main_meta]
+                        )
+                except Exception:
+                    pass  # Best-effort update of main collection
+            else:
+                kept_count += 1
+
+        # Bulk delete from golden collection
+        if removed_ids:
+            memory_manager.golden_collection.delete(ids=removed_ids)
+            logger.info(
+                f"Golden re-evaluation: removed {len(removed_ids)}, kept {kept_count}"
+            )
+
+        return {
+            "status": "complete",
+            "total_golden": len(golden_results['ids']),
+            "removed": len(removed_ids),
+            "kept": kept_count,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error re-evaluating golden examples: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -798,7 +798,9 @@
                         </div>
                         <div class="stat-row">
                             <span class="stat-label">Golden Examples</span>
-                            <span class="stat-value">${stats.memory.golden_examples || 0}</span>
+                            <span class="stat-value">${stats.memory.golden_examples || 0}
+                                <button class="warning" style="font-size:11px;padding:2px 8px;margin-left:8px;" onclick="reevaluateGolden()">Re-evaluate</button>
+                            </span>
                         </div>
                         <div class="stat-row">
                             <span class="stat-label">Positive Sentiment</span>
@@ -1261,6 +1263,25 @@
                     loadMemories(); // Reload the list
                 } else {
                     alert('Failed to toggle golden status');
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        async function reevaluateGolden() {
+            if (!confirm('Re-evaluate all golden examples against current criteria?\n\nThis will un-golden any interactions that no longer qualify.')) {
+                return;
+            }
+            try {
+                const response = await fetch('/admin/api/golden/re-evaluate', { method: 'POST' });
+                const data = await response.json();
+                if (response.ok) {
+                    alert(`Re-evaluation complete:\n\nPreviously golden: ${data.total_golden}\nRemoved: ${data.removed}\nKept: ${data.kept}`);
+                    loadStats();
+                    loadMemories();
+                } else {
+                    alert(`Failed: ${data.detail || 'Unknown error'}`);
                 }
             } catch (error) {
                 alert(`Error: ${error.message}`);
