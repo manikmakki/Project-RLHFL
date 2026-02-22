@@ -1673,7 +1673,7 @@
         }
 
         async function rollbackToCheckpoint(checkpointId) {
-            if (!confirm(`Rollback to checkpoint:\n${checkpointId}\n\nThe system will deploy this checkpoint's GGUF to the Ollama container.\nRequests will briefly return 503 during the model swap (~5-15s).`)) return;
+            if (!confirm(`Deploy checkpoint:\n${checkpointId}\n\nThe LoRA adapter will be applied to the base model in Ollama.\nRequests will briefly return 503 during the model swap (~5-15s).`)) return;
 
             try {
                 const response = await fetch(`/admin/api/model/rollback?checkpoint_id=${encodeURIComponent(checkpointId)}`, { method: 'POST' });
@@ -1726,7 +1726,7 @@
             let rows = checkpoints.map(cp => {
                 const cpId = cp.checkpoint_id || 'unknown';
                 const isCurrent = cpId === currentCpId;
-                const hasGguf = !!cp.gguf_model_path;
+                const hasAdapter = !!cp.adapter_path;
                 const deployed = cp.deployed;
                 const perplexity = cp.metrics?.perplexity;
                 const alignment = cp.metrics?.sentiment_alignment;
@@ -1744,12 +1744,12 @@
                         <td style="padding: 8px;">${samples}</td>
                         <td style="padding: 8px;">
                             ${deployed ? '<span class="badge positive">Deployed</span>' : '<span class="badge neutral">Not deployed</span>'}
-                            ${hasGguf ? ' <span class="badge" style="background: #667eea; color: white;">GGUF</span>' : ''}
+                            ${hasAdapter ? ' <span class="badge" style="background: #667eea; color: white;">LoRA</span>' : ''}
                         </td>
                         <td style="padding: 8px;">
-                            ${hasGguf && !isCurrent ? `<button class="warning" onclick="rollbackToCheckpoint('${cpId}')" style="font-size: 11px;">⏪ Rollback</button>` : ''}
-                            ${isCurrent ? '<span style="color: #999; font-size: 12px;">Current</span>' : ''}
-                            ${!hasGguf ? '<span style="color: #999; font-size: 12px;">No GGUF</span>' : ''}
+                            ${hasAdapter && !isCurrent ? `<button class="warning" onclick="rollbackToCheckpoint('${cpId}')" style="font-size: 11px;">⏪ Deploy</button>` : ''}
+                            ${isCurrent ? '<span style="color: #27ae60; font-size: 12px; font-weight: bold;">Active</span>' : ''}
+                            ${!hasAdapter ? '<span style="color: #999; font-size: 12px;">No adapter</span>' : ''}
                         </td>
                     </tr>`;
             }).join('');
@@ -1758,8 +1758,8 @@
                 <div class="card" style="margin-top: 20px;">
                     <h2>📦 Training Checkpoints</h2>
                     <p style="font-size: 13px; color: #666; margin-bottom: 15px;">
-                        After each training run, checkpoints are automatically converted to GGUF format and deployed to the Ollama container if they pass validation.
-                        Use the Rollback button to manually deploy a previous checkpoint.
+                        After each training run, LoRA adapters are deployed to Ollama via adapter layering if they pass validation.
+                        Use the Deploy button to switch to a different checkpoint.
                     </p>
                     <div style="overflow-x: auto;">
                         <table style="width: 100%; border-collapse: collapse; font-size: 13px;">

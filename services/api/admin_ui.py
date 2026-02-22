@@ -81,7 +81,7 @@ async def get_admin_stats():
         process = psutil.Process(os.getpid())
         memory_info = process.memory_info()
         
-        return {
+        result = {
             "training": {
                 "total_interactions": training_stats.total_interactions,
                 "new_since_training": training_stats.new_interactions_since_last_training,
@@ -107,6 +107,18 @@ async def get_admin_stats():
                 "cpu_percent": psutil.cpu_percent(interval=0.1)
             }
         }
+
+        # Fall back to current_checkpoint.json if llm_proxy doesn't track it
+        if not result["system"]["current_checkpoint"]:
+            try:
+                cp_file = Path(settings.checkpoints_path) / "current_checkpoint.json"
+                if cp_file.exists():
+                    with open(cp_file, "r") as f:
+                        result["system"]["current_checkpoint"] = json.load(f).get("checkpoint_id")
+            except Exception:
+                pass
+
+        return result
     except Exception as e:
         logger.error(f"Error getting admin stats: {e}", exc_info=True)
         return {
@@ -500,13 +512,14 @@ async def get_training_history():
                                 history_entry = {
                                     "timestamp": metadata.get("timestamp"),
                                     "train_loss": metadata.get("train_loss"),
+                                    "eval_loss": metadata.get("eval_loss"),
                                     "train_samples": metadata.get("train_samples"),
                                     "val_samples": metadata.get("val_samples"),
                                     "epochs": metadata.get("epochs"),
                                     "checkpoint_name": f"{checkpoint_dir.name} - Pass {pass_num} (Layers {layers})"
                                 }
 
-                                # Find the highest numbered checkpoint subdirectory
+                                # Try to get more detailed metrics from trainer_state.json
                                 checkpoint_subdirs = [d for d in pass_dir.iterdir() if d.is_dir() and d.name.startswith('checkpoint-')]
                                 if checkpoint_subdirs:
                                     checkpoint_subdirs.sort(key=lambda x: int(x.name.split('-')[1]) if x.name.split('-')[1].isdigit() else 0)
@@ -520,7 +533,8 @@ async def get_training_history():
                                             log_history = trainer_state.get("log_history", [])
                                             if log_history:
                                                 last_log = log_history[-1]
-                                                history_entry["eval_loss"] = last_log.get("eval_loss")
+                                                if last_log.get("eval_loss") is not None:
+                                                    history_entry["eval_loss"] = last_log.get("eval_loss")
                                                 history_entry["eval_runtime"] = last_log.get("eval_runtime")
                                                 history_entry["global_step"] = trainer_state.get("global_step")
                                         except Exception as e:
@@ -541,13 +555,14 @@ async def get_training_history():
                             history_entry = {
                                 "timestamp": metadata.get("timestamp"),
                                 "train_loss": metadata.get("train_loss"),
+                                "eval_loss": metadata.get("eval_loss"),
                                 "train_samples": metadata.get("train_samples"),
                                 "val_samples": metadata.get("val_samples"),
                                 "epochs": metadata.get("epochs"),
                                 "checkpoint_name": checkpoint_dir.name
                             }
 
-                            # Find the highest numbered checkpoint subdirectory
+                            # Try to get more detailed metrics from trainer_state.json
                             checkpoint_subdirs = [d for d in checkpoint_dir.iterdir() if d.is_dir() and d.name.startswith('checkpoint-')]
                             if checkpoint_subdirs:
                                 checkpoint_subdirs.sort(key=lambda x: int(x.name.split('-')[1]) if x.name.split('-')[1].isdigit() else 0)
@@ -561,7 +576,9 @@ async def get_training_history():
                                         log_history = trainer_state.get("log_history", [])
                                         if log_history:
                                             last_log = log_history[-1]
-                                            history_entry["eval_loss"] = last_log.get("eval_loss")
+                                            # Override with trainer_state values if available
+                                            if last_log.get("eval_loss") is not None:
+                                                history_entry["eval_loss"] = last_log.get("eval_loss")
                                             history_entry["eval_runtime"] = last_log.get("eval_runtime")
                                             history_entry["global_step"] = trainer_state.get("global_step")
                                     except Exception as e:
@@ -790,13 +807,16 @@ async def get_model_status():
             elif config:
                 result["external_model_name"] = config.llm_proxy.external_model_name
 
-        # Read current_checkpoint.json for GGUF and metrics info
+        # Read current_checkpoint.json for checkpoint ID, metrics, deployment info
         checkpoint_file = Path(settings.checkpoints_path) / "current_checkpoint.json"
         if checkpoint_file.exists():
             try:
                 with open(checkpoint_file, "r") as f:
                     cp_data = json.load(f)
-                result["deployed_gguf"] = cp_data.get("gguf_model_path")
+                # Use checkpoint_id from file if not set by llm_proxy
+                if not result["current_checkpoint_id"]:
+                    result["current_checkpoint_id"] = cp_data.get("checkpoint_id")
+                result["adapter_path"] = cp_data.get("adapter_path")
                 result["deployed_metrics"] = cp_data.get("metrics")
                 result["deployed_at"] = cp_data.get("deployed_at")
             except Exception:
@@ -1063,21 +1083,98 @@ async def get_training_progress():
 
 
 @admin_router.post("/api/model/rollback")
-async def rollback_model(checkpoint_id: str = Query(..., description="Checkpoint ID to rollback to")):
-    """Rollback to a previous checkpoint. In proxy mode, model management is handled by Ollama via the trainer."""
-    raise HTTPException(
-        status_code=501,
-        detail="Model rollback is managed by the trainer service via Ollama. Use the trainer's deployment pipeline to roll back."
-    )
+async def rollback_model(checkpoint_id: str = Query(..., description="Checkpoint ID to deploy")):
+    """Deploy a specific checkpoint's LoRA adapter to Ollama."""
+    try:
+        from shared.ollama_deployer import OllamaDeployer
+
+        checkpoints_path = Path(settings.checkpoints_path)
+        checkpoint_dir = checkpoints_path / checkpoint_id
+
+        if not checkpoint_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {checkpoint_id}")
+
+        adapter_dir = checkpoint_dir / "adapter"
+        if not (adapter_dir / "adapter_model.safetensors").exists():
+            raise HTTPException(status_code=400, detail=f"No adapter found in checkpoint {checkpoint_id}")
+
+        config = load_config()
+        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
+        model_name = config.training.ollama_model_name
+
+        success = await asyncio.to_thread(
+            deployer.deploy_model,
+            adapter_path=str(adapter_dir),
+            model_name=model_name,
+            base_model_name=model_name,
+            checkpoint_id=checkpoint_id,
+        )
+
+        if not success:
+            raise HTTPException(status_code=500, detail="Ollama deployment failed. Check logs.")
+
+        # Update current_checkpoint.json
+        metadata_file = checkpoints_path / f"{checkpoint_id}_metadata.json"
+        metrics = {}
+        if metadata_file.exists():
+            with open(metadata_file) as f:
+                meta = json.load(f)
+                metrics = meta.get("metrics", {})
+                meta["deployed"] = True
+            with open(metadata_file, "w") as f:
+                json.dump(meta, f, indent=2)
+
+        from datetime import datetime
+        cp_data = {
+            "checkpoint_id": checkpoint_id,
+            "adapter_path": str(adapter_dir),
+            "metrics": metrics,
+            "deployed_at": datetime.now().isoformat(),
+        }
+        with open(checkpoints_path / "current_checkpoint.json", "w") as f:
+            json.dump(cp_data, f, indent=2)
+
+        return {"success": True, "message": f"Deployed checkpoint {checkpoint_id} to Ollama as {model_name}"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deploying checkpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @admin_router.post("/api/model/reload-base")
 async def reload_base_model():
-    """Reload the original base model. In proxy mode, model management is handled by Ollama."""
-    raise HTTPException(
-        status_code=501,
-        detail="Model reload is managed by the trainer service via Ollama."
-    )
+    """Revert to the base model by recreating it without any adapter."""
+    try:
+        from shared.ollama_deployer import OllamaDeployer
+        import requests as req
+
+        config = load_config()
+        model_name = config.training.ollama_model_name
+        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
+
+        # Unload current model
+        deployer._unload_model(model_name)
+
+        # Recreate from base (no adapter)
+        response = req.post(
+            f"{deployer.ollama_api}/create",
+            json={"model": model_name, "from": model_name, "stream": False},
+            timeout=120,
+        )
+        response.raise_for_status()
+
+        # Clear current_checkpoint.json
+        cp_file = Path(settings.checkpoints_path) / "current_checkpoint.json"
+        if cp_file.exists():
+            cp_file.unlink()
+
+        return {"success": True, "message": f"Reverted {model_name} to base model (no adapter)"}
+
+    except Exception as e:
+        logger.error(f"Error reverting to base model: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ------------------------------------------------------------------ #
@@ -1090,8 +1187,8 @@ async def deploy_checkpoint_to_ollama(checkpoint_id: str = Query(..., descriptio
     Deploy a specific checkpoint to Ollama.
 
     This will:
-    1. Find the GGUF file for the checkpoint
-    2. Deploy it to Ollama (replaces current model)
+    1. Find the LoRA adapter for the checkpoint
+    2. Deploy it to Ollama via adapter layering (replaces current model)
     3. Update config pointer
     4. Next API request will use the deployed model
     """
@@ -1100,35 +1197,34 @@ async def deploy_checkpoint_to_ollama(checkpoint_id: str = Query(..., descriptio
         sys.path.insert(0, '/app/trainer')
         from shared.ollama_deployer import OllamaDeployer
 
-        # Find checkpoint GGUF
         checkpoints_path = Path(settings.checkpoints_path)
         checkpoint_dir = checkpoints_path / checkpoint_id
 
         if not checkpoint_dir.exists():
             raise HTTPException(status_code=404, detail=f"Checkpoint directory not found: {checkpoint_id}")
 
-        # Look for GGUF file
-        gguf_files = list(checkpoint_dir.glob("*.gguf"))
-        if not gguf_files:
+        # Look for adapter directory
+        adapter_dir = checkpoint_dir / "adapter"
+        adapter_file = adapter_dir / "adapter_model.safetensors"
+        if not adapter_file.exists():
             raise HTTPException(
                 status_code=400,
-                detail=f"No GGUF file found in checkpoint {checkpoint_id}. Was GGUF conversion enabled?"
+                detail=f"No adapter found in checkpoint {checkpoint_id}. Expected {adapter_file}"
             )
-
-        gguf_path = str(gguf_files[0])
 
         # Load config
         config = load_config()
 
-        # Deploy to Ollama
+        # Deploy to Ollama via adapter layering
         logger.info(f"Admin UI: Deploying checkpoint {checkpoint_id} to Ollama")
         deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
 
         model_name = config.training.ollama_model_name
         success = deployer.deploy_model(
-            gguf_path=gguf_path,
+            adapter_path=str(adapter_dir),
             model_name=model_name,
-            checkpoint_id=checkpoint_id
+            base_model_name=model_name,
+            checkpoint_id=checkpoint_id,
         )
 
         if success:
@@ -1140,7 +1236,7 @@ async def deploy_checkpoint_to_ollama(checkpoint_id: str = Query(..., descriptio
                 "message": f"Checkpoint {checkpoint_id} deployed to Ollama as {model_name}",
                 "checkpoint_id": checkpoint_id,
                 "model_name": model_name,
-                "gguf_path": gguf_path
+                "adapter_path": str(adapter_dir)
             }
         else:
             raise HTTPException(

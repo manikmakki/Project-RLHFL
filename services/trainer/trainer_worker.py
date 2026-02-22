@@ -311,21 +311,17 @@ class TrainerWorker:
             gc.collect()
 
     def _merge_and_deploy(self, adapter_path, checkpoint_id, checkpoint_dir, metadata):
-        """Merge adapter with base model and deploy to Ollama via native import + quantization."""
+        """Deploy LoRA adapter to Ollama via adapter layering (no merge needed)."""
         from shared.ollama_deployer import OllamaDeployer
 
-        # Step 1: Merge adapter into full model (safetensors)
-        merged_dir = f"{checkpoint_dir}/merged_model"
-        logger.info(f"Merging adapter with base model -> {merged_dir}")
-        self.lora_trainer.merge_adapter(adapter_path, merged_dir)
-
-        # Step 2: Deploy to Ollama (handles Modelfile, quantization, create)
+        # Deploy adapter directly to Ollama (layers adapter on base model)
         deployer = OllamaDeployer(ollama_base_url=self.config.llm_proxy.base_url)
         model_name = self.config.training.ollama_model_name
 
         success = deployer.deploy_model(
-            merged_model_path=merged_dir,
+            adapter_path=adapter_path,
             model_name=model_name,
+            base_model_name=model_name,  # Layer on existing base
             checkpoint_id=checkpoint_id,
         )
 
@@ -340,10 +336,6 @@ class TrainerWorker:
 
         # Notify API to resume inference
         self._notify_api_reload()
-
-        # Clean up merged model directory (large, ~14GB+)
-        logger.info(f"Cleaning up merged model: {merged_dir}")
-        shutil.rmtree(merged_dir, ignore_errors=True)
 
         # Rotate old checkpoints
         deployer.rotate_checkpoints(keep_count=self.config.training.max_checkpoint_count)
