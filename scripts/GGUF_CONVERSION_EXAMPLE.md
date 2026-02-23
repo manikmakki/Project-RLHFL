@@ -64,7 +64,7 @@ FROM /checkpoints/checkpoint_20260217_050631/converted_Q4_K_M.gguf
 TEMPLATE """<|start|>user<|message|>{{ .Prompt }}<|end|><|start|>assistant<|channel|>final<|message|>"""
 EOF
 
-ollama create gpt-oss:20b-ft -f /tmp/Modelfile
+ollama create qwen3-abliterated:30b-a3b-ft -f /tmp/Modelfile
 ```
 
 ## Output Types Explained

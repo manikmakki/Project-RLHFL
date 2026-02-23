@@ -77,10 +77,10 @@ def normalize_model_name(model_name: str) -> str:
     """
     Normalize model name by stripping Ollama-style tags.
     Ollama uses 'model:tag' format where tag defaults to 'latest'.
-    This allows clients to request 'gpt-oss:20b' or 'gpt-oss:latest'.
+    This allows clients to request 'model:tag' or 'model:latest'.
     """
     if ':' in model_name:
-        # Strip the tag part (e.g., 'gpt-oss:latest' -> 'gpt-oss')
+        # Strip the tag part (e.g., 'model:latest' -> 'model')
         return model_name.split(':')[0]
     return model_name
 
@@ -180,10 +180,9 @@ async def store_interaction_background(
 
 def parse_model_response(content: str) -> dict:
     """
-    Parse the model's response to extract thinking (analysis) and final content.
-    The model outputs special channel tags:
-    - <|channel|>analysis<|message|>...text...<|end|> for chain-of-thought reasoning
-    - <|channel|>final<|message|>...text...<|end|> for the final user-facing response
+    Parse the model's response to extract thinking and final content.
+    Handles Qwen3-style <think>...</think> tags for chain-of-thought reasoning.
+    Ollama typically handles this natively, but this is a fallback for raw text.
 
     Returns dict with 'thinking' and 'content' fields.
     """
@@ -194,28 +193,14 @@ def parse_model_response(content: str) -> dict:
         'content': content  # Default to full content if no parsing needed
     }
 
-    # Extract analysis/thinking section
-    analysis_match = re.search(
-        r'<\|channel\|>analysis<\|message\|>(.*?)(?:<\|end\|>|<\|channel\|>)',
-        content,
-        re.DOTALL
-    )
+    # Extract <think>...</think> section (Qwen3 format)
+    think_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
 
-    # Extract final content section
-    final_match = re.search(
-        r'<\|channel\|>final<\|message\|>(.*?)(?:<\|end\|>|<\|return\|>|$)',
-        content,
-        re.DOTALL
-    )
-
-    if analysis_match:
-        result['thinking'] = analysis_match.group(1).strip()
-
-    if final_match:
-        result['content'] = final_match.group(1).strip()
-    elif analysis_match:
-        # If we found analysis but no final section, content should be empty
-        result['content'] = ''
+    if think_match:
+        result['thinking'] = think_match.group(1).strip()
+        # Content is everything after the closing </think> tag
+        after_think = content[think_match.end():].strip()
+        result['content'] = after_think if after_think else ''
 
     return result
 
@@ -476,7 +461,7 @@ async def health_check():
 @app.get("/v1/models")
 async def list_models():
     """List available models (OpenAI-compatible)."""
-    model_id = config.model.model_id if config else "gpt-oss-20b"
+    model_id = config.model.model_id if config else "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M"
     return ModelsResponse(
         object="list",
         data=[
@@ -501,7 +486,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
     try:
         # Use configured model if not specified, or validate the requested model matches
-        configured_model_id = config.model.model_id if config else "gpt-oss-20b"
+        configured_model_id = config.model.model_id if config else "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M"
         request_model = request.model or configured_model_id
 
         # Normalize model name to handle Ollama-style tags (e.g., 'model:latest')

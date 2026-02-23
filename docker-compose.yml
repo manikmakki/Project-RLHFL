@@ -14,7 +14,7 @@ services:
       - ./volumes/config:/config
       - ./volumes/checkpoints:/checkpoints
     environment:
-      - BASE_MODEL_PATH=/models/gpt-oss-20b-base
+      - BASE_MODEL_PATH=/models/Qwen3-30B-A3B
       - CONFIG_PATH=/config/system_config.yaml
       - DATA_PATH=/data
       - CHECKPOINTS_PATH=/checkpoints
@@ -39,7 +39,7 @@ services:
       - ./volumes/config:/config
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - BASE_MODEL_PATH=/models/gpt-oss-20b-base
+      - BASE_MODEL_PATH=/models/Qwen3-30B-A3B
       - CONFIG_PATH=/config/system_config.yaml
       - DATA_PATH=/data
       - CHECKPOINTS_PATH=/checkpoints

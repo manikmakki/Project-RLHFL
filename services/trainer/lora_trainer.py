@@ -1,7 +1,7 @@
 """
 Project RLHFL - LoRA Trainer (CPU-only)
 
-Trains LoRA adapters for GPT-OSS 20B using CPU-only training.
+Trains LoRA adapters using CPU-only training.
 Supports SFT (Supervised Fine-Tuning) and DPO (Direct Preference Optimization).
 
 Adapters are parameter-efficient (~10-20MB), requiring only ~1-2% of full
@@ -34,7 +34,7 @@ from shared.config import SystemConfig
 logger = logging.getLogger(__name__)
 
 # Monkey-patch transformers to bypass PyTorch 2.6 requirement for torch.load
-# Safe because we trust official GPT-OSS model files from HuggingFace
+# Safe because we trust official model files from HuggingFace
 try:
     from transformers.utils import import_utils
     from transformers import modeling_utils
@@ -57,7 +57,7 @@ except ImportError as e:
 
 
 class LoRATrainer:
-    """Train LoRA adapters for the GPT-OSS base model (CPU-only)."""
+    """Train LoRA adapters for the base model (CPU-only)."""
 
     def __init__(self, config: SystemConfig, base_model_path: str):
         self.config = config
@@ -69,10 +69,6 @@ class LoRATrainer:
         target_modules = [
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
-            # GPT-OSS MoE expert FFN components
-            "mlp.experts.down_proj",
-            "mlp.experts.gate_up_proj",
-            "mlp.experts.up_proj",
         ]
         return LoraConfig(
             r=self.config.training.lora_rank,
@@ -84,14 +80,14 @@ class LoRATrainer:
         )
 
     def _load_tokenizer(self):
-        """Load tokenizer for GPT-OSS models."""
-        tokenizer = AutoTokenizer.from_pretrained(self.base_model_path)
+        """Load tokenizer for the base model."""
+        tokenizer = AutoTokenizer.from_pretrained(self.base_model_path, trust_remote_code=True)
         logger.info(f"Tokenizer loaded: {type(tokenizer).__name__}, vocab_size={tokenizer.vocab_size}")
 
         if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token or "<|endoftext|>"
-        if tokenizer.eos_token is None:
-            tokenizer.eos_token = "<|return|>"
+            tokenizer.pad_token = tokenizer.eos_token
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = "<|endoftext|>"
 
         return tokenizer
 
@@ -322,13 +318,13 @@ class LoRATrainer:
         return adapter_path, metrics
 
     def _prepare_dataset(self, dataset: List[Dict[str, Any]], tokenizer) -> Dataset:
-        """Tokenize SFT dataset using GPT-OSS Harmony format."""
+        """Tokenize SFT dataset using ChatML format."""
 
         def format_example(example):
             prompt = example["prompt"]
             completion = example["completion"]
 
-            prompt_text = f"<|start|>user<|message|>{prompt}<|end|><|start|>assistant<|channel|>final<|message|>"
+            prompt_text = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
             prompt_tokens = tokenizer(
                 prompt_text,
                 truncation=True,
@@ -338,7 +334,7 @@ class LoRATrainer:
             )
             prompt_len = len(prompt_tokens["input_ids"])
 
-            full_text = f"<|start|>user<|message|>{prompt}<|end|><|start|>assistant<|channel|>final<|message|>{completion}<|return|>"
+            full_text = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n{completion}<|im_end|>"
             tokens = tokenizer(
                 full_text,
                 truncation=True,

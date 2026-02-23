@@ -24,8 +24,10 @@ from pydantic_settings import BaseSettings
 
 
 class ModelConfig(BaseModel):
-    model_id: str = "gpt-oss:20b"  # Model identifier for API responses
-    base_model_path: str = "/models/gpt-oss-20b-Q4_K_M.gguf"
+    model_id: str = "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M"  # Model identifier for API responses / Ollama tag
+    base_model_path: str = "/models/Qwen3-30B-A3B"  # HF safetensors for training
+    ollama_base_model: str = "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M"  # Ollama base model tag (for adapter FROM)
+    hf_model_id: str = "Qwen/Qwen3-30B-A3B"  # HuggingFace model ID (reference)
     context_length: int = 8192
     temperature: float = 0.7
     top_p: float = 0.9
@@ -72,7 +74,7 @@ class TrainingConfig(BaseModel):
 
     # Ollama deployment
     enable_ollama_deployment: bool = False  # Deploy to Ollama after training
-    ollama_model_name: str = "gpt-oss:20b"  # Ollama model name to update
+    ollama_model_name: str = "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M"  # Ollama model name to update
 
     # Checkpoint storage management
     max_checkpoint_count: int = 3  # Max checkpoint dirs to keep
@@ -179,8 +181,8 @@ class SystemConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_path: str = os.getenv("MODEL_PATH", "/models/gpt-oss-20b-Q4_K_M.gguf")
-    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/gpt-oss-20b-base")
+    model_path: str = os.getenv("MODEL_PATH", "/models/Qwen3-30B-A3B")
+    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/Qwen3-30B-A3B")
     config_path: str = os.getenv("CONFIG_PATH", "/config/system_config.yaml")
     data_path: str = os.getenv("DATA_PATH", "/data")
     checkpoints_path: str = os.getenv("CHECKPOINTS_PATH", "/checkpoints")

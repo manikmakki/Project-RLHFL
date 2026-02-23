@@ -23,29 +23,25 @@ fi
 git lfs install
 
 # Download GGUF model for inference (optional - can use Ollama instead)
-echo "Step 1: Downloading GPT-OSS-20B GGUF (Q4_K_M quantization)..."
-echo "This is optional if you're using Ollama for inference"
-echo "Skip this if you have 'ollama pull gpt-oss:20b' already"
+echo "Step 1: GGUF model for Ollama inference..."
+echo "This is optional if you already have the model in Ollama"
+echo "Skip this if you have 'ollama pull huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M' already"
 echo ""
 
-if [ -f "$MODELS_DIR/gpt-oss-20b-Q4_K_M.gguf" ]; then
-    echo "GGUF model already exists, skipping download."
-else
-    echo "Skipping GGUF download - use Ollama instead: ollama pull gpt-oss:20b"
-    echo "If you need GGUF, download from: https://huggingface.co/openai/gpt-oss-20b-gguf"
-fi
+echo "Pull via Ollama:"
+echo "  ollama pull huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M-instruct-2507-q4_K_M"
 
 echo ""
 
 # Download HuggingFace model for training
-echo "Step 2: Downloading GPT-OSS-20B (HuggingFace format)..."
-echo "This is the base model used for training (~40 GB)"
+echo "Step 2: Downloading Qwen3-30B-A3B (HuggingFace format)..."
+echo "This is the base model used for LoRA training (~60 GB)"
 echo ""
 
-if [ -d "$MODELS_DIR/gpt-oss-20b-base" ] && [ -f "$MODELS_DIR/gpt-oss-20b-base/config.json" ]; then
+if [ -d "$MODELS_DIR/Qwen3-30B-A3B" ] && [ -f "$MODELS_DIR/Qwen3-30B-A3B/config.json" ]; then
     echo "HuggingFace model already exists, skipping download."
 else
-    git clone https://huggingface.co/openai/gpt-oss-20b "$MODELS_DIR/gpt-oss-20b-base"
+    git clone https://huggingface.co/Qwen/Qwen3-30B-A3B "$MODELS_DIR/Qwen3-30B-A3B"
     echo "✓ HuggingFace model downloaded"
 fi
 
@@ -55,10 +51,8 @@ echo "Model download complete!"
 echo "=================================================="
 echo ""
 echo "Models downloaded:"
-echo "  - Inference: Use Ollama (ollama pull gpt-oss:20b)"
-echo "  - Training (HF):    $MODELS_DIR/gpt-oss-20b-base"
-echo ""
-echo "Total size: ~40 GB (training base model)"
+echo "  - Inference: Use Ollama (ollama pull huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M)"
+echo "  - Training (HF):    $MODELS_DIR/Qwen3-30B-A3B"
 echo ""
 echo "Next steps:"
 echo "  1. Review and customize volumes/config/system_config.yaml if needed"

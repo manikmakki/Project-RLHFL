@@ -1660,7 +1660,7 @@
         }
 
         async function triggerTraining() {
-            if (!confirm('Trigger a training run now?\n\nLow-weight entries will be cleaned up before training begins.\nAfter training completes, the checkpoint will be converted to GGUF and automatically deployed to Ollama if it passes validation.\n\nTraining will start within ~30 seconds.')) return;
+            if (!confirm('Trigger a training run now?\n\nLow-weight entries will be cleaned up before training begins.\nAfter training completes, the LoRA adapter will be automatically deployed to Ollama if it passes validation.\n\nTraining will start within ~30 seconds.')) return;
 
             try {
                 const response = await fetch('/admin/api/training/trigger', { method: 'POST' });
@@ -1676,7 +1676,7 @@
         }
 
         async function reloadBaseModel() {
-            if (!confirm('Revert to the original base model?\n\nThis will deploy the base GGUF model to Ollama, replacing the current fine-tuned model.\nFine-tuned checkpoints are preserved and can be re-deployed later.')) return;
+            if (!confirm('Revert to the original base model?\n\nThis will replace the current fine-tuned model with the base model in Ollama.\nFine-tuned checkpoints are preserved and can be re-deployed later.')) return;
 
             try {
                 const response = await fetch('/admin/api/model/reload-base', { method: 'POST' });
@@ -1738,7 +1738,7 @@
                         <h2>📦 Training Checkpoints</h2>
                         <p style="text-align: center; color: #999; padding: 20px;">
                             No checkpoints yet. Click "Trigger Training Now" to create your first checkpoint.<br/>
-                            After training, checkpoints are automatically converted to GGUF and deployed to Ollama.
+                            After training, LoRA adapters are automatically deployed to Ollama.
                         </p>
                     </div>`;
                 return;

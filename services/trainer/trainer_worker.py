@@ -317,11 +317,12 @@ class TrainerWorker:
         # Deploy adapter directly to Ollama (layers adapter on base model)
         deployer = OllamaDeployer(ollama_base_url=self.config.llm_proxy.base_url)
         model_name = self.config.training.ollama_model_name
+        base_model = self.config.model.ollama_base_model
 
         success = deployer.deploy_model(
             adapter_path=adapter_path,
             model_name=model_name,
-            base_model_name=model_name,  # Layer on existing base
+            base_model_name=base_model,
             checkpoint_id=checkpoint_id,
         )
 

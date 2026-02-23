@@ -56,7 +56,7 @@ def convert_model_to_safetensors(model_path: str):
         sys.exit(1)
 
 if __name__ == "__main__":
-    model_path = "/opt/project-rlhfl/volumes/models/gpt-oss-20b-base"
+    model_path = "/opt/project-rlhfl/volumes/models/Qwen3-30B-A3B"
 
     if not Path(model_path).exists():
         print(f"Error: Model path {model_path} does not exist")

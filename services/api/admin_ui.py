@@ -1228,6 +1228,7 @@ async def reload_base_model():
 
         config = load_config()
         model_name = config.training.ollama_model_name
+        base_model = config.model.ollama_base_model
         deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
 
         # Unload current model
@@ -1236,10 +1237,13 @@ async def reload_base_model():
         # Recreate from base (no adapter)
         response = req.post(
             f"{deployer.ollama_api}/create",
-            json={"model": model_name, "from": model_name, "stream": False},
+            json={"model": model_name, "from": base_model, "stream": False},
             timeout=120,
         )
         response.raise_for_status()
+
+        # Update config pointer
+        deployer.update_config_pointer(model_name)
 
         # Clear current_checkpoint.json
         cp_file = Path(settings.checkpoints_path) / "current_checkpoint.json"
@@ -1296,10 +1300,11 @@ async def deploy_checkpoint_to_ollama(checkpoint_id: str = Query(..., descriptio
         deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
 
         model_name = config.training.ollama_model_name
+        base_model = config.model.ollama_base_model
         success = deployer.deploy_model(
             adapter_path=str(adapter_dir),
             model_name=model_name,
-            base_model_name=model_name,
+            base_model_name=base_model,
             checkpoint_id=checkpoint_id,
         )
 
@@ -1332,7 +1337,7 @@ async def deploy_base_model_to_ollama():
     """
     Deploy the original base model to Ollama.
 
-    This reverts to the unmodified gpt-oss:20b model.
+    This reverts to the unmodified base model (configured in system_config.yaml).
     """
     try:
         import sys
@@ -1343,16 +1348,14 @@ async def deploy_base_model_to_ollama():
         # Load config
         config = load_config()
 
-        logger.info("Admin UI: Reverting to base model in Ollama")
+        base_model = config.model.ollama_base_model
+        logger.info(f"Admin UI: Reverting to base model {base_model} in Ollama")
         deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
 
-        model_name = config.training.ollama_model_name
-
         # Pull the original base model from Ollama registry
-        # This assumes the base model is available as "gpt-oss:20b" in Ollama
         try:
             result = subprocess.run(
-                ["ollama", "pull", "gpt-oss:20b"],
+                ["ollama", "pull", base_model],
                 capture_output=True,
                 text=True,
                 timeout=600
@@ -1360,12 +1363,12 @@ async def deploy_base_model_to_ollama():
 
             if result.returncode == 0:
                 # Update config to point to base model
-                deployer.update_config_pointer("gpt-oss:20b")
+                deployer.update_config_pointer(base_model)
 
                 return {
                     "success": True,
-                    "message": "Reverted to base gpt-oss:20b model",
-                    "model_name": "gpt-oss:20b"
+                    "message": f"Reverted to base {base_model} model",
+                    "model_name": base_model
                 }
             else:
                 raise HTTPException(

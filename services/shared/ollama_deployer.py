@@ -26,8 +26,8 @@ class OllamaDeployer:
     def deploy_model(
         self,
         adapter_path: str,
-        model_name: str = "gpt-oss:20b",
-        base_model_name: str = "gpt-oss:20b",
+        model_name: str = None,
+        base_model_name: str = None,
         checkpoint_id: str = None,
     ) -> bool:
         """

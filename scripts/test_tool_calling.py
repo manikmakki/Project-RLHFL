@@ -20,7 +20,7 @@ def test_backward_compatibility():
     response = requests.post(
         f"{BASE_URL}/v1/chat/completions",
         json={
-            "model": "gpt-oss:20b",
+            "model": "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M",
             "messages": [
                 {"role": "user", "content": "Hello! How are you?"}
             ]
@@ -52,7 +52,7 @@ def test_tool_calling():
     response = requests.post(
         f"{BASE_URL}/v1/chat/completions",
         json={
-            "model": "gpt-oss:20b",
+            "model": "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M",
             "messages": [
                 {"role": "user", "content": "What's the weather like in San Francisco?"}
             ],
@@ -125,7 +125,7 @@ def test_tool_result_handling(tool_calls):
     response = requests.post(
         f"{BASE_URL}/v1/chat/completions",
         json={
-            "model": "gpt-oss:20b",
+            "model": "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M",
             "messages": [
                 {"role": "user", "content": "What's the weather like in San Francisco?"},
                 {
