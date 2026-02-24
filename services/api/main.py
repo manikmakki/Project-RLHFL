@@ -568,7 +568,7 @@ async def chat_completions(request: ChatCompletionRequest):
         psyche_active = psyche and psyche.enabled
         client_temperature = request.temperature
         client_top_p = request.top_p
-        if psyche_active and config.psyche.override_client_params:
+        if psyche_active and config.psyche.override_client_params and not request.tools:
             logger.debug(
                 f"Psyche: stripping client params (temp={request.temperature}, top_p={request.top_p})"
             )
@@ -599,7 +599,7 @@ async def chat_completions(request: ChatCompletionRequest):
         # --- Non-streaming path ---
         start_time = time.time()
 
-        if psyche_active and psyche.refinement_enabled:
+        if psyche_active and psyche.refinement_enabled and not request.tools:
             # Psyche v2: single refine() call handles generation + refinement
             try:
                 refinement_result = await psyche.refine(
@@ -672,7 +672,7 @@ async def chat_completions(request: ChatCompletionRequest):
                 thinking = response_dict.get("thinking")
                 finish_reason = response_dict.get("finish_reason", "stop")
 
-        elif psyche_active:
+        elif psyche_active and not request.tools:
             # Psyche v1 legacy: pre_process → generate → post_process
             psyche_pre_result = None
             try:
@@ -914,16 +914,20 @@ async def stream_chat_completion(
         use_refinement = psyche_active and psyche.refinement_enabled
 
         # ----------------------------------------------------------------
-        # When psyche/refinement or tools are active, ALL internal LLM
+        # When psyche/refinement is active (and no tools), ALL internal LLM
         # generation is non-streaming. Psyche needs the complete response
         # to evaluate/refine. The final approved response is delivered
         # as SSE chunks to the client.
+        #
+        # When tools are present, Psyche is bypassed entirely — the request
+        # goes straight to direct generation to ensure tool calls are never
+        # intercepted or modified.
         #
         # When psyche is disabled, true token-by-token streaming is used.
         # ----------------------------------------------------------------
 
         if use_refinement or request.tools:
-            if use_refinement:
+            if use_refinement and not request.tools:
                 logger.debug("Streaming with psyche refinement: running refine() then converting to SSE")
 
                 try:
@@ -997,8 +1001,8 @@ async def stream_chat_completion(
                     finish_reason = response_dict.get("finish_reason", "stop")
 
             else:
-                # Tools present but no refinement — direct generation
-                logger.debug("Streaming with tools: generating complete response then converting to SSE")
+                # Tools present — direct generation, bypassing Psyche entirely
+                logger.debug("Streaming with tools: direct generation (Psyche bypassed), converting to SSE")
                 response_dict = await llm_proxy.generate(
                     messages=messages_with_context,
                     temperature=request.temperature,
@@ -1378,11 +1382,14 @@ async def ollama_chat(request: Request):
             logger.debug(f"Request body preview: {request_body[:500]}")
 
         # --- Psyche processing ---
+        has_tools_in_request = bool(ollama_req.get("tools"))
         psyche_active = psyche and psyche.enabled and messages
         use_refinement = psyche_active and psyche.refinement_enabled
 
-        # Strip client sampling params when Psyche controls them
-        if psyche_active and config.psyche.override_client_params:
+        # Strip client sampling params when Psyche controls them — but NEVER for tool requests.
+        # Tools require the model to produce exact structured output; any param interference
+        # can silently break tool call generation.
+        if psyche_active and config.psyche.override_client_params and not has_tools_in_request:
             opts = ollama_req.get("options", {})
             stripped = {k: v for k, v in opts.items() if k not in ("temperature", "top_p", "top_k")}
             if stripped != opts:
@@ -1470,7 +1477,7 @@ async def ollama_chat(request: Request):
             start_time = time.time()
 
             try:
-                if refinement_result is not None:
+                if refinement_result is not None and not has_tools_in_request:
                     # --- Psyche v2: refinement already completed, synthesize Ollama response ---
                     resp_content = refinement_result.best_response_dict.get("content") or ""
                     accumulated_response = resp_content
@@ -1522,7 +1529,7 @@ async def ollama_chat(request: Request):
                         except Exception as store_err:
                             logger.error(f"Failed to store refusal: {store_err}")
 
-                elif psyche_pre_result is not None:
+                elif psyche_pre_result is not None and not has_tools_in_request:
                     # --- Legacy psyche: buffer, post-process, deliver ---
                     logger.debug("Legacy psyche on /api/chat: buffering response for evaluation")
                     buffered_lines = []
