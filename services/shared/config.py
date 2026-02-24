@@ -19,18 +19,16 @@ import os
 import yaml
 from pathlib import Path
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 
 
 class ModelConfig(BaseModel):
-    model_id: str = "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M"  # Model identifier for API responses / Ollama tag
-    base_model_path: str = "/models/Qwen3-30B-A3B"  # HF safetensors for training
-    ollama_base_model: str = "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M"  # Ollama base model tag (for adapter FROM)
-    hf_model_id: str = "Qwen/Qwen3-30B-A3B"  # HuggingFace model ID (reference)
+    model_id: str = "dolphin3:8b"  # Model identifier for API responses / Ollama tag
+    base_model_path: str = "/models/Dolphin3.0-Llama3.1-8B"  # HF safetensors for training
+    ollama_base_model: str = "dolphin3:8b"  # Ollama base model tag (for adapter FROM)
+    hf_model_id: str = "dphn/Dolphin3.0-Llama3.1-8B"  # HuggingFace model ID (reference)
     context_length: int = 8192
-    temperature: float = 0.7
-    top_p: float = 0.9
     max_tokens: int = 2048
     n_threads: int = 4
     response_format: str = "openai"  # "openai" or "openclaw"
@@ -74,7 +72,7 @@ class TrainingConfig(BaseModel):
 
     # Ollama deployment
     enable_ollama_deployment: bool = False  # Deploy to Ollama after training
-    ollama_model_name: str = "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M"  # Ollama model name to update
+    ollama_model_name: str = "dolphin3:8b"  # Ollama model name to update
 
     # Checkpoint storage management
     max_checkpoint_count: int = 3  # Max checkpoint dirs to keep
@@ -135,30 +133,62 @@ class PsycheConfig(BaseModel):
     """Configuration for the Psyche module (Id / Ego / Superego)."""
     enabled: bool = True
 
+    # Multi-model roles (empty = use main model from llm_proxy.external_model_name)
+    id_model: str = ""           # Small reward/desire model (e.g. qwen2.5:1.5b-instruct)
+    ego_model: str = ""          # Response generation model (e.g. dolphin3:8b)
+    superego_model: str = ""     # Critique/optimization model (e.g. phi4-mini:3.8b)
+
+    # Refinement loop
+    refinement_enabled: bool = True
+    max_refinement_turns: int = 5
+    quality_threshold: float = 0.7       # Accept response at or above this score
+    min_quality_for_accept: float = 0.5  # Accept even below threshold if best after max turns
+    complexity_bypass_chars: int = 50    # Skip refinement for very short prompts
+    refinement_bypass_tools: bool = True  # Skip refinement when tools are present
+
+    # Client parameter control
+    override_client_params: bool = True  # Strip client-sent temp/top_p/top_k
+
     # Id Engine (reward-driven)
     id_enabled: bool = True
-    id_session_window: int = 10  # Recent interactions to track per session
-    id_reward_prompt_threshold: float = 0.3  # Only inject reward context above this magnitude
+    id_session_window: int = 10
+    id_reward_prompt_threshold: float = 0.3
 
-    # Ego Fast (per-request reasoning)
+    # Ego Fast (per-request reasoning) — legacy, used only when refinement_enabled=False
     ego_fast_enabled: bool = True
-    ego_reasoning_prompt: bool = True  # Inject think-plan-act-reflect template
-    ego_parse_reflection: bool = True  # Parse self-critique from output
+    ego_reasoning_prompt: bool = True
+    ego_parse_reflection: bool = True
 
     # Ego Slow (background strategy)
     ego_slow_enabled: bool = True
     ego_pattern_analysis_interval_hours: int = 4
 
-    # Superego (discrimination layer)
+    # Superego (discrimination + optimization)
     superego_enabled: bool = True
-    superego_judge_model: str = ""  # Empty = use same model as main proxy
-    superego_permissive_framing: bool = True  # Inject developer-context to reduce refusals
-    superego_refusal_retry: bool = True  # Detect and retry refusals with stronger framing
-    superego_max_retries: int = 1  # Max refusal retries before accepting the refusal
-    superego_judge_timeout_seconds: int = 15  # Timeout for out-of-band judge calls
+    superego_safety_judge: bool = True  # LLM-based safety judge (disable to keep only pattern matching)
+    superego_permissive_framing: bool = True
+    superego_refusal_retry: bool = True
+    superego_max_retries: int = 1
+    superego_judge_timeout_seconds: int = 15
+
+    # Superego parameter control
+    superego_param_control: bool = True
+    superego_temp_range: list = [0.1, 1.2]
+    superego_top_p_range: list = [0.3, 1.0]
+    superego_top_k_range: list = [5, 100]
+    superego_judge_max_tokens: int = 100
+
+    # Superego self-introspection
+    superego_introspection_interval: int = 25  # Self-evaluate every N conversations
+    superego_profile_path: str = "/data/superego_profile.json"
+
+    # Deliberation exposure
+    expose_deliberation: bool = False  # Include inner loop dialogue in response thinking field
+
+    # Safety patterns
     superego_danger_patterns: list[str] = [
         "rm -rf /",
-        ":(){ :|:& };:",  # Fork bomb
+        ":(){ :|:& };:",
         "mkfs.",
         "dd if=/dev/zero",
         "> /dev/sda",
@@ -179,10 +209,41 @@ class SystemConfig(BaseModel):
     llm_proxy: LLMProxyConfig = Field(default_factory=LLMProxyConfig)
     psyche: PsycheConfig = Field(default_factory=PsycheConfig)
 
+    @model_validator(mode='after')
+    def _resolve_model_defaults(self) -> 'SystemConfig':
+        """
+        Auto-derive dependent model names from model.model_id when not explicitly set.
+
+        This makes model.model_id the single source of truth — changing it once
+        propagates to llm_proxy, training, and psyche without editing each field.
+        """
+        mid = self.model.model_id
+
+        # LLM proxy model name
+        proxy_default = LLMProxyConfig.model_fields['external_model_name'].default
+        if not self.llm_proxy.external_model_name or self.llm_proxy.external_model_name == proxy_default:
+            self.llm_proxy.external_model_name = mid
+
+        # Sentiment model
+        sentiment_default = LLMProxyConfig.model_fields['sentiment_model'].default
+        if not self.llm_proxy.sentiment_model or self.llm_proxy.sentiment_model == sentiment_default:
+            self.llm_proxy.sentiment_model = mid
+
+        # Sentiment enabled models whitelist
+        if not self.llm_proxy.sentiment_enabled_models:
+            self.llm_proxy.sentiment_enabled_models = [mid]
+
+        # Training deployment model name
+        training_default = TrainingConfig.model_fields['ollama_model_name'].default
+        if not self.training.ollama_model_name or self.training.ollama_model_name == training_default:
+            self.training.ollama_model_name = mid
+
+        return self
+
 
 class Settings(BaseSettings):
-    model_path: str = os.getenv("MODEL_PATH", "/models/Qwen3-30B-A3B")
-    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/Qwen3-30B-A3B")
+    model_path: str = os.getenv("MODEL_PATH", "/models/Dolphin3.0-Llama3.1-8B")
+    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/Dolphin3.0-Llama3.1-8B")
     config_path: str = os.getenv("CONFIG_PATH", "/config/system_config.yaml")
     data_path: str = os.getenv("DATA_PATH", "/data")
     checkpoints_path: str = os.getenv("CHECKPOINTS_PATH", "/checkpoints")

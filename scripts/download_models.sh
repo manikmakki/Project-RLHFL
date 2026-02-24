@@ -25,23 +25,23 @@ git lfs install
 # Download GGUF model for inference (optional - can use Ollama instead)
 echo "Step 1: GGUF model for Ollama inference..."
 echo "This is optional if you already have the model in Ollama"
-echo "Skip this if you have 'ollama pull huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M' already"
+echo "Skip this if you have 'ollama pull dolphin3:8b' already"
 echo ""
 
 echo "Pull via Ollama:"
-echo "  ollama pull huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M-instruct-2507-q4_K_M"
+echo "  ollama pull dolphin3:8b"
 
 echo ""
 
 # Download HuggingFace model for training
-echo "Step 2: Downloading Qwen3-30B-A3B (HuggingFace format)..."
+echo "Step 2: Downloading Dolphin3.0-Llama3.1-8B (HuggingFace format)..."
 echo "This is the base model used for LoRA training (~60 GB)"
 echo ""
 
-if [ -d "$MODELS_DIR/Qwen3-30B-A3B" ] && [ -f "$MODELS_DIR/Qwen3-30B-A3B/config.json" ]; then
+if [ -d "$MODELS_DIR/Dolphin3.0-Llama3.1-8B" ] && [ -f "$MODELS_DIR/Dolphin3.0-Llama3.1-8B/config.json" ]; then
     echo "HuggingFace model already exists, skipping download."
 else
-    git clone https://huggingface.co/Qwen/Qwen3-30B-A3B "$MODELS_DIR/Qwen3-30B-A3B"
+    git clone 'https://huggingface.co/dphn/Dolphin3.0-Llama3.1-8B' "$MODELS_DIR/Dolphin3.0-Llama3.1-8B"
     echo "✓ HuggingFace model downloaded"
 fi
 
@@ -51,8 +51,8 @@ echo "Model download complete!"
 echo "=================================================="
 echo ""
 echo "Models downloaded:"
-echo "  - Inference: Use Ollama (ollama pull huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M)"
-echo "  - Training (HF):    $MODELS_DIR/Qwen3-30B-A3B"
+echo "  - Inference: Use Ollama (ollama pull dolphin3:8b)"
+echo "  - Training (HF):    $MODELS_DIR/Dolphin3.0-Llama3.1-8B"
 echo ""
 echo "Next steps:"
 echo "  1. Review and customize volumes/config/system_config.yaml if needed"

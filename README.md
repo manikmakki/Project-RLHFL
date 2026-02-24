@@ -72,7 +72,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M",
+    model="dolphin3:8b",
     messages=[{"role": "user", "content": "Explain quicksort in plain English."}]
 )
 
@@ -85,7 +85,7 @@ print(response.choices[0].message.content)
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M",
+    "model": "dolphin3:8b",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
@@ -238,5 +238,5 @@ I feel the need to add this statement:
 
 ## Acknowledgments
 
-Built on [Ollama](https://ollama.com/), [llama.cpp](https://github.com/ggerganov/llama.cpp), [PyTorch](https://pytorch.org/), [PEFT](https://github.com/huggingface/peft), [ChromaDB](https://www.trychroma.com/), and [Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B) model.
+Built on [Ollama](https://ollama.com/), [llama.cpp](https://github.com/ggerganov/llama.cpp), [PyTorch](https://pytorch.org/), [PEFT](https://github.com/huggingface/peft), [ChromaDB](https://www.trychroma.com/), and [Dolphin3.0-Llama3.1-8B](https://huggingface.co/dphn/Dolphin3.0-Llama3.1-8B) model.
 

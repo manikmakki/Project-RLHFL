@@ -10,6 +10,7 @@ import os
 from datetime import datetime
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse
 from pathlib import Path
 
@@ -497,15 +498,21 @@ async def get_recent_interactions(
 async def get_recent_requests():
     """Get recent API requests for debugging."""
     try:
-        if not api_request_log:
+        if api_request_log is None:
+            logger.warning("api_request_log is None — set_dependencies may not have been called")
             return {"total": 0, "items": []}
+
+        logger.debug(f"recent-requests endpoint: deque has {len(api_request_log)} items")
 
         # Convert deque to list (most recent first)
         requests = list(reversed(api_request_log))
 
+        # Use jsonable_encoder to safely serialize Pydantic models, datetimes, etc.
+        encoded = jsonable_encoder(requests)
+
         return {
-            "total": len(requests),
-            "items": requests
+            "total": len(encoded),
+            "items": encoded
         }
     except Exception as e:
         logger.error(f"Error getting recent requests: {e}", exc_info=True)

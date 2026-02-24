@@ -7,34 +7,32 @@ memory:
   auto_cleanup_percentage: 0.1
   min_weight_threshold: 0.5
   top_n_weighted_interactions: 1000
+
 model:
-  base_model_path: /models/Qwen3-30B-A3B
+  model_id: ministral-3:14b # ← single source of truth for model name
+  base_model_path: /models/Ministral-3-14B
   response_format: openai
   context_length: 32768
   max_tokens: 4096
-  model_id: huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M
   n_threads: 48
-  temperature: 0.7
-  top_p: 0.9
+
 sentiment:
   continuation_baseline: 0.1
   explicit_instruction_boost: 3.0
   negative_threshold: -0.3
   positive_threshold: 0.3
+
 llm_proxy:
   base_url: http://llm-ollama:11434
   endpoint_type: auto
-  external_model_name: huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M
-  sentiment_model: huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M
   api_key: null
-  sentiment_enabled_models:
-  - huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M
   connect_timeout_seconds: 10
   read_timeout_seconds: 120
   max_retries: 2
   retry_delay_seconds: 1.0
   max_connections: 10
   max_keepalive_connections: 5
+
 training:
   batch_size: 2
   gradient_accumulation_steps: 4
@@ -62,25 +60,49 @@ training:
   schedule_timezone: America/New_York
   schedule_window_minutes: 60
   enable_ollama_deployment: true
-  ollama_model_name: huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M
   max_checkpoint_count: 3
   max_gguf_files: 2
+
 psyche:
-  enabled: true
-  # Id Engine (reward-driven)
+  enabled: false
+
+  # ── Multi-model roles (empty = use model.model_id) ──
+  id_model: ""
+  ego_model: ""
+  superego_model: "" #"phi4-mini:3.8b"
+
+  # ── Refinement pipeline ──
+  refinement_enabled: false
+  max_refinement_turns: 2
+  quality_threshold: 0.7
+  min_quality_for_accept: 0.5
+  complexity_bypass_chars: 50
+  refinement_bypass_tools: true
+
+  # ── Client parameter control ──
+  override_client_params: true
+
+  # ── Superego parameter control ──
+  superego_param_control: true
+  superego_temp_range: [0.1, 1.2]
+  superego_top_p_range: [0.3, 1.0]
+  superego_top_k_range: [5, 100]
+  superego_judge_max_tokens: 100
+
+  # ── Superego self-introspection ──
+  superego_introspection_interval: 25
+  superego_profile_path: "/data/superego_profile.json"
+
+  # ── Deliberation exposure ──
+  expose_deliberation: false
+
+  # ── Id Engine ──
   id_enabled: true
   id_session_window: 10
-  id_reward_prompt_threshold: 0.3
-  # Ego Fast (per-request reasoning)
-  ego_fast_enabled: true
-  ego_reasoning_prompt: true
-  ego_parse_reflection: true
-  # Ego Slow (background strategy)
-  ego_slow_enabled: true
-  ego_pattern_analysis_interval_hours: 4
-  # Superego (discrimination layer)
-  superego_enabled: false
-  superego_judge_model: ""
+
+  # ── Safety layer ──
+  superego_enabled: false            # safety checks off (pattern matching + LLM judge)
+  superego_safety_judge: false       # LLM judge (false = pattern-matching only, no model call)
   superego_permissive_framing: true
   superego_refusal_retry: true
   superego_max_retries: 1

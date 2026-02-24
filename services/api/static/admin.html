@@ -1336,59 +1336,136 @@
                 return;
             }
 
-            let html = '<p style="margin-bottom: 15px;"><strong>Showing ' + data.total + ' most recent API requests (post-processed: after interception)</strong></p>';
+            let html = '<p style="margin-bottom: 15px;"><strong>Showing ' + data.total + ' most recent API requests</strong></p>';
 
             data.items.forEach((item, index) => {
                 const jsonStr = JSON.stringify(item, null, 2);
-                const messages = item.messages || [];
-                const msgCount = messages.length;
+
+                // Extract messages from new nested structure or legacy flat structure
+                const req = item.request || {};
+                const messages = req.messages || item.messages || [];
+                const msgCount = req.messages_count || messages.length;
+                const tools = req.tools || item.tools;
+                const toolChoice = req.tool_choice || item.tool_choice;
 
                 // Build tools info
                 let toolsInfo = 'no-tools';
-                if (item.tools && item.tools.length > 0) {
-                    toolsInfo = `${item.tools.length} tool(s)`;
-                    if (item.tool_choice) {
-                        const choice = typeof item.tool_choice === 'string' ? item.tool_choice : item.tool_choice.type || 'auto';
+                if (tools && tools.length > 0) {
+                    toolsInfo = `${tools.length} tool(s)`;
+                    if (toolChoice) {
+                        const choice = typeof toolChoice === 'string' ? toolChoice : toolChoice.type || 'auto';
                         toolsInfo += ` [${choice}]`;
                     }
                 }
 
+                const duration = item.duration_seconds ? `${item.duration_seconds}s` : '';
                 const meta = [
                     item.model || 'N/A',
                     item.stream ? 'stream' : 'sync',
-                    toolsInfo
-                ].join(' | ');
+                    toolsInfo,
+                    duration,
+                ].filter(Boolean).join(' | ');
 
                 // Build message previews
                 let msgHtml = '';
-                messages.forEach(msg => {
-                    const role = msg.role || '?';
-                    const roleColor = role === 'system' ? '#e74c3c' : role === 'user' ? '#3498db' : '#27ae60';
-                    let preview = '';
-                    if (typeof msg.content === 'string') {
-                        preview = msg.content.length > 150 ? msg.content.substring(0, 150) + '...' : msg.content;
-                    } else if (msg.content === null || msg.content === undefined) {
-                        preview = '(null)';
-                    } else {
-                        preview = JSON.stringify(msg.content).substring(0, 150);
+                if (messages.length > 0) {
+                    messages.forEach(msg => {
+                        const role = msg.role || '?';
+                        const roleColor = role === 'system' ? '#e74c3c' : role === 'user' ? '#3498db' : role === 'tool' ? '#9b59b6' : '#27ae60';
+                        let preview = '';
+                        if (typeof msg.content === 'string') {
+                            preview = msg.content.length > 150 ? msg.content.substring(0, 150) + '...' : msg.content;
+                        } else if (msg.content === null || msg.content === undefined) {
+                            preview = msg.tool_calls ? `[tool_calls: ${JSON.stringify(msg.tool_calls).substring(0, 100)}]` : '(null)';
+                        } else {
+                            preview = JSON.stringify(msg.content).substring(0, 150);
+                        }
+                        msgHtml += `<div style="margin: 4px 0; font-size: 12px;"><span style="display: inline-block; width: 70px; font-weight: bold; color: ${roleColor};">[${role}]</span><span style="color: #555;">${escapeHtml(preview)}</span></div>`;
+                    });
+                } else if (msgCount) {
+                    msgHtml = `<div style="font-size: 12px; color: #888;">${msgCount} message(s)</div>`;
+                }
+
+                // Build response section
+                let responseHtml = '';
+                const resp = item.response;
+                if (resp) {
+                    const fr = resp.finish_reason || 'unknown';
+                    const frColor = fr === 'tool_calls' ? '#f39c12' : fr === 'stop' ? '#27ae60' : '#e74c3c';
+                    const borderColor = resp.tool_calls ? '#f39c12' : '#27ae60';
+
+                    responseHtml = `<div style="margin-top:8px; padding:10px; background:#f8fdf8; border-radius:4px; border-left:3px solid ${borderColor};">`;
+                    responseHtml += `<div style="font-size:12px; margin-bottom:6px; display:flex; align-items:center; gap:8px;">`;
+                    responseHtml += `<span style="font-weight:bold; color:${frColor}; background:${frColor}15; padding:2px 8px; border-radius:3px;">finish_reason: ${fr}</span>`;
+                    if (resp.length !== undefined) responseHtml += `<span style="color:#888; font-size:11px;">${resp.length} chars</span>`;
+                    responseHtml += `</div>`;
+
+                    // Tool calls (prominent pretty-printed display)
+                    if (resp.tool_calls) {
+                        const tcJson = JSON.stringify(resp.tool_calls, null, 2);
+                        responseHtml += `<div style="background:#1e1e1e; color:#d4d4d4; padding:12px; border-radius:4px; font-family:'Courier New',monospace; font-size:12px; margin-bottom:6px; max-height:300px; overflow-y:auto; line-height:1.5;">`;
+                        responseHtml += `<div style="color:#f39c12; font-weight:bold; margin-bottom:4px;">tool_calls:</div>`;
+                        responseHtml += `<pre style="margin:0; white-space:pre-wrap; word-wrap:break-word;">${syntaxHighlight(tcJson)}</pre>`;
+                        responseHtml += `</div>`;
                     }
-                    msgHtml += `<div style="margin: 4px 0; font-size: 12px;"><span style="display: inline-block; width: 70px; font-weight: bold; color: ${roleColor};">[${role}]</span><span style="color: #555;">${escapeHtml(preview)}</span></div>`;
-                });
+
+                    // Content preview
+                    if (resp.content) {
+                        responseHtml += `<div style="font-size:12px; color:#555; max-height:120px; overflow-y:auto; padding:6px; background:#fff; border-radius:3px; border:1px solid #eee; line-height:1.5;">${escapeHtml(resp.content)}</div>`;
+                    }
+
+                    // Thinking preview
+                    if (resp.thinking) {
+                        responseHtml += `<div style="font-size:11px; color:#9b59b6; margin-top:6px; padding:6px; background:#f5f0ff; border-radius:3px; font-style:italic; line-height:1.4;">thinking: ${escapeHtml(resp.thinking)}</div>`;
+                    }
+
+                    responseHtml += `</div>`;
+                }
+
+                // Build request tools pretty-print (when tools are present)
+                let requestToolsHtml = '';
+                if (tools && tools.length > 0) {
+                    const toolNames = tools.map(t => t.function ? t.function.name : (t.name || '?')).join(', ');
+                    requestToolsHtml = `<div style="margin-top:6px; padding:6px 8px; background:#fff8e1; border-radius:3px; font-size:11px; border:1px solid #ffe082;">`;
+                    requestToolsHtml += `<strong style="color:#f57f17;">Tools sent:</strong> ${escapeHtml(toolNames)}`;
+                    requestToolsHtml += ` <button style="font-size:10px; padding:1px 6px; margin-left:6px;" onclick="toggleApiTools(${index})">show definitions</button>`;
+                    requestToolsHtml += `<div id="api-tools-${index}" style="display:none; margin-top:6px;">`;
+                    requestToolsHtml += `<pre style="margin:0; font-size:11px; white-space:pre-wrap; background:#1e1e1e; color:#d4d4d4; padding:8px; border-radius:4px; max-height:200px; overflow-y:auto;">${syntaxHighlight(JSON.stringify(tools, null, 2))}</pre>`;
+                    requestToolsHtml += `</div></div>`;
+                }
+
+                // Build psyche badge
+                let psycheHtml = '';
+                if (item.psyche && item.psyche.active) {
+                    const p = item.psyche;
+                    let badges = [];
+                    if (p.complexity) badges.push(`<span class="badge" style="background:#667eea;color:white;">${p.complexity}</span>`);
+                    if (p.turns) badges.push(`<span class="badge" style="background:#9b59b6;color:white;">turns: ${p.turns}</span>`);
+                    if (p.quality_score !== null && p.quality_score !== undefined) badges.push(`<span class="badge" style="background:${p.quality_score >= 0.7 ? '#27ae60' : '#f39c12'};color:white;">score: ${p.quality_score}</span>`);
+                    if (badges.length > 0) {
+                        psycheHtml = `<div style="margin-top:6px; display:flex; gap:4px; flex-wrap:wrap;">${badges.join('')}</div>`;
+                    }
+                }
 
                 html += `
-                    <div style="background: #f9f9f9; border-radius: 6px; padding: 12px; margin-bottom: 12px; border-left: 4px solid #667eea;">
+                    <div style="background: #f9f9f9; border-radius: 6px; padding: 12px; margin-bottom: 12px; border-left: 4px solid ${resp && resp.tool_calls ? '#f39c12' : '#667eea'};">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                             <div>
                                 <strong style="font-size: 13px;">#${index + 1}</strong>
                                 <span style="font-size: 11px; color: #999; margin-left: 10px;">${formatLocalTime(item.timestamp)}</span>
+                                <span style="font-size: 11px; color: #666; margin-left: 10px;">${item.endpoint || ''}</span>
                                 <span style="font-size: 11px; color: #666; margin-left: 10px;">${meta}</span>
-                                <span style="font-size: 11px; color: #888; margin-left: 10px;">${msgCount} msg(s)</span>
                             </div>
-                            <button class="primary" onclick="toggleApiJson(${index})">Full JSON</button>
+                            <div style="display:flex; gap:4px;">
+                                <button class="primary" onclick="toggleApiJson(${index})">Raw JSON</button>
+                            </div>
                         </div>
-                        <div style="background: #fff; border-radius: 4px; padding: 8px; font-family: monospace;">
+                        <div style="background: #fff; border-radius: 4px; padding: 8px; font-family: monospace; font-size: 12px;">
                             ${msgHtml}
                         </div>
+                        ${requestToolsHtml}
+                        ${responseHtml}
+                        ${psycheHtml}
                         <div id="api-json-${index}" class="json-viewer" style="display: none; margin-top: 8px;">
                             <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">${syntaxHighlight(jsonStr)}</pre>
                         </div>
@@ -1401,6 +1478,11 @@
 
         function toggleApiJson(index) {
             const el = document.getElementById(`api-json-${index}`);
+            el.style.display = el.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function toggleApiTools(index) {
+            const el = document.getElementById(`api-tools-${index}`);
             el.style.display = el.style.display === 'none' ? 'block' : 'none';
         }
 

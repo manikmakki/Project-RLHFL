@@ -78,13 +78,14 @@ class LLMProxy:
         messages: List[ChatMessage],
         temperature: float = 0.7,
         top_p: float = 0.9,
+        top_k: Optional[int] = None,
         max_tokens: int = 2048,
         tools: Optional[List[Dict]] = None,
         tool_choice: Optional[str] = None,
-        stream: bool = False
+        stream: bool = False,
+        model_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build Ollama API request format."""
-        # Convert ChatMessage objects to Ollama message dicts
         ollama_messages = []
         for msg in messages:
             message_dict = {
@@ -93,18 +94,21 @@ class LLMProxy:
             }
             ollama_messages.append(message_dict)
 
+        options = {
+            "temperature": temperature,
+            "top_p": top_p,
+            "num_predict": max_tokens,
+        }
+        if top_k is not None:
+            options["top_k"] = top_k
+
         request_payload = {
-            "model": self.model_name,
+            "model": model_override or self.model_name,
             "messages": ollama_messages,
             "stream": stream,
-            "options": {
-                "temperature": temperature,
-                "top_p": top_p,
-                "num_predict": max_tokens
-            }
+            "options": options,
         }
 
-        # Add tools if provided
         if tools:
             request_payload["tools"] = tools
 
@@ -115,13 +119,14 @@ class LLMProxy:
         messages: List[ChatMessage],
         temperature: float = 0.7,
         top_p: float = 0.9,
+        top_k: Optional[int] = None,
         max_tokens: int = 2048,
         tools: Optional[List[Dict]] = None,
         tool_choice: Optional[str] = None,
-        stream: bool = False
+        stream: bool = False,
+        model_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build OpenAI API request format."""
-        # Convert ChatMessage objects to OpenAI message dicts
         openai_messages = []
         for msg in messages:
             message_dict = {
@@ -131,15 +136,14 @@ class LLMProxy:
             openai_messages.append(message_dict)
 
         request_payload = {
-            "model": self.model_name,
+            "model": model_override or self.model_name,
             "messages": openai_messages,
             "temperature": temperature,
             "top_p": top_p,
             "max_tokens": max_tokens,
-            "stream": stream
+            "stream": stream,
         }
 
-        # Add tools if provided
         if tools:
             request_payload["tools"] = tools
             if tool_choice:
@@ -251,9 +255,11 @@ class LLMProxy:
         messages: List[ChatMessage],
         temperature: float = 0.7,
         top_p: float = 0.9,
+        top_k: Optional[int] = None,
         max_tokens: int = 2048,
         tools: Optional[List[Dict]] = None,
-        tool_choice: Optional[str] = None
+        tool_choice: Optional[str] = None,
+        model_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate non-streaming completion from external LLM.
@@ -262,26 +268,35 @@ class LLMProxy:
             messages: List of chat messages
             temperature: Sampling temperature
             top_p: Nucleus sampling parameter
+            top_k: Top-k sampling (Ollama only, None = Ollama default)
             max_tokens: Maximum tokens to generate
             tools: Optional tool definitions
             tool_choice: Optional tool choice strategy
+            model_override: Use a different model than the default (for multi-model Psyche)
 
         Returns:
             Dict with content, tool_calls, thinking, and finish_reason
         """
-        # Build request based on endpoint type
         if self.endpoint_type == "ollama":
             request_payload = self._build_request_ollama(
-                messages, temperature, top_p, max_tokens, tools, tool_choice, stream=False
+                messages, temperature, top_p, top_k, max_tokens,
+                tools, tool_choice, stream=False, model_override=model_override,
             )
-        else:  # openai
+        else:
             request_payload = self._build_request_openai(
-                messages, temperature, top_p, max_tokens, tools, tool_choice, stream=False
+                messages, temperature, top_p, top_k, max_tokens,
+                tools, tool_choice, stream=False, model_override=model_override,
             )
+
+        # Log raw request payload for debugging
+        logger.debug(f"LLM request payload: {json.dumps(request_payload, default=str)[:2000]}")
 
         # Call external LLM with retry
         response = await self._call_with_retry(request_payload)
         response_data = response.json()
+
+        # Log raw response for debugging
+        logger.debug(f"LLM raw response: {json.dumps(response_data, default=str)[:2000]}")
 
         # Parse response based on endpoint type
         if self.endpoint_type == "ollama":
@@ -294,9 +309,11 @@ class LLMProxy:
         messages: List[ChatMessage],
         temperature: float = 0.7,
         top_p: float = 0.9,
+        top_k: Optional[int] = None,
         max_tokens: int = 2048,
         tools: Optional[List[Dict]] = None,
-        tool_choice: Optional[str] = None
+        tool_choice: Optional[str] = None,
+        model_override: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Generate streaming completion from external LLM.
@@ -305,21 +322,24 @@ class LLMProxy:
             messages: List of chat messages
             temperature: Sampling temperature
             top_p: Nucleus sampling parameter
+            top_k: Top-k sampling (Ollama only, None = Ollama default)
             max_tokens: Maximum tokens to generate
             tools: Optional tool definitions
             tool_choice: Optional tool choice strategy
+            model_override: Use a different model than the default (for multi-model Psyche)
 
         Yields:
             Chunks in OpenAI streaming format
         """
-        # Build request based on endpoint type
         if self.endpoint_type == "ollama":
             request_payload = self._build_request_ollama(
-                messages, temperature, top_p, max_tokens, tools, tool_choice, stream=True
+                messages, temperature, top_p, top_k, max_tokens,
+                tools, tool_choice, stream=True, model_override=model_override,
             )
-        else:  # openai
+        else:
             request_payload = self._build_request_openai(
-                messages, temperature, top_p, max_tokens, tools, tool_choice, stream=True
+                messages, temperature, top_p, top_k, max_tokens,
+                tools, tool_choice, stream=True, model_override=model_override,
             )
 
         endpoint_url = self._build_endpoint_url()

@@ -14,7 +14,6 @@ services:
       - ./volumes/config:/config
       - ./volumes/checkpoints:/checkpoints
     environment:
-      - BASE_MODEL_PATH=/models/Qwen3-30B-A3B
       - CONFIG_PATH=/config/system_config.yaml
       - DATA_PATH=/data
       - CHECKPOINTS_PATH=/checkpoints
@@ -39,7 +38,6 @@ services:
       - ./volumes/config:/config
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - BASE_MODEL_PATH=/models/Qwen3-30B-A3B
       - CONFIG_PATH=/config/system_config.yaml
       - DATA_PATH=/data
       - CHECKPOINTS_PATH=/checkpoints
@@ -62,8 +60,8 @@ services:
     environment:
       - OLLAMA_HOST=0.0.0.0:11434
       - OLLAMA_KEEP_ALIVE=30m
-      - OLLAMA_NUM_PARALLEL=1
-      - OLLAMA_MAX_LOADED_MODELS=2
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_MAX_LOADED_MODELS=4
       - OLLAMA_CONTEXT_LENGTH=32768
     deploy:
       resources:
