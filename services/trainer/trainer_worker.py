@@ -71,7 +71,7 @@ class TrainerWorker:
                 if self._is_within_schedule():
                     logger.info(f"Training triggered: {reason}")
                     self._execute_training(requested_mode=requested_mode)
-                else:
+                else: # TODO: Fix logic here, training will fire without respect to actual schedule.
                     logger.info(
                         f"Training requested ({reason}) but outside schedule window. "
                         f"Waiting for {self.config.training.schedule_time} "

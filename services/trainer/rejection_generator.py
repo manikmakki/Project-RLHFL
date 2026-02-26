@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class RejectionGenerator:
     """Generates synthetic rejected responses via Ollama API."""
 
-    def __init__(self, ollama_url: str = "http://llm-api:8000", model_name: Optional[str] = None):
+    def __init__(self, ollama_url: str = "http://llm-ollama:11434", model_name: Optional[str] = None):
         model_name = model_name or load_config().model.model_id
         """
         Initialize rejection generator.

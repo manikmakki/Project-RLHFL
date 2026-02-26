@@ -9,12 +9,12 @@ memory:
   top_n_weighted_interactions: 1000
 
 model:
-  model_id: ministral-3:14b # ← single source of truth for model name
-  base_model_path: /models/Ministral-3-14B
-  response_format: openai
-  context_length: 32768
-  max_tokens: 4096
-  n_threads: 48
+  model_id: ministral-3:14b                   # Single source of truth for model name
+  base_model_path: /models/Ministral-3-14B    # Base path for Ollama models (pointing to the directory containing the model, not the model file itself)
+  response_format: openai                     # Use OpenAI format for compatibility with tools and sentiment analysis
+  context_length: 32768                       # Match to Ollama's configured context length for safety
+  max_tokens: 4096                            # Max tokens for generation (keep well below context length to allow for system prompts and tool outputs) 
+  n_threads: 48                               # Number of CPU threads for inference (adjust based on your hardware)
 
 sentiment:
   continuation_baseline: 0.1
@@ -69,18 +69,18 @@ psyche:
   # ── Multi-model roles (empty = use model.model_id) ──
   id_model: ""
   ego_model: ""
-  superego_model: "" #"phi4-mini:3.8b"
+  superego_model: "" 
 
   # ── Refinement pipeline ──
-  refinement_enabled: false
-  max_refinement_turns: 2
-  quality_threshold: 0.7
-  min_quality_for_accept: 0.5
-  complexity_bypass_chars: 50
-  refinement_bypass_tools: true
+  refinement_enabled: false       # whether to enable the refinement pipeline at all
+  max_refinement_turns: 2         # maximum number of refinement iterations before final acceptance or rejection
+  quality_threshold: 0.7          # minimum quality score for accepting a response without refinement
+  min_quality_for_accept: 0.5     # minimum quality score for accepting a response after refinement iterations
+  complexity_bypass_chars: 50     # if response is shorter than this, bypass refinement and accept as is
+  refinement_bypass_tools: true   # if response invokes tools, bypass refinement and accept as is
 
   # ── Client parameter control ──
-  override_client_params: true
+  override_client_params: true    # whether to allow overriding of parameters like temperature and top_p from the client side
 
   # ── Superego parameter control ──
   superego_param_control: true
