@@ -16,14 +16,14 @@ def convert_model_to_safetensors(model_path: str):
     print(f"Converting model at {model_path} to SafeTensors format...")
 
     try:
-        from transformers import AutoModelForCausalLM
+        from transformers import Mistral3ForConditionalGeneration
         import torch
 
         # Temporarily disable the torch.load safety check by setting env var
         os.environ["HF_HUB_DISABLE_TORCH_LOAD_SAFETY_CHECK"] = "1"
 
         print("Loading model...")
-        model = AutoModelForCausalLM.from_pretrained(
+        model = Mistral3ForConditionalGeneration.from_pretrained(
             model_path,
             device_map="cpu",
             torch_dtype=torch.float32,

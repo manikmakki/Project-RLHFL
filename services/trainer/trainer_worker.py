@@ -184,7 +184,7 @@ class TrainerWorker:
                     from trainer.rejection_generator import RejectionGenerator
 
                     generator = RejectionGenerator(
-                        ollama_url="http://llm-api:8000",
+                        ollama_url="http://llm-ollama:8000",
                         model_name=self.config.training.ollama_model_name,
                     )
                     all_prompts = []

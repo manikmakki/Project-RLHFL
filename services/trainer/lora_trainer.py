@@ -17,8 +17,9 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from transformers import (
-    AutoModelForCausalLM,
+    Mistral3ForConditionalGeneration,
     AutoTokenizer,
+    AutoConfig,
     TrainingArguments,
     Trainer,
 )
@@ -104,19 +105,20 @@ class LoRATrainer:
         except Exception:
             pass
 
-        logger.info(f"Loading model from {self.base_model_path} on CPU (float32)...")
+        logger.info(f"Loading model from {self.base_model_path} on CPU (bfloat16)...")
         torch.set_num_threads(self.config.training.cpu_threads)
         logger.info(f"PyTorch CPU threads: {torch.get_num_threads()}")
 
-        model = AutoModelForCausalLM.from_pretrained(
+        model = Mistral3ForConditionalGeneration.from_pretrained(
             self.base_model_path,
             device_map="cpu",
-            torch_dtype=torch.float32,
+            torch_dtype=torch.bfloat16,
             trust_remote_code=True,
-            use_cache=False,
+            # use_cache=False,
             low_cpu_mem_usage=True,
+            quantization_config=None,
         )
-        model = model.float()
+        model = model.bfloat16()
 
         # Freeze base parameters; only LoRA + router layers will train
         for name, param in model.named_parameters():
@@ -150,7 +152,7 @@ class LoRATrainer:
             # Apply LoRA
             model = get_peft_model(model, self.lora_config)
             model.print_trainable_parameters()
-            model.config.use_cache = False
+            # model.config.use_cache = False
 
             is_dpo_mode = self.config.training.enable_dpo and DPO_AVAILABLE
 
@@ -291,7 +293,7 @@ class LoRATrainer:
             use_cpu=True,
             beta=self.config.training.dpo_beta,
             max_length=self.config.training.max_seq_length,
-            max_prompt_length=self.config.training.max_seq_length // 2,
+            # max_prompt_length=self.config.training.max_seq_length // 2,
         )
 
         trainer = DPOTrainer(
@@ -371,11 +373,11 @@ class LoRATrainer:
             except Exception:
                 pass
 
-            model = AutoModelForCausalLM.from_pretrained(
+            model = Mistral3ForConditionalGeneration.from_pretrained(
                 self.base_model_path,
                 device_map="cpu",
                 torch_dtype="auto",
-                use_cache=False,
+                # use_cache=False,
             )
             model = PeftModel.from_pretrained(model, adapter_path)
             model = model.merge_and_unload()
