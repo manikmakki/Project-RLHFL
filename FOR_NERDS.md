@@ -23,7 +23,7 @@ graph TB
 
     subgraph "Ollama Container (llm-ollama)"
         OL[Ollama Server :11434<br/>GPU-accelerated inference]
-        GGUF[GGUF Model<br/>Dolphin3.0-Llama3.1-8B]
+        GGUF[GGUF Model<br/>Ministral-3-14B]
     end
 
     subgraph "Trainer Container (llm-trainer)"

@@ -24,10 +24,10 @@ from pydantic_settings import BaseSettings
 
 
 class ModelConfig(BaseModel):
-    model_id: str = "dolphin3:8b"  # Model identifier for API responses / Ollama tag
-    base_model_path: str = "/models/Dolphin3.0-Llama3.1-8B"  # HF safetensors for training
-    ollama_base_model: str = "dolphin3:8b"  # Ollama base model tag (for adapter FROM)
-    hf_model_id: str = "dphn/Dolphin3.0-Llama3.1-8B"  # HuggingFace model ID (reference)
+    model_id: str = "ministral-3:14b"  # Model identifier for API responses / Ollama tag
+    base_model_path: str = "/models/Ministral-3-14B"  # HF safetensors for training
+    ollama_base_model: str = "ministral-3:14b"  # Ollama base model tag (for adapter FROM)
+    hf_model_id: str = "dphn/Ministral-3-14B"  # HuggingFace model ID (reference)
     context_length: int = 8192
     max_tokens: int = 2048
     n_threads: int = 4
@@ -72,7 +72,7 @@ class TrainingConfig(BaseModel):
 
     # Ollama deployment
     enable_ollama_deployment: bool = False  # Deploy to Ollama after training
-    ollama_model_name: str = "dolphin3:8b"  # Ollama model name to update
+    ollama_model_name: str = "ministral-3:14b"  # Ollama model name to update
 
     # Checkpoint storage management
     max_checkpoint_count: int = 3  # Max checkpoint dirs to keep
@@ -135,7 +135,7 @@ class PsycheConfig(BaseModel):
 
     # Multi-model roles (empty = use main model from llm_proxy.external_model_name)
     id_model: str = ""           # Small reward/desire model (e.g. qwen2.5:1.5b-instruct)
-    ego_model: str = ""          # Response generation model (e.g. dolphin3:8b)
+    ego_model: str = ""          # Response generation model (e.g. ministral-3:14b)
     superego_model: str = ""     # Critique/optimization model (e.g. phi4-mini:3.8b)
 
     # Refinement loop
@@ -242,8 +242,8 @@ class SystemConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_path: str = os.getenv("MODEL_PATH", "/models/Dolphin3.0-Llama3.1-8B")
-    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/Dolphin3.0-Llama3.1-8B")
+    model_path: str = os.getenv("MODEL_PATH", "/models/Ministral-3-14B")
+    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/Ministral-3-14B")
     config_path: str = os.getenv("CONFIG_PATH", "/config/system_config.yaml")
     data_path: str = os.getenv("DATA_PATH", "/data")
     checkpoints_path: str = os.getenv("CHECKPOINTS_PATH", "/checkpoints")

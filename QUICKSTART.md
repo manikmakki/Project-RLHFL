@@ -613,7 +613,7 @@ curl -X POST "http://localhost:8000/admin/api/ollama/deploy-checkpoint?checkpoin
 docker exec llm-ollama sh -c 'cat > /tmp/Modelfile <<EOF
 FROM /checkpoints/checkpoint_20260217_050631/manual_convert_Q4_K_M.gguf
 EOF
-ollama create dolphin3:8b -f /tmp/Modelfile'
+ollama create ministral-3:14b -f /tmp/Modelfile'
 ```
 
 The model will be immediately available at `http://localhost:11434` and through your API at `http://localhost:8000/v1/chat/completions`.
