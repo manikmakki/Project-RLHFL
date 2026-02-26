@@ -222,8 +222,12 @@ class SentimentAnalyzer:
         # Criterion 1: Maxed-out weight (strong sentiment + instructions + substantive)
         if weight >= 5.0:
             return True
+        
+        # Criterion 2: Very strong positive sentiment (indicates strong positive interaction)
+        if sentiment >= 0.7:
+            return True
 
-        # Criterion 2: Explicit persistent directives with clear sentiment
+        # Criterion 3: Explicit persistent directives with clear sentiment
         directive_phrases = [
             'from now on', 'going forward', 'in the future',
             'always do', 'never do', 'remember to',
@@ -231,7 +235,7 @@ class SentimentAnalyzer:
         if abs(sentiment) >= 0.3 and any(phrase in text for phrase in directive_phrases):
             return True
 
-        # Criterion 3: Detailed corrections (strongly negative + substantive)
+        # Criterion 4: Detailed corrections (strongly negative + substantive)
         if sentiment < -0.6 and len(user_message) > 300:
             return True
 
