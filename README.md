@@ -230,7 +230,6 @@ I feel the need to add this statement:
 * Nobody asked for this, it is not sponsored, I am not being paid to develop this project.
 * This is purely a "for fun" project that I didn't see any existing solution for that works for _my_ needs. I liked it enough to publish.
 * The project was designed and intended to work within _my_ home lab environment, with _my_ hardware on hand. 
-* If you want to modify anything to better fit your needs, please fork and submit a PR noting the Cuda Compute Capability level and reference hardware. This will help other folks to find something that works for them or serves as a starting point.
 
 ## License
 
@@ -238,5 +237,5 @@ I feel the need to add this statement:
 
 ## Acknowledgments
 
-Built on [Ollama](https://ollama.com/), [llama.cpp](https://github.com/ggerganov/llama.cpp), [PyTorch](https://pytorch.org/), [PEFT](https://github.com/huggingface/peft), [ChromaDB](https://www.trychroma.com/), and [Ministral-3-14B](https://huggingface.co/dphn/Ministral-3-14B) model.
+Built on [Ollama](https://ollama.com/), [llama.cpp](https://github.com/ggerganov/llama.cpp), [PyTorch](https://pytorch.org/), [PEFT](https://github.com/huggingface/peft), [ChromaDB](https://www.trychroma.com/), and [Ministral-3-14B](https://huggingface.co/mistralai/Ministral-3-14B) model.
 
