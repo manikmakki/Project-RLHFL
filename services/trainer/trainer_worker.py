@@ -11,6 +11,7 @@ Orchestrates the automatic training pipeline:
 
 import gc
 import logging
+import os
 import shutil
 import time
 import sys
@@ -21,6 +22,23 @@ from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+# Must be set before torch (and oneDNN/MKLDNN) are imported.
+# oneDNN uses OMP for its thread pool — torch.set_num_threads() does NOT control it.
+# Falls back to docker-compose env vars if already set there.
+def _configure_blas_threads():
+    try:
+        import yaml
+        config_path = os.environ.get('CONFIG_PATH', '/config/system_config.yaml')
+        with open(config_path) as _f:
+            _cfg = yaml.safe_load(_f)
+        n = str(_cfg.get('training', {}).get('cpu_threads', 32))
+    except Exception:
+        n = '32'
+    for var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
+        os.environ.setdefault(var, n)
+
+_configure_blas_threads()
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.config import load_config, settings
@@ -28,7 +46,7 @@ from shared.models import Interaction
 from api.memory_manager import MemoryManager
 from trainer.training_scheduler import TrainingScheduler
 from trainer.dataset_builder import DatasetBuilder
-from trainer.lora_trainer import LoRATrainer
+from trainer.lora_trainer_dense import LoRATrainerDense
 from trainer.model_evaluator import ModelEvaluator
 
 logging.basicConfig(
@@ -47,7 +65,7 @@ class TrainerWorker:
         self.memory_manager = MemoryManager(self.config)
         self.scheduler = TrainingScheduler(self.config)
         self.dataset_builder = DatasetBuilder(self.config)
-        self.lora_trainer = LoRATrainer(self.config, settings.base_model_path)
+        self.lora_trainer = LoRATrainerDense(self.config, settings.base_model_path)
         self.model_evaluator = ModelEvaluator(
             self.config, settings.base_model_path, settings.checkpoints_path
         )
@@ -129,11 +147,30 @@ class TrainerWorker:
             logger.error(f"Error checking schedule (allowing training): {e}")
             return True
 
+    def _cleanup_dangling_checkpoints(self):
+        """Remove checkpoint dirs from previous runs that were killed before saving an adapter."""
+        checkpoints_dir = Path(settings.checkpoints_path)
+        for d in checkpoints_dir.iterdir():
+            if not (d.is_dir() and d.name.startswith("checkpoint_")):
+                continue
+            adapter_dir = d / "adapter"
+            if not adapter_dir.exists():
+                logger.warning(f"Found dangling checkpoint (no adapter saved): {d.name}, removing...")
+                try:
+                    shutil.rmtree(d)
+                    meta = checkpoints_dir / f"{d.name}_metadata.json"
+                    if meta.exists():
+                        meta.unlink(missing_ok=True)
+                except Exception as e:
+                    logger.warning(f"Failed to remove dangling checkpoint {d.name}: {e}")
+
     def _execute_training(self, requested_mode: str = "auto"):
         """Execute the complete training pipeline."""
         logger.info("=" * 80)
         logger.info("STARTING TRAINING PIPELINE")
         logger.info("=" * 80)
+
+        self._cleanup_dangling_checkpoints()
 
         start_time = time.time()
         selected_mode = "sft"
@@ -169,6 +206,15 @@ class TrainerWorker:
             rejections_cache = Path(settings.checkpoints_path) / "rejections_cache.json"
             if self.config.training.enable_dpo:
                 logger.info("Step 3: Generating synthetic rejections for DPO...")
+
+                # Invalidate cache if it's stale (older than 6h, from a previous crashed run)
+                if rejections_cache.exists():
+                    cache_age_hours = (time.time() - rejections_cache.stat().st_mtime) / 3600
+                    if cache_age_hours > 6:
+                        logger.warning(
+                            f"Rejection cache is {cache_age_hours:.1f}h old (likely from a crashed run), discarding"
+                        )
+                        rejections_cache.unlink(missing_ok=True)
 
                 # Try loading cached rejections first
                 if rejections_cache.exists():

@@ -1,7 +1,7 @@
 """
 Project RLHFL - LoRA Trainer (CPU-only)
 
-Trains LoRA adapters using CPU-only training.
+Trains LoRA adapters for GPT-OSS 20B using CPU-only training.
 Supports SFT (Supervised Fine-Tuning) and DPO (Direct Preference Optimization).
 
 Adapters are parameter-efficient (~10-20MB), requiring only ~1-2% of full
@@ -17,9 +17,8 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from transformers import (
-    Mistral3ForConditionalGeneration,
+    AutoModelForCausalLM,
     AutoTokenizer,
-    AutoConfig,
     TrainingArguments,
     Trainer,
 )
@@ -35,7 +34,7 @@ from shared.config import SystemConfig
 logger = logging.getLogger(__name__)
 
 # Monkey-patch transformers to bypass PyTorch 2.6 requirement for torch.load
-# Safe because we trust official model files from HuggingFace
+# Safe because we trust official GPT-OSS model files from HuggingFace
 try:
     from transformers.utils import import_utils
     from transformers import modeling_utils
@@ -58,7 +57,7 @@ except ImportError as e:
 
 
 class LoRATrainer:
-    """Train LoRA adapters for the base model (CPU-only)."""
+    """Train LoRA adapters for the GPT-OSS base model (CPU-only)."""
 
     def __init__(self, config: SystemConfig, base_model_path: str):
         self.config = config
@@ -70,6 +69,10 @@ class LoRATrainer:
         target_modules = [
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
+            # GPT-OSS MoE expert FFN components
+            "mlp.experts.down_proj",
+            "mlp.experts.gate_up_proj",
+            "mlp.experts.up_proj",
         ]
         return LoraConfig(
             r=self.config.training.lora_rank,
@@ -81,14 +84,14 @@ class LoRATrainer:
         )
 
     def _load_tokenizer(self):
-        """Load tokenizer for the base model."""
-        tokenizer = AutoTokenizer.from_pretrained(self.base_model_path, trust_remote_code=True)
+        """Load tokenizer for GPT-OSS models."""
+        tokenizer = AutoTokenizer.from_pretrained(self.base_model_path)
         logger.info(f"Tokenizer loaded: {type(tokenizer).__name__}, vocab_size={tokenizer.vocab_size}")
 
         if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = "<|endoftext|>"
+            tokenizer.pad_token = tokenizer.eos_token or "<|endoftext|>"
+        if tokenizer.eos_token is None:
+            tokenizer.eos_token = "<|return|>"
 
         return tokenizer
 
@@ -105,20 +108,19 @@ class LoRATrainer:
         except Exception:
             pass
 
-        logger.info(f"Loading model from {self.base_model_path} on CPU (bfloat16)...")
+        logger.info(f"Loading model from {self.base_model_path} on CPU (float32)...")
         torch.set_num_threads(self.config.training.cpu_threads)
         logger.info(f"PyTorch CPU threads: {torch.get_num_threads()}")
 
-        model = Mistral3ForConditionalGeneration.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             self.base_model_path,
             device_map="cpu",
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.float32,
             trust_remote_code=True,
-            # use_cache=False,
+            use_cache=False,
             low_cpu_mem_usage=True,
-            quantization_config=None,
         )
-        model = model.bfloat16()
+        model = model.float()
 
         # Freeze base parameters; only LoRA + router layers will train
         for name, param in model.named_parameters():
@@ -152,7 +154,7 @@ class LoRATrainer:
             # Apply LoRA
             model = get_peft_model(model, self.lora_config)
             model.print_trainable_parameters()
-            # model.config.use_cache = False
+            model.config.use_cache = False
 
             is_dpo_mode = self.config.training.enable_dpo and DPO_AVAILABLE
 
@@ -293,7 +295,7 @@ class LoRATrainer:
             use_cpu=True,
             beta=self.config.training.dpo_beta,
             max_length=self.config.training.max_seq_length,
-            # max_prompt_length=self.config.training.max_seq_length // 2,
+            max_prompt_length=self.config.training.max_seq_length // 2,
         )
 
         trainer = DPOTrainer(
@@ -320,13 +322,13 @@ class LoRATrainer:
         return adapter_path, metrics
 
     def _prepare_dataset(self, dataset: List[Dict[str, Any]], tokenizer) -> Dataset:
-        """Tokenize SFT dataset using ChatML format."""
+        """Tokenize SFT dataset using GPT-OSS Harmony format."""
 
         def format_example(example):
             prompt = example["prompt"]
             completion = example["completion"]
 
-            prompt_text = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+            prompt_text = f"<|start|>user<|message|>{prompt}<|end|><|start|>assistant<|channel|>final<|message|>"
             prompt_tokens = tokenizer(
                 prompt_text,
                 truncation=True,
@@ -336,7 +338,7 @@ class LoRATrainer:
             )
             prompt_len = len(prompt_tokens["input_ids"])
 
-            full_text = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n{completion}<|im_end|>"
+            full_text = f"<|start|>user<|message|>{prompt}<|end|><|start|>assistant<|channel|>final<|message|>{completion}<|return|>"
             tokens = tokenizer(
                 full_text,
                 truncation=True,
@@ -373,11 +375,11 @@ class LoRATrainer:
             except Exception:
                 pass
 
-            model = Mistral3ForConditionalGeneration.from_pretrained(
+            model = AutoModelForCausalLM.from_pretrained(
                 self.base_model_path,
                 device_map="cpu",
                 torch_dtype="auto",
-                # use_cache=False,
+                use_cache=False,
             )
             model = PeftModel.from_pretrained(model, adapter_path)
             model = model.merge_and_unload()

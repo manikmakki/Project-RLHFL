@@ -41,7 +41,7 @@ echo ""
 if [ -d "$MODELS_DIR/Ministral-3-14B" ] && [ -f "$MODELS_DIR/Ministral-3-14B/config.json" ]; then
     echo "HuggingFace model already exists, skipping download."
 else
-    git clone 'https://huggingface.co/dphn/Ministral-3-14B' "$MODELS_DIR/Ministral-3-14B"
+    git clone 'https://huggingface.co/mistralai/Ministral-3-14B-Instruct-2512-BF16' "$MODELS_DIR/Ministral-3-14B"
     echo "✓ HuggingFace model downloaded"
 fi
 
