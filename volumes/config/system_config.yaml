@@ -63,8 +63,8 @@ training:
   max_checkpoint_count: 3
   max_gguf_files: 2
 
-psyche:
-  enabled: false
+psyche:                           # Psyche behavior is still in early stages of development and testing, so defaults to disabled for now. Use with caution and expect some instability until further testing and refinement is done.
+  enabled: false                  # whether to enable the full psyche architecture (id + ego + superego) or just use a single model without roles
 
   # ── Multi-model roles (empty = use model.model_id) ──
   id_model: ""

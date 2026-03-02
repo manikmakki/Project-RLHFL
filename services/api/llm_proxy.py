@@ -88,10 +88,31 @@ class LLMProxy:
         """Build Ollama API request format."""
         ollama_messages = []
         for msg in messages:
-            message_dict = {
-                "role": msg.role.value,
-                "content": msg.get_text_content() or ""
-            }
+            message_dict = {"role": msg.role.value}
+            if isinstance(msg.content, list):
+                # Extract text and base64 images from content blocks.
+                # Ollama expects content as a string and images as a separate list.
+                text_parts = []
+                images = []
+                for part in msg.content:
+                    if not isinstance(part, dict):
+                        text_parts.append(str(part))
+                        continue
+                    part_type = part.get("type", "")
+                    if part_type == "text":
+                        text_parts.append(part.get("text", ""))
+                    elif part_type == "image_url":
+                        url = part.get("image_url", {}).get("url", "")
+                        # Strip data URI prefix if present (data:image/...;base64,<data>)
+                        if url.startswith("data:") and ";base64," in url:
+                            images.append(url.split(";base64,", 1)[1])
+                        elif url:
+                            images.append(url)
+                message_dict["content"] = "\n".join(text_parts)
+                if images:
+                    message_dict["images"] = images
+            else:
+                message_dict["content"] = msg.get_text_content() or ""
             ollama_messages.append(message_dict)
 
         options = {
@@ -129,10 +150,19 @@ class LLMProxy:
         """Build OpenAI API request format."""
         openai_messages = []
         for msg in messages:
+            # Preserve multipart content arrays (images, files, etc.) as-is;
+            # OpenAI's API natively supports List[content_block] for content.
+            content = msg.content if isinstance(msg.content, list) else (msg.get_text_content() or "")
             message_dict = {
                 "role": msg.role.value,
-                "content": msg.get_text_content() or ""
+                "content": content,
             }
+            if msg.tool_calls:
+                message_dict["tool_calls"] = [tc.model_dump() for tc in msg.tool_calls]
+            if msg.tool_call_id:
+                message_dict["tool_call_id"] = msg.tool_call_id
+            if msg.name:
+                message_dict["name"] = msg.name
             openai_messages.append(message_dict)
 
         request_payload = {
