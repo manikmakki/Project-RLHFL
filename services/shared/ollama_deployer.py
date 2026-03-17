@@ -177,13 +177,30 @@ class OllamaDeployer:
                 return False
 
             with open(config_path) as f:
-                config = yaml.safe_load(f)
+                raw = f.read()
 
-            old_model = config.get("llm_proxy", {}).get("external_model_name")
-            config.setdefault("llm_proxy", {})["external_model_name"] = model_name
+            import re
+            old_model = None
+            m = re.search(r"^\s*external_model_name:\s*(.+)$", raw, re.MULTILINE)
+            if m:
+                old_model = m.group(1).strip()
+                raw = re.sub(
+                    r"^(\s*external_model_name:\s*).*$",
+                    rf"\g<1>{model_name}",
+                    raw,
+                    flags=re.MULTILINE,
+                )
+            else:
+                # Key absent — append under llm_proxy block
+                raw = re.sub(
+                    r"(^llm_proxy:.*?)(\n\S|\Z)",
+                    rf"\1\n  external_model_name: {model_name}\2",
+                    raw,
+                    flags=re.MULTILINE | re.DOTALL,
+                )
 
             with open(config_path, "w") as f:
-                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+                f.write(raw)
 
             logger.info(f"Config updated: {old_model} -> {model_name}")
             return True
