@@ -316,7 +316,6 @@ class LoRATrainerDense:
             use_cpu=True,
             beta=self.config.training.dpo_beta,
             max_length=self.config.training.max_seq_length,
-            max_prompt_length=self.config.training.max_seq_length // 2,
         )
 
         trainer = DPOTrainer(
