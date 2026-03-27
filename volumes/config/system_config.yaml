@@ -32,6 +32,7 @@ llm_proxy:
   retry_delay_seconds: 1.0
   max_connections: 10
   max_keepalive_connections: 5
+  external_model_name: ministral-3:14b
 
 training:
   batch_size: 2
