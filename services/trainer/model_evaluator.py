@@ -49,20 +49,35 @@ class ModelEvaluator:
         logger.info(f"Evaluating checkpoint: {checkpoint_id}")
 
         try:
+            current_metrics = self._load_current_metrics()
+
             # Compute metrics from training results
             if training_metrics:
                 eval_loss = training_metrics.get("eval_loss", 0.0)
-                metrics = {
-                    "perplexity": float(math.exp(eval_loss)) if eval_loss < 100 else 999.0,
-                    "train_loss": float(training_metrics.get("train_loss", 0.0)),
-                    "eval_loss": float(eval_loss),
-                }
+                mode = training_metrics.get("mode", "sft")
+
+                if mode == "dpo":
+                    # DPO eval_loss is a preference loss (logit margin), not CE loss.
+                    # exp(DPO_loss) is not perplexity — carry forward the existing
+                    # baseline so it isn't corrupted by a meaningless value.
+                    carried = current_metrics.get("perplexity", 999.0) if current_metrics else 999.0
+                    metrics = {
+                        "perplexity": carried,
+                        "train_loss": float(training_metrics.get("train_loss", 0.0)),
+                        "eval_loss": float(eval_loss),
+                        "mode": "dpo",
+                    }
+                else:
+                    metrics = {
+                        "perplexity": float(math.exp(eval_loss)) if eval_loss < 100 else 999.0,
+                        "train_loss": float(training_metrics.get("train_loss", 0.0)),
+                        "eval_loss": float(eval_loss),
+                        "mode": "sft",
+                    }
             else:
-                metrics = {"perplexity": 999.0, "train_loss": 0.0, "eval_loss": 0.0}
+                metrics = {"perplexity": 999.0, "train_loss": 0.0, "eval_loss": 0.0, "mode": "sft"}
 
             logger.info(f"Checkpoint metrics: {metrics}")
-
-            current_metrics = self._load_current_metrics()
 
             metadata = CheckpointMetadata(
                 checkpoint_id=checkpoint_id,
@@ -113,6 +128,23 @@ class ModelEvaluator:
 
         new_perplexity = new_metrics.get("perplexity", 999.0)
         current_perplexity = current_metrics.get("perplexity", 999.0)
+
+        if new_metrics.get("mode") == "dpo":
+            logger.info(
+                f"DPO checkpoint: train_loss={new_metrics.get('train_loss', 0):.4f}, "
+                f"dpo_eval_loss={new_metrics.get('eval_loss', 0):.4f} "
+                f"(perplexity comparison skipped — DPO loss is not CE loss)"
+            )
+
+        floor = self.config.training.min_reasonable_perplexity
+        if current_perplexity < floor:
+            logger.warning(
+                f"Stored baseline perplexity {current_perplexity:.4f} is below the sanity "
+                f"floor of {floor} — likely caused by eval/train data contamination in a "
+                f"previous run. Ignoring baseline; treating as first deployment."
+            )
+            logger.info(f"Perplexity: {new_perplexity:.2f} vs <corrupted baseline> (PASS — baseline reset)")
+            return True
 
         # Allow 5% degradation in perplexity
         perplexity_ok = new_perplexity <= current_perplexity * 1.05

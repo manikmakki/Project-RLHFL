@@ -78,6 +78,12 @@ class TrainingConfig(BaseModel):
     max_checkpoint_count: int = 3  # Max checkpoint dirs to keep
     max_gguf_files: int = 2  # Max old GGUF files in Ollama
 
+    # Sanity floor for perplexity comparison. A stored baseline below this value
+    # is almost certainly caused by eval/train data contamination and should not
+    # be used as the comparison target. Real LLMs on conversational data stay well
+    # above this range.
+    min_reasonable_perplexity: float = 2.0
+
 
 class MemoryConfig(BaseModel):
     max_memory_age_days: int = 90

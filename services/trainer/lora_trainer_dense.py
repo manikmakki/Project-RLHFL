@@ -204,6 +204,7 @@ class LoRATrainerDense:
                 f"Training complete. Loss: {metrics.get('train_loss', 0):.4f} "
                 f"(eval: {metrics.get('eval_loss', 0):.4f})"
             )
+            metrics["mode"] = "dpo" if is_dpo_mode else "sft"
             return adapter_path, metrics
 
         except Exception as e:
