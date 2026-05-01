@@ -61,7 +61,6 @@ class MemoryManager:
         weight: float = 1.0,
         is_golden: bool = False,
         is_refusal: bool = False,
-        psyche_metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Store an interaction in the vector database."""
         try:
@@ -99,10 +98,6 @@ class MemoryManager:
                 "truncated": truncated
             }
 
-            # Store psyche metadata as JSON string (ChromaDB doesn't support nested dicts)
-            if psyche_metadata:
-                metadata["psyche_metadata"] = json.dumps(psyche_metadata)
-            
             # Store in main collection
             self.collection.add(
                 ids=[interaction_id],
@@ -147,14 +142,6 @@ class MemoryManager:
                 if timestamp and interaction_timestamp <= timestamp:
                     continue
                 
-                # Parse psyche_metadata from JSON string if present
-                psyche_meta = {}
-                if metadata.get('psyche_metadata'):
-                    try:
-                        psyche_meta = json.loads(metadata['psyche_metadata'])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
                 interaction = Interaction(
                     id=results['ids'][i],
                     conversation_id=metadata['conversation_id'],
@@ -164,7 +151,6 @@ class MemoryManager:
                     sentiment=metadata.get('sentiment', 0.0),
                     weight=metadata.get('weight', 1.0),
                     metadata=metadata,
-                    psyche_metadata=psyche_meta,
                 )
                 interactions.append(interaction)
             

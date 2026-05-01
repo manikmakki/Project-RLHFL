@@ -15,7 +15,7 @@ class TrainingScheduler:
         self.inactivity_hours = config.training.inactivity_threshold_hours
         self.max_days_between = config.training.max_days_between_training
     
-    def should_trigger_training(self, stats: TrainingStats, pattern_analysis=None) -> tuple[bool, str, str]:
+    def should_trigger_training(self, stats: TrainingStats) -> tuple[bool, str, str]:
         """
         Determine if training should be triggered and which mode to use.
 
@@ -24,23 +24,10 @@ class TrainingScheduler:
         - Positive/golden accumulation → SFT (reinforce good behavior)
         - Inactivity consolidation → auto-select based on data
 
-        Args:
-            stats: Training statistics
-            pattern_analysis: Optional PatternAnalysis from Ego Slow (psyche module).
-                If provided, its recommendations are logged but do not override
-                the existing trigger logic. Future versions may use this to
-                adjust thresholds dynamically.
-
         Returns:
             tuple[bool, str, str]: (should_train, reason, mode)
             mode = "sft" | "dpo" | "auto"
         """
-        # Log Ego Slow recommendations if available
-        if pattern_analysis and pattern_analysis.recommendation_notes:
-            logger.info(
-                f"Ego Slow recommendations: {pattern_analysis.recommendation_notes}"
-            )
-
         # Priority 1: User manual request (mode selected based on data)
         if stats.user_requested_training:
             mode = self._select_mode_from_stats(stats)

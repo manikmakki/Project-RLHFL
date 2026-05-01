@@ -101,16 +101,7 @@ class TrainerWorker:
             status_message = self.scheduler.get_status_message(stats)
             logger.info(f"Training status:\n{status_message}")
 
-            # Get pattern analysis from Ego Slow if available
-            pattern_analysis = None
-            try:
-                from api.psyche.ego_slow import EgoSlow
-                ego_slow = EgoSlow(self.config, self.memory_manager)
-                pattern_analysis = ego_slow.analyze_patterns()
-            except Exception as e:
-                logger.debug(f"Ego Slow analysis not available: {e}")
-
-            should_train, reason, mode = self.scheduler.should_trigger_training(stats, pattern_analysis)
+            should_train, reason, mode = self.scheduler.should_trigger_training(stats)
             if should_train:
                 logger.info(f"Training conditions met: {reason} (mode: {mode})")
                 self.memory_manager.request_training(reason=reason, training_mode=mode)

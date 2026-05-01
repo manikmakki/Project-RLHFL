@@ -79,11 +79,15 @@ class ModelEvaluator:
 
             logger.info(f"Checkpoint metrics: {metrics}")
 
+            # CheckpointMetadata.metrics is Dict[str, float]; strip the "mode" string
+            # key before construction so Pydantic doesn't reject it.
+            float_metrics = {k: v for k, v in metrics.items() if k != "mode"}
+
             metadata = CheckpointMetadata(
                 checkpoint_id=checkpoint_id,
                 adapter_path=adapter_path,
                 timestamp=datetime.now(),
-                metrics=metrics,
+                metrics=float_metrics,
                 parent_checkpoint=self._get_current_checkpoint_id(),
                 training_samples=len(val_dataset),
                 can_rollback=True,

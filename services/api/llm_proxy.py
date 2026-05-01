@@ -302,7 +302,7 @@ class LLMProxy:
             max_tokens: Maximum tokens to generate
             tools: Optional tool definitions
             tool_choice: Optional tool choice strategy
-            model_override: Use a different model than the default (for multi-model Psyche)
+            model_override: Use a different model than the default
 
         Returns:
             Dict with content, tool_calls, thinking, and finish_reason
@@ -356,7 +356,7 @@ class LLMProxy:
             max_tokens: Maximum tokens to generate
             tools: Optional tool definitions
             tool_choice: Optional tool choice strategy
-            model_override: Use a different model than the default (for multi-model Psyche)
+            model_override: Use a different model than the default
 
         Yields:
             Chunks in OpenAI streaming format

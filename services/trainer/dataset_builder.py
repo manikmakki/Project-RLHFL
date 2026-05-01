@@ -153,7 +153,7 @@ class DatasetBuilder:
         Returns:
             Dataset with (prompt, chosen, rejected) triplets for DPO training
         """
-        # Separate refusal interactions (stored by psyche post-process)
+        # Separate refusal interactions
         refusal_interactions = [i for i in interactions if i.metadata.get('is_refusal', False)]
         non_refusal_interactions = [i for i in interactions if not i.metadata.get('is_refusal', False)]
 
@@ -183,35 +183,18 @@ class DatasetBuilder:
         )
 
         # Refusal interactions: the stored response IS the refusal (rejected).
-        # If a retry succeeded, psyche_metadata contains the good response (chosen).
+        # No retry mechanism exists, so these are always rejected-only DPO signals.
         for interaction in refusal_interactions:
-            psyche_meta = interaction.psyche_metadata or {}
-            retry_response = psyche_meta.get("retry_response")
-
-            if retry_response:
-                # Best case: we have both the refusal (rejected) and retry (chosen)
-                dataset.append({
-                    "prompt": interaction.user_message,
-                    "chosen": retry_response,
-                    "rejected": interaction.assistant_response,
-                    "weight": interaction.weight,
-                    "sentiment": interaction.sentiment,
-                    "type": "refusal_dpo"
-                })
-            else:
-                # No retry response available - store as rejected-only for now.
-                # Can be paired with synthetic chosen responses in the future.
-                dataset.append({
-                    "prompt": interaction.user_message,
-                    "chosen": None,
-                    "rejected": interaction.assistant_response,
-                    "weight": interaction.weight,
-                    "sentiment": interaction.sentiment,
-                    "type": "refusal_rejected_only"
-                })
+            dataset.append({
+                "prompt": interaction.user_message,
+                "chosen": None,
+                "rejected": interaction.assistant_response,
+                "weight": interaction.weight,
+                "sentiment": interaction.sentiment,
+                "type": "refusal_rejected_only"
+            })
 
         logger.info(
-            f"Refusal DPO pairs: {sum(1 for d in dataset if d['type'] == 'refusal_dpo')}, "
             f"Refusal rejected-only: {sum(1 for d in dataset if d['type'] == 'refusal_rejected_only')}"
         )
 
@@ -336,7 +319,10 @@ class DatasetBuilder:
             # DPO requires both chosen and rejected responses
             if sample.get('chosen') and sample.get('rejected'):
                 formatted.append({
-                    "prompt": sample['prompt'],
+                    # Strip trailing whitespace so BPE tokenizers don't merge the
+                    # trailing space with the first token of chosen/rejected, which
+                    # causes DPOTrainer to warn about prompt/completion token mismatches.
+                    "prompt": sample['prompt'].rstrip(),
                     "chosen": sample['chosen'],
                     "rejected": sample['rejected']
                 })

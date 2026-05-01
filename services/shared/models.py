@@ -322,10 +322,6 @@ class Interaction(BaseModel):
     sentiment: float = 0.0
     weight: float = 1.0
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    psyche_metadata: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Metadata from Id/Ego/Superego layers for training analysis"
-    )
 
 
 class TrainingStats(BaseModel):

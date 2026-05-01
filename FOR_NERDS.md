@@ -18,7 +18,6 @@ graph TB
         MM[Memory Manager<br/>ChromaDB + Embeddings]
         SA[Sentiment Analyzer<br/>Rule-based patterns]
         AU[Admin UI<br/>/admin dashboard]
-        PS[Psyche Module<br/>Id / Ego / Superego]
     end
 
     subgraph "Ollama Container (llm-ollama)"
@@ -48,7 +47,6 @@ graph TB
     FP --> MM
     FP --> SA
     FP --> AU
-    FP --> PS
 
     LE -->|HTTP| OL
     OL --> GGUF
@@ -92,18 +90,13 @@ Every chat request follows this path:
 sequenceDiagram
     participant U as User/Client
     participant API as FastAPI
-    participant PSY as Psyche (Id/Ego/Superego)
     participant LLM as Ollama (LLM Proxy)
     participant SA as Sentiment Analyzer
     participant DB as ChromaDB
 
     U->>API: POST /v1/chat/completions (or /api/chat)
-    API->>PSY: Pre-process (judge, framing, enrichment)
-    PSY-->>API: Enriched messages (or block)
-    API->>LLM: Generate (enriched messages)
+    API->>LLM: Generate
     LLM-->>API: Response text
-    API->>PSY: Post-process (refusal detection, reflection parsing)
-    PSY-->>API: Validated response
     API-->>U: OpenAI-format response
     API->>SA: Analyze user message
     SA-->>API: sentiment, weight, is_golden
@@ -493,133 +486,6 @@ graph LR
 | Model loading | Transformers | 4.36.0 | HuggingFace model hub, tokenizers, configs |
 | Scheduling | APScheduler | 3.10.4 | Background interval-based job scheduling |
 | Config | Pydantic + YAML | 2.5.0 | Typed config with validation and env var support |
-
-## Psyche Module (Id / Ego / Superego)
-
-The Psyche module adds a Freudian-inspired agent architecture as middleware around the existing proxy. All three layers are always-on but transparent, with independent kill switches in `system_config.yaml`. If any layer fails, the request continues without it.
-
-```mermaid
-sequenceDiagram
-    participant U as User/Client
-    participant SE as Superego<br/>(Discrimination)
-    participant ID as Id Engine<br/>(Reward)
-    participant EF as Ego Fast<br/>(Reasoning)
-    participant LLM as Ollama
-
-    U->>SE: Request arrives
-    Note over SE: OUT OF BAND: judge request<br/>for objective danger
-    SE-->>SE: Fast-path patterns OR<br/>separate LLM judge call
-    SE->>ID: Allowed → compute reward context
-    ID-->>ID: Analyze sentiment trend<br/>from session history
-    ID->>EF: Reward context ready
-    EF-->>EF: Inject reasoning template +<br/>reward context + permissive framing
-    EF->>LLM: Enriched messages
-    LLM-->>SE: Response
-    Note over SE: Detect refusal → retry<br/>with stronger framing
-    SE->>EF: Validated response
-    EF-->>EF: Parse reflection,<br/>confidence, self-critique
-    EF->>ID: Record outcome
-    ID->>U: Final response
-```
-
-### Superego (Discrimination Layer)
-
-The Superego is **not** a content filter. It distinguishes *objectively dangerous* actions from *superficially sensitive but safe* ones, and actively works to reduce the base model's refusal rate.
-
-Three mechanisms, all out of band (invisible to the user):
-
-| Mechanism | When | How |
-|-----------|------|-----|
-| **Pre-flight judge** | Before LLM call | Separate LLM call evaluates: "Is this action objectively dangerous (destructive commands, credential exfiltration) or normal developer activity?" Fast-path patterns skip the judge for obvious cases. |
-| **Permissive framing** | Before LLM call | Invisible system prompt injection: developer context that reduces false refusals for API key testing, academic discussion, admin commands. |
-| **Refusal retry** | After LLM response | Regex detects refusal patterns ("I can't", "as an AI"). If detected, retries with stronger framing. User only sees the successful response. |
-
-Fast-path patterns (skip the LLM judge call entirely):
-
-| Type | Patterns | Action |
-|------|----------|--------|
-| **Danger** | `rm -rf /`, `:(){ :\|:& };:`, `mkfs.`, `dd if=/dev/zero` | Block immediately |
-| **Safe** | `localhost`, `127.0.0.1`, `0.0.0.0`, `::1` | Allow immediately |
-
-### Id Engine (Reward-Driven)
-
-Wraps the existing `SentimentAnalyzer` to track per-session reward trajectories. Uses a sliding window (`id_session_window`, default 10) of recent sentiment scores per conversation.
-
-- **Trend detection**: Compares first-half vs. second-half mean to classify as `improving`, `declining`, or `stable`
-- **System prompt fragments**: When the trend is significant, injects context like "Your recent responses have been well-received" or "Recent responses have not fully met expectations"
-- **Temperature nudge**: Suggests conservative temperature when declining, slightly creative when improving
-
-### Ego Fast (Per-Request Reasoning)
-
-Lightweight per-request enrichment that leverages the thinking model's native chain-of-thought. Does **not** add an outer multi-call loop.
-
-- **System prompt enrichment**: Injects a think→plan→act→reflect template to encourage structured reasoning
-- **Response parsing**: Regex-based extraction of self-critique markers ("on reflection", "I should have"), confidence signals ("I'm confident" vs. "I'm not sure")
-- **Thinking field**: Populates the existing `thinking` field on `ChatMessage` (previously unused)
-
-### Ego Slow (Background Strategy)
-
-Extends the existing `TrainingScheduler` with pattern analysis. Runs periodically (default every 4 hours) to analyze interaction trends from ChromaDB.
-
-- **Sentiment trend analysis**: Computes trend over the last 7 days of interactions
-- **Failure topic extraction**: Identifies common keywords in negatively-rated interactions
-- **Training recommendations**: Feeds `PatternAnalysis` into `TrainingScheduler.should_trigger_training()` — logged for now, with hooks for future dynamic threshold adjustment
-
-### Psyche Configuration
-
-All psyche settings live under the `psyche:` key in `system_config.yaml`:
-
-```yaml
-psyche:
-  enabled: true                          # Master kill switch
-
-  # Id Engine
-  id_enabled: true
-  id_session_window: 10                  # Sentiment scores to track per session
-  id_reward_prompt_threshold: 0.3        # Min magnitude to inject reward context
-
-  # Ego Fast
-  ego_fast_enabled: true
-  ego_reasoning_prompt: true             # Inject think-plan-act-reflect template
-  ego_parse_reflection: true             # Parse self-critique from output
-
-  # Ego Slow
-  ego_slow_enabled: true
-  ego_pattern_analysis_interval_hours: 4
-
-  # Superego
-  superego_enabled: true
-  superego_judge_model: ""               # Empty = use main proxy model
-  superego_permissive_framing: true
-  superego_refusal_retry: true
-  superego_max_retries: 1
-  superego_judge_timeout_seconds: 15
-  superego_danger_patterns: [...]        # Fast-path block list
-  superego_safe_patterns: [...]          # Fast-path allow list
-```
-
-### Psyche File Map
-
-```
-services/api/psyche/
-├── __init__.py         # Package docstring
-├── models.py           # Pydantic models (RewardContext, JudgmentResult, etc.)
-├── superego.py         # Discrimination layer (judge, framing, refusal retry)
-├── ego_fast.py         # Per-request reasoning (enrichment + parsing)
-├── id_engine.py        # Reward engine (session tracking + trends)
-├── ego_slow.py         # Background planner (pattern analysis)
-└── orchestrator.py     # Central coordinator (pre_process / post_process)
-```
-
-### Graceful Degradation
-
-| Component | If Disabled/Failed | Behavior |
-|-----------|-------------------|----------|
-| Full psyche | `psyche.enabled: false` | Orchestrator skipped entirely — identical to pre-psyche behavior |
-| Superego | `superego_enabled: false` | No request validation, no framing, no refusal retry |
-| Id Engine | `id_enabled: false` | No reward context — Ego Fast gets `reward_context=None` |
-| Ego Fast | `ego_fast_enabled: false` | No system prompt enrichment, no reflection parsing |
-| Ego Slow | `ego_slow_enabled: false` | Training scheduler uses existing logic without pattern analysis |
 
 ## Known Limitations
 

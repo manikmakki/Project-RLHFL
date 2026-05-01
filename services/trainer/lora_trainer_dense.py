@@ -290,6 +290,10 @@ class LoRATrainerDense:
     def _train_dpo(self, model, tokenizer, train_dataset, val_dataset, checkpoint_path):
         """DPO training using TRL DPOTrainer with CPU AMP (bf16=True)."""
         logger.info("Using DPO (Direct Preference Optimization) mode")
+        # Suppress the per-sample tokenization mismatch warnings from TRL — these fire
+        # when BPE merges a trailing space across the prompt/response boundary, which
+        # is handled by rstrip() in dataset_builder. Any remaining instances are benign.
+        logging.getLogger("trl.trainer.dpo_trainer").setLevel(logging.ERROR)
 
         train_ds = Dataset.from_list(train_dataset)
         val_ds = Dataset.from_list(val_dataset)

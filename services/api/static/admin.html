@@ -1434,19 +1434,6 @@
                     requestToolsHtml += `</div></div>`;
                 }
 
-                // Build psyche badge
-                let psycheHtml = '';
-                if (item.psyche && item.psyche.active) {
-                    const p = item.psyche;
-                    let badges = [];
-                    if (p.complexity) badges.push(`<span class="badge" style="background:#667eea;color:white;">${p.complexity}</span>`);
-                    if (p.turns) badges.push(`<span class="badge" style="background:#9b59b6;color:white;">turns: ${p.turns}</span>`);
-                    if (p.quality_score !== null && p.quality_score !== undefined) badges.push(`<span class="badge" style="background:${p.quality_score >= 0.7 ? '#27ae60' : '#f39c12'};color:white;">score: ${p.quality_score}</span>`);
-                    if (badges.length > 0) {
-                        psycheHtml = `<div style="margin-top:6px; display:flex; gap:4px; flex-wrap:wrap;">${badges.join('')}</div>`;
-                    }
-                }
-
                 html += `
                     <div style="background: #f9f9f9; border-radius: 6px; padding: 12px; margin-bottom: 12px; border-left: 4px solid ${resp && resp.tool_calls ? '#f39c12' : '#667eea'};">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -1465,7 +1452,6 @@
                         </div>
                         ${requestToolsHtml}
                         ${responseHtml}
-                        ${psycheHtml}
                         <div id="api-json-${index}" class="json-viewer" style="display: none; margin-top: 8px;">
                             <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">${syntaxHighlight(jsonStr)}</pre>
                         </div>

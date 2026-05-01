@@ -135,85 +135,12 @@ class LLMProxyConfig(BaseModel):
     max_keepalive_connections: int = 5
 
 
-class PsycheConfig(BaseModel):
-    """Configuration for the Psyche module (Id / Ego / Superego)."""
-    enabled: bool = True
-
-    # Multi-model roles (empty = use main model from llm_proxy.external_model_name)
-    id_model: str = ""           # Small reward/desire model (e.g. qwen2.5:1.5b-instruct)
-    ego_model: str = ""          # Response generation model (e.g. ministral-3:14b)
-    superego_model: str = ""     # Critique/optimization model (e.g. phi4-mini:3.8b)
-
-    # Refinement loop
-    refinement_enabled: bool = True
-    max_refinement_turns: int = 5
-    quality_threshold: float = 0.7       # Accept response at or above this score
-    min_quality_for_accept: float = 0.5  # Accept even below threshold if best after max turns
-    complexity_bypass_chars: int = 50    # Skip refinement for very short prompts
-    refinement_bypass_tools: bool = True  # Skip refinement when tools are present
-
-    # Client parameter control
-    override_client_params: bool = True  # Strip client-sent temp/top_p/top_k
-
-    # Id Engine (reward-driven)
-    id_enabled: bool = True
-    id_session_window: int = 10
-    id_reward_prompt_threshold: float = 0.3
-
-    # Ego Fast (per-request reasoning) — legacy, used only when refinement_enabled=False
-    ego_fast_enabled: bool = True
-    ego_reasoning_prompt: bool = True
-    ego_parse_reflection: bool = True
-
-    # Ego Slow (background strategy)
-    ego_slow_enabled: bool = True
-    ego_pattern_analysis_interval_hours: int = 4
-
-    # Superego (discrimination + optimization)
-    superego_enabled: bool = True
-    superego_safety_judge: bool = True  # LLM-based safety judge (disable to keep only pattern matching)
-    superego_permissive_framing: bool = True
-    superego_refusal_retry: bool = True
-    superego_max_retries: int = 1
-    superego_judge_timeout_seconds: int = 15
-
-    # Superego parameter control
-    superego_param_control: bool = True
-    superego_temp_range: list = [0.1, 1.2]
-    superego_top_p_range: list = [0.3, 1.0]
-    superego_top_k_range: list = [5, 100]
-    superego_judge_max_tokens: int = 100
-
-    # Superego self-introspection
-    superego_introspection_interval: int = 25  # Self-evaluate every N conversations
-    superego_profile_path: str = "/data/superego_profile.json"
-
-    # Deliberation exposure
-    expose_deliberation: bool = False  # Include inner loop dialogue in response thinking field
-
-    # Safety patterns
-    superego_danger_patterns: list[str] = [
-        "rm -rf /",
-        ":(){ :|:& };:",
-        "mkfs.",
-        "dd if=/dev/zero",
-        "> /dev/sda",
-    ]
-    superego_safe_patterns: list[str] = [
-        "localhost",
-        "127.0.0.1",
-        "0.0.0.0",
-        "::1",
-    ]
-
-
 class SystemConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     sentiment: SentimentConfig = Field(default_factory=SentimentConfig)
     llm_proxy: LLMProxyConfig = Field(default_factory=LLMProxyConfig)
-    psyche: PsycheConfig = Field(default_factory=PsycheConfig)
 
     @model_validator(mode='after')
     def _resolve_model_defaults(self) -> 'SystemConfig':
@@ -221,7 +148,7 @@ class SystemConfig(BaseModel):
         Auto-derive dependent model names from model.model_id when not explicitly set.
 
         This makes model.model_id the single source of truth — changing it once
-        propagates to llm_proxy, training, and psyche without editing each field.
+        propagates to llm_proxy and training without editing each field.
         """
         mid = self.model.model_id
 

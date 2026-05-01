@@ -48,10 +48,6 @@ from api.memory_manager import MemoryManager
 from api.sentiment_analyzer import SentimentAnalyzer
 from api.prompt_interceptor import PromptInterceptor
 from api.admin_ui import admin_router
-from api.psyche.orchestrator import PsycheOrchestrator
-from api.psyche.superego import Superego
-from api.psyche.ego_fast import EgoFast
-from api.psyche.id_engine import IdEngine
 
 # Configure logging
 logging.basicConfig(
@@ -66,7 +62,6 @@ llm_proxy = None  # HTTP proxy to external LLM
 memory_manager = None
 sentiment_analyzer = None
 prompt_interceptor = None
-psyche = None  # Psyche orchestrator (Id/Ego/Superego)
 background_tasks = set()  # Track background storage tasks for graceful shutdown
 recent_api_requests = deque(maxlen=50)  # Rolling buffer of last 50 API requests (includes response data)
 training_in_progress = False  # Flag to indicate training is active (model unloaded)
@@ -208,7 +203,7 @@ def parse_model_response(content: str) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager for FastAPI app."""
-    global config, llm_proxy, memory_manager, sentiment_analyzer, prompt_interceptor, psyche, background_tasks
+    global config, llm_proxy, memory_manager, sentiment_analyzer, prompt_interceptor, background_tasks
 
     # Startup
     logger.info("Starting LLM API service (Proxy Mode)...")
@@ -248,31 +243,6 @@ async def lifespan(app: FastAPI):
     # Initialize LLM proxy (replaces local model loading)
     llm_proxy = LLMProxy(config)
     logger.info(f"LLM Proxy initialized: {llm_proxy}")
-
-    # Initialize Psyche (Id/Ego/Superego) if enabled
-    if config.psyche.enabled:
-        try:
-            superego = Superego(config, llm_proxy=llm_proxy)
-            ego_fast = EgoFast(config)
-            id_engine = IdEngine(config, sentiment_analyzer, llm_proxy=llm_proxy)
-            psyche = PsycheOrchestrator(
-                config=config,
-                superego=superego,
-                ego_fast=ego_fast,
-                id_engine=id_engine,
-            )
-            logger.info(
-                f"Psyche orchestrator initialized: "
-                f"refinement={'on' if config.psyche.refinement_enabled else 'off'}, "
-                f"ego_model={config.psyche.ego_model or '(main)'}, "
-                f"id_model={config.psyche.id_model or '(heuristic)'}, "
-                f"superego_model={config.psyche.superego_model or '(main)'}"
-            )
-        except Exception as e:
-            logger.error(f"Failed to initialize Psyche, continuing without it: {e}")
-            psyche = None
-    else:
-        logger.info("Psyche disabled in config")
 
     # Wire admin UI dependencies now that managers are initialized
     try:
@@ -468,11 +438,7 @@ async def health_check():
         external_model_name=config.llm_proxy.external_model_name if config else None
     )
 
-    response = status.model_dump()
-    if psyche:
-        response["psyche"] = psyche.is_healthy()
-
-    return response
+    return status.model_dump()
 
 
 @app.get("/v1/models")
@@ -563,18 +529,6 @@ async def chat_completions(request: ChatCompletionRequest):
                 user_message_text
             )
 
-        # --- Psyche processing ---
-        # Strip client sampling params when Psyche controls them
-        psyche_active = psyche and psyche.enabled
-        client_temperature = request.temperature
-        client_top_p = request.top_p
-        if psyche_active and config.psyche.override_client_params and not request.tools:
-            logger.debug(
-                f"Psyche: stripping client params (temp={request.temperature}, top_p={request.top_p})"
-            )
-            request.temperature = None
-            request.top_p = None
-
         # Request snapshot for admin debug log (response added after generation)
         _debug_request = {
             "messages": [msg.model_dump(exclude_none=True) for msg in messages_with_context],
@@ -599,179 +553,24 @@ async def chat_completions(request: ChatCompletionRequest):
         # --- Non-streaming path ---
         start_time = time.time()
 
-        if psyche_active and psyche.refinement_enabled and not request.tools:
-            # Psyche v2: single refine() call handles generation + refinement
-            try:
-                refinement_result = await psyche.refine(
-                    messages=messages_with_context,
-                    user_message_text=user_message_text,
-                    conversation_id=conversation_id,
-                    llm_proxy=llm_proxy,
-                    has_tools=bool(request.tools),
-                )
-
-                if not refinement_result.validation.allowed:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Request blocked: {refinement_result.validation.reason}"
-                    )
-
-                response_dict = refinement_result.best_response_dict
-                response_text = response_dict.get("content") or ""
-                tool_calls = response_dict.get("tool_calls")
-                thinking = response_dict.get("thinking")
-                finish_reason = response_dict.get("finish_reason", "stop")
-
-                # Include deliberation as thinking context when enabled
-                if config.psyche.expose_deliberation and refinement_result.deliberation_log:
-                    delib_text = refinement_result.deliberation_log
-                    thinking = f"{delib_text}\n\n{thinking}" if thinking else delib_text
-
-                logger.info(
-                    f"Psyche refine complete: turns={refinement_result.turns_used}/{refinement_result.turns_budget}, "
-                    f"score={refinement_result.final_quality_score:.2f}, "
-                    f"complexity={refinement_result.complexity_class}, "
-                    f"refusal={refinement_result.refusal_detected}"
-                )
-
-                # Store refusal as negative training signal for DPO
-                if refinement_result.refusal_detected:
-                    try:
-                        await asyncio.to_thread(
-                            memory_manager.store_interaction,
-                            conversation_id=conversation_id,
-                            user_message=user_message_text,
-                            assistant_response=response_text,
-                            sentiment=-0.8,
-                            weight=2.0,
-                            is_refusal=True,
-                            psyche_metadata={
-                                "refusal_detected": True,
-                                "refinement_turns": refinement_result.turns_used,
-                                "complexity_class": refinement_result.complexity_class,
-                            },
-                        )
-                        logger.info("Stored refusal interaction as DPO training signal")
-                    except Exception as store_err:
-                        logger.error(f"Failed to store refusal interaction: {store_err}")
-
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Psyche refine failed, falling back to direct generation: {e}", exc_info=True)
-                response_dict = await llm_proxy.generate(
-                    messages=messages_with_context,
-                    temperature=client_temperature,
-                    top_p=client_top_p,
-                    max_tokens=request.max_tokens,
-                    tools=request.tools,
-                    tool_choice=request.tool_choice
-                )
-                response_text = response_dict.get("content") or ""
-                tool_calls = response_dict.get("tool_calls")
-                thinking = response_dict.get("thinking")
-                finish_reason = response_dict.get("finish_reason", "stop")
-
-        elif psyche_active and not request.tools:
-            # Psyche v1 legacy: pre_process → generate → post_process
-            psyche_pre_result = None
-            try:
-                psyche_pre_result = await psyche.pre_process(
-                    messages=messages_with_context,
-                    user_message_text=user_message_text,
-                    conversation_id=conversation_id,
-                )
-                if not psyche_pre_result.validation.allowed:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Request blocked: {psyche_pre_result.validation.reason}"
-                    )
-                messages_with_context = psyche_pre_result.messages
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Psyche pre-process failed, continuing without it: {e}")
-
-            response_dict = await llm_proxy.generate(
-                messages=messages_with_context,
-                temperature=client_temperature,
-                top_p=client_top_p,
-                max_tokens=request.max_tokens,
-                tools=request.tools,
-                tool_choice=request.tool_choice
-            )
-            response_text = response_dict.get("content") or ""
-            tool_calls = response_dict.get("tool_calls")
-            thinking = response_dict.get("thinking")
-            finish_reason = response_dict.get("finish_reason", "stop")
-
-            if psyche_pre_result:
-                try:
-                    psyche_post_result = await psyche.post_process(
-                        response_dict=response_dict,
-                        conversation_id=conversation_id,
-                        pre_result=psyche_pre_result,
-                        messages=list(request.messages),
-                        llm_proxy=llm_proxy,
-                    )
-                    response_dict = psyche_post_result.response_dict
-                    response_text = response_dict.get("content") or ""
-                    tool_calls = response_dict.get("tool_calls")
-                    thinking = response_dict.get("thinking") or thinking
-                    finish_reason = response_dict.get("finish_reason", finish_reason)
-
-                    if psyche_post_result.refusal_detected:
-                        try:
-                            original_refusal = psyche_post_result.metadata.get("original_refusal", response_text)
-                            await asyncio.to_thread(
-                                memory_manager.store_interaction,
-                                conversation_id=conversation_id,
-                                user_message=user_message_text,
-                                assistant_response=original_refusal,
-                                sentiment=-0.8,
-                                weight=2.0,
-                                is_refusal=True,
-                                psyche_metadata={
-                                    "refusal_detected": True,
-                                    "retry_attempted": psyche_post_result.retry_attempted,
-                                    "retry_succeeded": psyche_post_result.metadata.get("retry_succeeded"),
-                                },
-                            )
-                        except Exception as store_err:
-                            logger.error(f"Failed to store refusal interaction: {store_err}")
-                except Exception as e:
-                    logger.error(f"Psyche post-process failed: {e}", exc_info=True)
-
-        else:
-            # No Psyche — direct generation
-            response_dict = await llm_proxy.generate(
-                messages=messages_with_context,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                max_tokens=request.max_tokens,
-                tools=request.tools,
-                tool_choice=request.tool_choice
-            )
-            response_text = response_dict.get("content") or ""
-            tool_calls = response_dict.get("tool_calls")
-            thinking = response_dict.get("thinking")
-            finish_reason = response_dict.get("finish_reason", "stop")
+        response_dict = await llm_proxy.generate(
+            messages=messages_with_context,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_tokens=request.max_tokens,
+            tools=request.tools,
+            tool_choice=request.tool_choice
+        )
+        response_text = response_dict.get("content") or ""
+        tool_calls = response_dict.get("tool_calls")
+        thinking = response_dict.get("thinking")
+        finish_reason = response_dict.get("finish_reason", "stop")
 
         generation_time = time.time() - start_time
         logger.debug(f"Parsed response - finish_reason={finish_reason}, has_content={bool(response_text)}, thinking={bool(thinking)}, tool_calls={tool_calls}")
 
         # Log request + response to admin debug buffer
         try:
-            _debug_psyche = None
-            if psyche_active:
-                _ref = locals().get('refinement_result')
-                _debug_psyche = {
-                    "active": True,
-                    "refinement": getattr(psyche, 'refinement_enabled', False),
-                    "turns": _ref.turns_used if _ref else None,
-                    "quality_score": round(_ref.final_quality_score, 2) if _ref else None,
-                    "complexity": _ref.complexity_class if _ref else None,
-                }
             recent_api_requests.append({
                 "timestamp": datetime.now().isoformat(),
                 "endpoint": "/v1/chat/completions",
@@ -785,7 +584,6 @@ async def chat_completions(request: ChatCompletionRequest):
                     "thinking": thinking if thinking else None,
                     "finish_reason": finish_reason,
                 },
-                "psyche": _debug_psyche,
             })
             logger.debug(f"Admin debug log: appended non-streaming entry, deque now has {len(recent_api_requests)} items")
         except Exception as e:
@@ -910,111 +708,21 @@ async def stream_chat_completion(
         completion_id = f"chatcmpl-{uuid.uuid4()}"
         created = int(time.time())
 
-        psyche_active = psyche and psyche.enabled
-        use_refinement = psyche_active and psyche.refinement_enabled
-
-        # ----------------------------------------------------------------
-        # When psyche/refinement is active (and no tools), ALL internal LLM
-        # generation is non-streaming. Psyche needs the complete response
-        # to evaluate/refine. The final approved response is delivered
-        # as SSE chunks to the client.
-        #
-        # When tools are present, Psyche is bypassed entirely — the request
-        # goes straight to direct generation to ensure tool calls are never
-        # intercepted or modified.
-        #
-        # When psyche is disabled, true token-by-token streaming is used.
-        # ----------------------------------------------------------------
-
-        if use_refinement or request.tools:
-            if use_refinement and not request.tools:
-                logger.debug("Streaming with psyche refinement: running refine() then converting to SSE")
-
-                try:
-                    refinement_result = await psyche.refine(
-                        messages=messages_with_context,
-                        user_message_text=user_message,
-                        conversation_id=conversation_id,
-                        llm_proxy=llm_proxy,
-                        has_tools=bool(request.tools),
-                    )
-
-                    if not refinement_result.validation.allowed:
-                        error_chunk = {
-                            'id': completion_id, 'object': 'chat.completion.chunk',
-                            'created': created, 'model': model_id,
-                            'error': {'message': f"Blocked: {refinement_result.validation.reason}", 'type': 'content_filter'}
-                        }
-                        yield f"data: {json.dumps(error_chunk)}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
-
-                    response_dict = refinement_result.best_response_dict
-                    full_response = response_dict.get("content") or ""
-                    tool_calls = response_dict.get("tool_calls")
-                    thinking = response_dict.get("thinking")
-                    finish_reason = response_dict.get("finish_reason", "stop")
-
-                    # Include deliberation as thinking context
-                    if config.psyche.expose_deliberation and refinement_result.deliberation_log:
-                        delib_text = refinement_result.deliberation_log
-                        thinking = f"{delib_text}\n\n{thinking}" if thinking else delib_text
-
-                    logger.info(
-                        f"Psyche refine (streaming): turns={refinement_result.turns_used}/{refinement_result.turns_budget}, "
-                        f"score={refinement_result.final_quality_score:.2f}, "
-                        f"complexity={refinement_result.complexity_class}"
-                    )
-
-                    # Store refusal as DPO signal
-                    if refinement_result.refusal_detected:
-                        try:
-                            await asyncio.to_thread(
-                                memory_manager.store_interaction,
-                                conversation_id=conversation_id,
-                                user_message=user_message,
-                                assistant_response=full_response,
-                                sentiment=-0.8,
-                                weight=2.0,
-                                is_refusal=True,
-                                psyche_metadata={
-                                    "refusal_detected": True,
-                                    "refinement_turns": refinement_result.turns_used,
-                                },
-                            )
-                        except Exception as store_err:
-                            logger.error(f"Failed to store refusal: {store_err}")
-
-                except Exception as e:
-                    logger.error(f"Psyche refine (streaming) failed, falling back: {e}", exc_info=True)
-                    response_dict = await llm_proxy.generate(
-                        messages=messages_with_context,
-                        temperature=request.temperature,
-                        top_p=request.top_p,
-                        max_tokens=request.max_tokens,
-                        tools=request.tools,
-                        tool_choice=request.tool_choice
-                    )
-                    full_response = response_dict.get("content") or ""
-                    tool_calls = response_dict.get("tool_calls")
-                    thinking = response_dict.get("thinking")
-                    finish_reason = response_dict.get("finish_reason", "stop")
-
-            else:
-                # Tools present — direct generation, bypassing Psyche entirely
-                logger.debug("Streaming with tools: direct generation (Psyche bypassed), converting to SSE")
-                response_dict = await llm_proxy.generate(
-                    messages=messages_with_context,
-                    temperature=request.temperature,
-                    top_p=request.top_p,
-                    max_tokens=request.max_tokens,
-                    tools=request.tools,
-                    tool_choice=request.tool_choice
-                )
-                full_response = response_dict.get("content") or ""
-                tool_calls = response_dict.get("tool_calls")
-                thinking = response_dict.get("thinking")
-                finish_reason = response_dict.get("finish_reason", "stop")
+        if request.tools:
+            # Tools require a complete response for structured output; generate then convert to SSE
+            logger.debug("Streaming with tools: direct generation, converting to SSE")
+            response_dict = await llm_proxy.generate(
+                messages=messages_with_context,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                max_tokens=request.max_tokens,
+                tools=request.tools,
+                tool_choice=request.tool_choice
+            )
+            full_response = response_dict.get("content") or ""
+            tool_calls = response_dict.get("tool_calls")
+            thinking = response_dict.get("thinking")
+            finish_reason = response_dict.get("finish_reason", "stop")
 
             # --- Deliver final approved response as SSE chunks ---
 
@@ -1077,7 +785,7 @@ async def stream_chat_completion(
             yield f"data: {json.dumps(final_chunk)}\n\n"
 
         else:
-            # True token-by-token streaming (psyche disabled, no tools)
+            # True token-by-token streaming
             initial_chunk = {
                 'id': completion_id,
                 'object': 'chat.completion.chunk',
@@ -1146,18 +854,6 @@ async def stream_chat_completion(
         # (MUST be before final yield — code after last yield may not execute)
         try:
             stream_time = time.time() - created
-            _stream_tool_calls = locals().get('tool_calls')
-            _stream_psyche = None
-            if use_refinement:
-                _ref = locals().get('refinement_result')
-                if _ref:
-                    _stream_psyche = {
-                        "active": True,
-                        "refinement": True,
-                        "turns": _ref.turns_used,
-                        "quality_score": round(_ref.final_quality_score, 2),
-                        "complexity": _ref.complexity_class,
-                    }
             recent_api_requests.append({
                 "timestamp": datetime.now().isoformat(),
                 "endpoint": "/v1/chat/completions",
@@ -1174,10 +870,9 @@ async def stream_chat_completion(
                 },
                 "response": {
                     "content": full_response if full_response else None,
-                    "tool_calls": _stream_tool_calls,
+                    "tool_calls": locals().get('tool_calls'),
                     "finish_reason": finish_reason,
                 },
-                "psyche": _stream_psyche,
             })
             logger.debug(f"Admin debug log: appended streaming entry, deque now has {len(recent_api_requests)} items")
         except Exception as e:
@@ -1351,7 +1046,6 @@ async def ollama_chat(request: Request):
     """
     Transparent proxy to external Ollama instance.
     Forwards requests unchanged and captures messages in background for training.
-    Psyche (Id/Ego/Superego) processing is applied identically to /v1/chat/completions.
     """
     if not llm_proxy:
         raise HTTPException(status_code=503, detail="Proxy not configured")
@@ -1381,263 +1075,40 @@ async def ollama_chat(request: Request):
             logger.debug(f"Forward headers: {dict(forward_headers)}")
             logger.debug(f"Request body preview: {request_body[:500]}")
 
-        # --- Psyche processing ---
-        has_tools_in_request = bool(ollama_req.get("tools"))
-        psyche_active = psyche and psyche.enabled and messages
-        use_refinement = psyche_active and psyche.refinement_enabled
-
-        # Strip client sampling params when Psyche controls them — but NEVER for tool requests.
-        # Tools require the model to produce exact structured output; any param interference
-        # can silently break tool call generation.
-        if psyche_active and config.psyche.override_client_params and not has_tools_in_request:
-            opts = ollama_req.get("options", {})
-            stripped = {k: v for k, v in opts.items() if k not in ("temperature", "top_p", "top_k")}
-            if stripped != opts:
-                logger.debug(f"Psyche: stripping client Ollama options (had: {opts})")
-                ollama_req["options"] = stripped
-                request_body = json.dumps(ollama_req).encode("utf-8")
-
-        # Convert messages for Psyche
-        chat_messages = None
-        user_message_text = ""
-        if psyche_active:
-            chat_messages = [
-                ChatMessage(
-                    role=MessageRole(msg.get("role", "user")),
-                    content=msg.get("content", ""),
-                )
-                for msg in messages
-            ]
-            user_message_text = next(
-                (msg.get("content", "") for msg in reversed(messages)
-                 if msg.get("role") == "user"),
-                ""
-            )
-
-        # If refinement is enabled, Psyche handles generation internally via refine()
-        # so we skip the transparent proxy entirely and synthesize the Ollama response.
-        refinement_result = None
-        if use_refinement and chat_messages:
-            try:
-                refinement_result = await psyche.refine(
-                    messages=chat_messages,
-                    user_message_text=user_message_text,
-                    conversation_id=conversation_id,
-                    llm_proxy=llm_proxy,
-                    has_tools="tools" in ollama_req,
-                )
-                if not refinement_result.validation.allowed:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Request blocked: {refinement_result.validation.reason}"
-                    )
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Psyche refine failed on /api/chat, falling through to proxy: {e}", exc_info=True)
-                refinement_result = None
-
-        # Legacy pre-process fallback (when refinement disabled but psyche enabled)
-        psyche_pre_result = None
-        if psyche_active and not use_refinement and not refinement_result and chat_messages:
-            try:
-                psyche_pre_result = await psyche.pre_process(
-                    messages=chat_messages,
-                    user_message_text=user_message_text,
-                    conversation_id=conversation_id,
-                )
-                if not psyche_pre_result.validation.allowed:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Request blocked: {psyche_pre_result.validation.reason}"
-                    )
-                enriched_messages = psyche_pre_result.messages
-                ollama_req["messages"] = [
-                    {"role": msg.role.value, "content": msg.get_text_content() or ""}
-                    for msg in enriched_messages
-                ]
-                request_body = json.dumps(ollama_req).encode("utf-8")
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Psyche pre-process failed on /api/chat, continuing without it: {e}")
-
         async def transparent_proxy_stream():
-            """
-            Stream response from external Ollama.
-
-            When Psyche refinement is active, refine() already ran above and
-            produced refinement_result — we synthesize Ollama NDJSON from it.
-
-            When legacy psyche is active (pre/post), buffer, evaluate, deliver.
-            When psyche is disabled, bytes pass through transparently.
-            """
+            """Transparent pass-through to external Ollama with response accumulation for storage."""
             accumulated_response = ""
             done = False
             start_time = time.time()
 
             try:
-                if refinement_result is not None and not has_tools_in_request:
-                    # --- Psyche v2: refinement already completed, synthesize Ollama response ---
-                    resp_content = refinement_result.best_response_dict.get("content") or ""
-                    accumulated_response = resp_content
+                async with llm_proxy.client.stream(
+                    "POST",
+                    endpoint_url,
+                    content=request_body,
+                    headers=forward_headers
+                ) as response:
+                    if response.status_code >= 400:
+                        error_detail = await response.aread()
+                        error_text = error_detail.decode('utf-8') if error_detail else f"HTTP {response.status_code}"
+                        logger.error(f"External Ollama error {response.status_code}: {error_text}")
+                        yield error_text
+                        return
 
-                    # Build thinking content from deliberation log
-                    thinking_content = ""
-                    if config.psyche.expose_deliberation and refinement_result.deliberation_log:
-                        thinking_content = refinement_result.deliberation_log
-                    orig_thinking = refinement_result.best_response_dict.get("thinking")
-                    if orig_thinking:
-                        thinking_content = f"{thinking_content}\n\n{orig_thinking}" if thinking_content else orig_thinking
-
-                    # Synthesize Ollama NDJSON response
-                    synthetic = {
-                        "model": ollama_req.get("model", ""),
-                        "created_at": datetime.now().isoformat() + "Z",
-                        "message": {
-                            "role": "assistant",
-                            "content": resp_content,
-                        },
-                        "done": True,
-                        "done_reason": "stop",
-                    }
-                    yield json.dumps(synthetic) + "\n"
-                    done = True
-
-                    logger.info(
-                        f"Psyche refine (/api/chat): turns={refinement_result.turns_used}/{refinement_result.turns_budget}, "
-                        f"score={refinement_result.final_quality_score:.2f}, "
-                        f"complexity={refinement_result.complexity_class}"
-                    )
-
-                    # Store refusal as DPO signal
-                    if refinement_result.refusal_detected:
-                        try:
-                            await asyncio.to_thread(
-                                memory_manager.store_interaction,
-                                conversation_id=conversation_id,
-                                user_message=user_message_text,
-                                assistant_response=resp_content,
-                                sentiment=-0.8,
-                                weight=2.0,
-                                is_refusal=True,
-                                psyche_metadata={
-                                    "refusal_detected": True,
-                                    "refinement_turns": refinement_result.turns_used,
-                                },
-                            )
-                        except Exception as store_err:
-                            logger.error(f"Failed to store refusal: {store_err}")
-
-                elif psyche_pre_result is not None and not has_tools_in_request:
-                    # --- Legacy psyche: buffer, post-process, deliver ---
-                    logger.debug("Legacy psyche on /api/chat: buffering response for evaluation")
-                    buffered_lines = []
-
-                    async with llm_proxy.client.stream(
-                        "POST",
-                        endpoint_url,
-                        content=request_body,
-                        headers=forward_headers
-                    ) as response:
-                        if response.status_code >= 400:
-                            error_detail = await response.aread()
-                            error_text = error_detail.decode('utf-8') if error_detail else f"HTTP {response.status_code}"
-                            logger.error(f"External Ollama error {response.status_code}: {error_text}")
-                            yield error_text
-                            return
-
-                        async for line in response.aiter_lines():
-                            buffered_lines.append(line)
-                            if line.strip():
-                                try:
-                                    chunk = json.loads(line)
-                                    if chunk.get("message", {}).get("content"):
-                                        accumulated_response += chunk["message"]["content"]
-                                    if chunk.get("done"):
-                                        done = True
-                                except json.JSONDecodeError:
-                                    pass
-
-                    response_dict = {"content": accumulated_response, "finish_reason": "stop" if done else None}
-                    try:
-                        psyche_post = await psyche.post_process(
-                            response_dict=response_dict,
-                            conversation_id=conversation_id,
-                            pre_result=psyche_pre_result,
-                            messages=[
-                                ChatMessage(role=MessageRole(m.get("role", "user")), content=m.get("content", ""))
-                                for m in messages
-                            ],
-                            llm_proxy=llm_proxy,
-                        )
-
-                        retried_content = psyche_post.response_dict.get("content") or ""
-                        if psyche_post.retry_attempted and retried_content and retried_content != accumulated_response:
-                            synthetic_response = json.dumps({
-                                "model": ollama_req.get("model", ""),
-                                "created_at": datetime.now().isoformat() + "Z",
-                                "message": {"role": "assistant", "content": retried_content},
-                                "done": True,
-                                "done_reason": "stop",
-                            })
-                            buffered_lines = [synthetic_response]
-                            accumulated_response = retried_content
-
-                        if psyche_post.refusal_detected:
-                            try:
-                                original_refusal = psyche_post.metadata.get("original_refusal", accumulated_response)
-                                await asyncio.to_thread(
-                                    memory_manager.store_interaction,
-                                    conversation_id=conversation_id,
-                                    user_message=user_message_text,
-                                    assistant_response=original_refusal,
-                                    sentiment=-0.8,
-                                    weight=2.0,
-                                    is_refusal=True,
-                                    psyche_metadata={"refusal_detected": True, "retry_attempted": psyche_post.retry_attempted},
-                                )
-                            except Exception as store_err:
-                                logger.error(f"Failed to store refusal: {store_err}")
-
-                    except Exception as e:
-                        logger.error(f"Legacy psyche post-process on /api/chat failed: {e}", exc_info=True)
-
-                    for line in buffered_lines:
+                    async for line in response.aiter_lines():
                         yield line + "\n"
 
-                else:
-                    # --- Psyche disabled: transparent pass-through ---
-                    async with llm_proxy.client.stream(
-                        "POST",
-                        endpoint_url,
-                        content=request_body,
-                        headers=forward_headers
-                    ) as response:
-                        if response.status_code >= 400:
-                            error_detail = await response.aread()
-                            error_text = error_detail.decode('utf-8') if error_detail else f"HTTP {response.status_code}"
-                            logger.error(f"External Ollama error {response.status_code}: {error_text}")
-                            yield error_text
-                            return
+                        if line.strip():
+                            try:
+                                chunk = json.loads(line)
+                                if chunk.get("message", {}).get("content"):
+                                    accumulated_response += chunk["message"]["content"]
+                                if chunk.get("done"):
+                                    done = True
+                            except json.JSONDecodeError:
+                                pass
 
-                        accumulated_tool_calls = None
-                        async for line in response.aiter_lines():
-                            yield line + "\n"
-
-                            if line.strip():
-                                try:
-                                    chunk = json.loads(line)
-                                    if chunk.get("message", {}).get("content"):
-                                        accumulated_response += chunk["message"]["content"]
-                                    if chunk.get("message", {}).get("tool_calls"):
-                                        accumulated_tool_calls = chunk["message"]["tool_calls"]
-                                    if chunk.get("done"):
-                                        done = True
-                                except json.JSONDecodeError:
-                                    pass
-
-                # Log to Admin UI for debugging (runs for all branches: refinement, legacy psyche, pass-through)
+                # Log to Admin UI for debugging
                 try:
                     elapsed_time = time.time() - start_time
                     recent_api_requests.append({
