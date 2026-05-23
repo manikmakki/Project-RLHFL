@@ -1,2051 +1,488 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Project RLHFL - Admin Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: #f5f5f5;
-            color: #333;
-        }
-        
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        
-        header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 8px;
-            margin-bottom: 30px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        }
-        
-        h1 {
-            font-size: 28px;
-            margin-bottom: 10px;
-        }
-        
-        .status-text {
-            font-size: 14px;
-            opacity: 0.9;
-        }
-        
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        
-        .card {
-            background: white;
-            border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        
-        .card h2 {
-            font-size: 18px;
-            margin-bottom: 15px;
-            color: #667eea;
-            border-bottom: 2px solid #667eea;
-            padding-bottom: 10px;
-        }
-        
-        .stat-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 8px 0;
-            border-bottom: 1px solid #eee;
-        }
-        
-        .stat-row:last-child {
-            border-bottom: none;
-        }
-        
-        .stat-label {
-            font-weight: 500;
-            color: #666;
-        }
-        
-        .stat-value {
-            font-weight: 700;
-            color: #333;
-        }
-        
-        .stat-value.positive {
-            color: #27ae60;
-        }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RLHFL Sidecar</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; color: #1a1a2e; }
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
 
-        .stat-value.negative {
-            color: #e74c3c;
-        }
+header {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  color: white; padding: 24px 30px; border-radius: 10px; margin-bottom: 24px;
+  display: flex; justify-content: space-between; align-items: center;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+header h1 { font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }
+header .subtitle { font-size: 13px; opacity: 0.7; margin-top: 3px; }
+.header-right { text-align: right; font-size: 12px; opacity: 0.75; }
+.header-right .model { font-size: 14px; font-weight: 600; opacity: 1; color: #64dfdf; }
 
-        .stat-value.neutral {
-            color: #95a5a6;
-        }
+.quick-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+.stat-chip {
+  background: white; border-radius: 10px; padding: 18px 20px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.07); border-left: 4px solid #667eea;
+}
+.stat-chip.golden { border-left-color: #f6c90e; }
+.stat-chip.noise { border-left-color: #e74c3c; }
+.stat-chip.quality { border-left-color: #27ae60; }
+.stat-chip .label { font-size: 12px; color: #888; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-chip .value { font-size: 28px; font-weight: 700; margin-top: 4px; color: #1a1a2e; }
+.stat-chip .sub { font-size: 11px; color: #aaa; margin-top: 2px; }
 
-        .stat-value.warning {
-            color: #f39c12;
-        }
-        
-        .error {
-            background: #fee;
-            border-left: 4px solid #e74c3c;
-            padding: 15px;
-            border-radius: 4px;
-            color: #c0392b;
-        }
-        
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: #999;
-        }
-        
-        .spinner {
-            display: inline-block;
-            width: 30px;
-            height: 30px;
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #667eea;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-        
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        
-        .refreshed {
-            font-size: 12px;
-            color: #999;
-            margin-top: 10px;
-        }
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 24px; }
+.card { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 6px rgba(0,0,0,0.07); }
+.card h2 { font-size: 14px; font-weight: 600; color: #667eea; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px; border-bottom: 2px solid #f0f2f5; padding-bottom: 8px; }
+.row { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #f5f5f5; font-size: 13px; }
+.row:last-child { border-bottom: none; }
+.row .lbl { color: #777; }
+.row .val { font-weight: 600; }
+.val.ok { color: #27ae60; }
+.val.warn { color: #e67e22; }
+.val.err { color: #e74c3c; }
+.val.blue { color: #667eea; }
 
-        .tabs {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
-            border-bottom: 2px solid #667eea;
-        }
+.section { background: white; border-radius: 10px; padding: 20px; margin-bottom: 24px; box-shadow: 0 2px 6px rgba(0,0,0,0.07); }
+.section h2 { font-size: 14px; font-weight: 600; color: #667eea; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 16px; border-bottom: 2px solid #f0f2f5; padding-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
 
-        .tab {
-            padding: 12px 24px;
-            background: white;
-            border: none;
-            border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 500;
-            color: #666;
-            transition: all 0.3s;
-        }
+/* Filter bar */
+.filter-bar { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.filter-bar select, .filter-bar input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+.btn { padding: 7px 14px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; transition: opacity 0.15s; }
+.btn:hover { opacity: 0.85; }
+.btn-primary { background: #667eea; color: white; }
+.btn-secondary { background: #667eea; color: white; }
+.btn-warning { background: #e67e22; color: white; }
+.btn-danger { background: #e74c3c; color: white; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
 
-        .tab.active {
-            background: #667eea;
-            color: white;
-        }
+/* Interactions table */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { background: #f8f9ff; color: #555; font-weight: 600; text-align: left; padding: 10px 12px; border-bottom: 2px solid #e8e8f0; }
+td { padding: 9px 12px; border-bottom: 1px solid #f0f0f5; vertical-align: top; }
+tr:hover td { background: #fafbff; }
+.badge { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.badge-golden { background: #fef9e7; color: #d4a017; border: 1px solid #f6c90e; }
+.badge-noise { background: #fdf2f2; color: #c0392b; border: 1px solid #e74c3c; }
+.badge-ok { background: #eafaf1; color: #1e8449; border: 1px solid #27ae60; }
+.quality-bar { display: inline-block; width: 60px; height: 6px; background: #eee; border-radius: 3px; vertical-align: middle; margin-left: 4px; }
+.quality-fill { height: 100%; border-radius: 3px; background: linear-gradient(to right, #e74c3c, #f6c90e, #27ae60); }
 
-        .tab:hover:not(.active) {
-            background: #f0f0f0;
-        }
+/* Expandable row */
+.expand-content { display: none; background: #f8f9ff; padding: 14px; border-radius: 6px; margin-top: 6px; }
+.expand-content.open { display: block; }
+.msg-block { margin-bottom: 10px; }
+.msg-block .msg-label { font-size: 11px; color: #888; font-weight: 600; margin-bottom: 3px; }
+.msg-block .msg-text { font-size: 13px; color: #333; white-space: pre-wrap; background: white; padding: 8px 10px; border-radius: 4px; border: 1px solid #e8e8f0; max-height: 120px; overflow-y: auto; }
 
-        .tab-content {
-            display: none;
-        }
+/* Checkpoints */
+.cp-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #f0f0f5; }
+.cp-row:last-child { border-bottom: none; }
+.cp-id { font-family: monospace; font-size: 12px; color: #667eea; flex: 1; }
+.cp-meta { font-size: 12px; color: #888; }
+.deployed-tag { font-size: 11px; background: #eafaf1; color: #1e8449; border: 1px solid #27ae60; padding: 2px 6px; border-radius: 8px; }
 
-        .tab-content.active {
-            display: block;
-        }
+/* Pagination */
+.pagination { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
+.page-btn { padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; background: white; cursor: pointer; font-size: 13px; }
+.page-btn.active { background: #667eea; color: white; border-color: #667eea; }
+.page-btn:hover:not(.active) { background: #f8f9ff; }
 
-        .memory-item {
-            background: #f9f9f9;
-            border-radius: 6px;
-            padding: 15px;
-            margin-bottom: 15px;
-            border-left: 4px solid #667eea;
-        }
+/* Status dot */
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+.dot-green { background: #27ae60; }
+.dot-red { background: #e74c3c; }
+.dot-grey { background: #aaa; }
 
-        .memory-item.golden {
-            border-left-color: #f39c12;
-            background: #fffbf0;
-        }
-
-        .memory-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 10px;
-        }
-
-        .memory-id {
-            font-size: 11px;
-            color: #999;
-            font-family: monospace;
-        }
-
-        .memory-meta {
-            font-size: 12px;
-            color: #666;
-            margin-bottom: 8px;
-        }
-
-        .memory-text {
-            background: white;
-            padding: 10px;
-            border-radius: 4px;
-            margin-bottom: 8px;
-            font-size: 13px;
-            line-height: 1.5;
-        }
-
-        .memory-text.collapsed {
-            max-height: 60px;
-            overflow: hidden;
-            position: relative;
-        }
-
-        .memory-text.collapsed::after {
-            content: '';
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            height: 30px;
-            background: linear-gradient(transparent, white);
-        }
-
-        .memory-actions {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
-        button {
-            padding: 6px 12px;
-            border-radius: 4px;
-            border: none;
-            cursor: pointer;
-            font-size: 12px;
-            transition: all 0.2s;
-        }
-
-        button.primary {
-            background: #667eea;
-            color: white;
-        }
-
-        button.primary:hover {
-            background: #5568d3;
-        }
-
-        button.warning {
-            background: #f39c12;
-            color: white;
-        }
-
-        button.warning:hover {
-            background: #e67e22;
-        }
-
-        button.danger {
-            background: #e74c3c;
-            color: white;
-        }
-
-        button.danger:hover {
-            background: #c0392b;
-        }
-
-        button.success {
-            background: #27ae60;
-            color: white;
-        }
-
-        button.success:hover {
-            background: #229954;
-        }
-
-        button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
-        .pagination {
-            display: flex;
-            justify-content: center;
-            gap: 10px;
-            margin-top: 20px;
-        }
-
-        .json-viewer {
-            background: #1e1e1e;
-            color: #d4d4d4;
-            padding: 15px;
-            border-radius: 6px;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-            overflow-x: auto;
-            margin-bottom: 15px;
-        }
-
-        .json-key {
-            color: #9cdcfe;
-        }
-
-        .json-string {
-            color: #ce9178;
-        }
-
-        .json-number {
-            color: #b5cea8;
-        }
-
-        .json-boolean {
-            color: #569cd6;
-        }
-
-        .json-null {
-            color: #569cd6;
-        }
-
-        .json-toggle {
-            cursor: pointer;
-            user-select: none;
-            color: #808080;
-        }
-
-        .json-toggle:hover {
-            color: #ffffff;
-        }
-
-        .json-collapsed {
-            display: none;
-        }
-
-        .filters {
-            background: white;
-            padding: 15px;
-            border-radius: 6px;
-            margin-bottom: 20px;
-            display: flex;
-            gap: 15px;
-            flex-wrap: wrap;
-            align-items: center;
-        }
-
-        .filter-group {
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-        }
-
-        .filter-group label {
-            font-size: 12px;
-            color: #666;
-            font-weight: 500;
-        }
-
-        select, input[type="number"] {
-            padding: 6px 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 13px;
-        }
-
-        .badge {
-            display: inline-block;
-            padding: 3px 8px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-        }
-
-        .badge.golden {
-            background: #f39c12;
-            color: white;
-        }
-
-        .badge.positive {
-            background: #27ae60;
-            color: white;
-        }
-
-        .badge.negative {
-            background: #e74c3c;
-            color: white;
-        }
-
-        .badge.neutral {
-            background: #95a5a6;
-            color: white;
-        }
-
-        .charts-section {
-            margin-top: 30px;
-        }
-
-        .chart-container {
-            background: white;
-            border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
-
-        .chart-container h3 {
-            margin-bottom: 15px;
-            color: #667eea;
-        }
-
-        .chart-wrapper {
-            position: relative;
-            height: 300px;
-        }
-
-        .no-data-message {
-            text-align: center;
-            padding: 40px;
-            color: #999;
-        }
-
-        /* Prompt Rules tab */
-        .rules-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        .rules-table th, .rules-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
-        .rules-table th { font-weight: 600; color: #667eea; font-size: 13px; }
-        .rules-table td { font-size: 13px; }
-        .rules-table .pattern-cell { font-family: monospace; font-size: 12px; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .rules-table .actions-cell { white-space: nowrap; }
-        .rules-table .actions-cell button { margin-right: 4px; padding: 4px 10px; font-size: 12px; }
-        .rule-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
-        .rule-form .full-width { grid-column: 1 / -1; }
-        .rule-form label { font-size: 13px; font-weight: 500; margin-bottom: 2px; display: block; }
-        .rule-form input, .rule-form textarea, .rule-form select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
-        .rule-form textarea { font-family: monospace; min-height: 60px; resize: vertical; }
-        .rule-form .checkbox-group { display: flex; gap: 12px; align-items: center; }
-        .rule-form .checkbox-group label { font-weight: normal; display: inline; }
-        .toggle-switch { cursor: pointer; font-size: 18px; }
-        .toggle-switch.enabled { color: #22c55e; }
-        .toggle-switch.disabled { color: #ccc; }
-        .rule-tester { margin-top: 10px; }
-        .rule-tester textarea { width: 100%; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; resize: vertical; }
-        .rule-tester-output { background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; padding: 10px; margin-top: 10px; font-family: monospace; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
-        .rule-tester-matches { margin-top: 8px; font-size: 12px; color: #666; }
-        .rule-tester-matches .matched { color: #22c55e; font-weight: 500; }
-        .rule-tester-matches .not-matched { color: #999; }
-    </style>
+.last-refresh { font-size: 11px; color: #bbb; margin-top: 10px; text-align: right; }
+</style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>📊 Project RLHFL - Admin Dashboard</h1>
-            <p class="status-text">Real-time monitoring and statistics</p>
-        </header>
+<div class="container">
 
-        <div class="tabs">
-            <button class="tab active" onclick="switchTab('stats')">📊 Stats</button>
-            <button class="tab" onclick="switchTab('memories')">💾 Vector DB</button>
-            <button class="tab" onclick="switchTab('debug')">🐛 Debug</button>
-            <button class="tab" onclick="switchTab('rules')">📝 Rules</button>
-        </div>
-
-        <div id="stats-tab" class="tab-content active">
-            <div id="model-controls-content">
-                <div class="loading">
-                    <div class="spinner"></div>
-                    <p>Loading model status...</p>
-                </div>
-            </div>
-
-            <div class="charts-section">
-                <h2 style="margin-bottom: 20px; color: #667eea;">📈 Training Progress Over Time</h2>
-                <div id="charts-content">
-                    <div class="loading">
-                        <div class="spinner"></div>
-                        <p>Loading training history...</p>
-                    </div>
-                </div>
-            </div>
-
-            <div id="stats-content">
-                <div class="loading">
-                    <div class="spinner"></div>
-                    <p>Loading stats...</p>
-                </div>
-            </div>
-
-            <div id="checkpoints-content">
-                <div class="loading">
-                    <div class="spinner"></div>
-                    <p>Loading checkpoints...</p>
-                </div>
-            </div>
-        </div>
-
-        <div id="memories-tab" class="tab-content">
-            <div class="card" style="margin-bottom: 20px;">
-                <h2>🗂️ Database Management</h2>
-                <p style="margin-bottom: 15px; color: #666;">Manually trigger cleanup operations to manage database size and quality.</p>
-                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button class="warning" onclick="cleanupByAge()">🕒 Cleanup Old Entries (default: 90 days)</button>
-                    <button class="warning" onclick="cleanupByWeight()">⚖️ Cleanup Low Weight (default: 0.5)</button>
-                    <button class="danger" onclick="cleanupLowest()">🗑️ Cleanup Lowest Weight (default: 10%)</button>
-                </div>
-            </div>
-
-            <div class="filters">
-                <div class="filter-group">
-                    <label>Filter by Sentiment</label>
-                    <select id="sentiment-filter" onchange="loadMemories()">
-                        <option value="">All</option>
-                        <option value="positive">Positive</option>
-                        <option value="negative">Negative</option>
-                        <option value="neutral">Neutral</option>
-                    </select>
-                </div>
-                <div class="filter-group">
-                    <label>Filter by Golden</label>
-                    <select id="golden-filter" onchange="loadMemories()">
-                        <option value="">All</option>
-                        <option value="true">Golden Only</option>
-                        <option value="false">Non-Golden</option>
-                    </select>
-                </div>
-                <div class="filter-group">
-                    <label>Filter by Time</label>
-                    <select id="time-filter" onchange="loadMemories()">
-                        <option value="">All Time</option>
-                        <option value="24">Last 24 Hours</option>
-                        <option value="168">Last 7 Days</option>
-                        <option value="720">Last 30 Days</option>
-                    </select>
-                </div>
-                <div class="filter-group">
-                    <label>Items per page</label>
-                    <input type="number" id="page-limit" value="20" min="10" max="100" step="10" onchange="loadMemories()">
-                </div>
-                <button class="primary" onclick="loadMemories()">🔄 Refresh</button>
-            </div>
-            <div id="memories-content">
-                <div class="loading">
-                    <div class="spinner"></div>
-                    <p>Loading memories...</p>
-                </div>
-            </div>
-            <div id="memories-pagination" class="pagination"></div>
-        </div>
-
-        <div id="debug-tab" class="tab-content">
-            <div class="card">
-                <h2>🔌 Recent API Requests</h2>
-                <button class="primary" onclick="loadApiRequests()" style="margin-bottom: 10px;">🔄 Refresh</button>
-                <div id="api-requests-content">
-                    <div class="loading">
-                        <div class="spinner"></div>
-                        <p>Loading API requests...</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card" style="margin-top: 20px;">
-                <h2>💬 Recent Interactions</h2>
-                <div class="filters">
-                    <div class="filter-group">
-                        <label>Number of interactions</label>
-                        <input type="number" id="debug-limit" value="10" min="1" max="50" step="1">
-                    </div>
-                    <button class="primary" onclick="loadDebugData()">🔄 Refresh</button>
-                </div>
-                <div id="debug-content">
-                    <div class="loading">
-                        <div class="spinner"></div>
-                        <p>Loading debug data...</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div id="rules-tab" class="tab-content">
-            <div class="card">
-                <h2>📝 Prompt Interceptor Rules</h2>
-                <p style="color:#666;font-size:13px;margin-bottom:12px;">Regex search-and-replace rules applied to incoming messages before LLM processing.</p>
-                <button class="primary" onclick="showRuleForm()">+ Add Rule</button>
-                <button onclick="loadPromptRules()" style="margin-left:6px;">🔄 Refresh</button>
-                <div id="rule-form-container" style="display:none;margin-top:15px;">
-                    <div class="card" style="background:#f9f9ff;border:1px solid #667eea;">
-                        <h2 id="rule-form-title">Add Rule</h2>
-                        <div class="rule-form">
-                            <input type="hidden" id="rule-edit-id">
-                            <div>
-                                <label>Description</label>
-                                <input type="text" id="rule-description" placeholder="e.g. Strip verbose Cursor preamble">
-                            </div>
-                            <div>
-                                <label>Priority (lower = runs first)</label>
-                                <input type="number" id="rule-priority" value="50" min="1" max="999">
-                            </div>
-                            <div class="full-width">
-                                <label>Regex Pattern</label>
-                                <textarea id="rule-pattern" placeholder="e.g. (?s)You are a helpful assistant.*?END OF PROMPT"></textarea>
-                            </div>
-                            <div class="full-width">
-                                <label>Replacement</label>
-                                <textarea id="rule-replacement" placeholder="Replacement text (leave empty to delete matched text)"></textarea>
-                            </div>
-                            <div>
-                                <label>Target Roles</label>
-                                <div style="display:flex;flex-direction:column;gap:6px;margin-top:4px;">
-                                    <label style="font-weight:normal;display:flex;align-items:left;gap:6px;"><input type="checkbox" id="role-system" value="system" checked> system</label>
-                                    <label style="font-weight:normal;display:flex;align-items:left;gap:6px;"><input type="checkbox" id="role-user" value="user"> user</label>
-                                    <label style="font-weight:normal;display:flex;align-items:left;gap:6px;"><input type="checkbox" id="role-assistant" value="assistant"> assistant</label>
-                                </div>
-                            </div>
-                            <div style="display:flex;align-items:end;gap:8px;">
-                                <button class="primary" onclick="saveRule()">Save</button>
-                                <button onclick="hideRuleForm()">Cancel</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div id="rules-list-content" style="margin-top:15px;">
-                    <div class="loading"><div class="spinner"></div><p>Loading rules...</p></div>
-                </div>
-            </div>
-
-            <div class="card" style="margin-top:20px;">
-                <h2>🧪 Rule Tester</h2>
-                <div class="rule-tester">
-                    <label style="font-size:13px;font-weight:500;">Input Text</label>
-                    <textarea id="rule-test-input" rows="5" placeholder="Paste a system prompt or message here to test against all enabled rules..."></textarea>
-                    <button class="primary" onclick="testRules()" style="margin-top:8px;">Test Rules</button>
-                    <div id="rule-test-output" style="display:none;margin-top:12px;">
-                        <label style="font-size:13px;font-weight:500;">Output</label>
-                        <div id="rule-test-result" class="rule-tester-output"></div>
-                        <div id="rule-test-matches" class="rule-tester-matches"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
+  <!-- Header -->
+  <header>
+    <div>
+      <h1>RLHFL Sidecar</h1>
+      <div class="subtitle">Elasticsearch evaluation &amp; LoRA training pipeline</div>
     </div>
-
-    <script>
-        let currentPage = 0;
-        let currentFilter = '';
-        let trainingCharts = {};  // Store chart instances
-
-        // Helper function to format UTC timestamp to local timezone
-        function formatLocalTime(utcTimestamp) {
-            if (!utcTimestamp) return 'Never';
-            try {
-                // Ensure UTC parsing by appending 'Z' if not present
-                let timestamp = utcTimestamp;
-                if (typeof timestamp === 'string' && !timestamp.endsWith('Z') && !timestamp.includes('+')) {
-                    timestamp = timestamp + 'Z';
-                }
-                const date = new Date(timestamp);
-                return date.toLocaleString();
-            } catch (e) {
-                return utcTimestamp;
-            }
-        }
-
-        // Helper function to format date for chart axis
-        function formatChartDate(utcTimestamp) {
-            if (!utcTimestamp) return '';
-            try {
-                const date = new Date(utcTimestamp);
-                return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-            } catch (e) {
-                return utcTimestamp;
-            }
-        }
-
-        function switchTab(tabName) {
-            // Hide all tabs
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-
-            // Show selected tab
-            document.getElementById(`${tabName}-tab`).classList.add('active');
-            event.target.classList.add('active');
-
-            // Load data for the tab
-            if (tabName === 'stats') {
-                loadStats();
-                loadTrainingCharts();
-                loadModelControls();
-                loadCheckpointsList();
-            } else if (tabName === 'memories') {
-                loadMemories();
-            } else if (tabName === 'debug') {
-                loadApiRequests();
-                loadDebugData();
-            } else if (tabName === 'rules') {
-                loadPromptRules();
-            }
-        }
-
-        async function loadStats() {
-            try {
-                const response = await fetch('/admin/api/stats');
-                const data = await response.json();
-
-                if (data.error) {
-                    document.getElementById('stats-content').innerHTML = `<div class="error">API Error: ${data.error}</div>`;
-                    return;
-                }
-
-                renderDashboard(data);
-            } catch (error) {
-                document.getElementById('stats-content').innerHTML = `<div class="error">Failed to load stats: ${error.message}</div>`;
-            }
-        }
-
-        async function renderDashboard(stats) {
-            // Load database info
-            let dbHtml = '';
-            try {
-                const dbResponse = await fetch('/admin/api/database/info');
-                const dbData = await dbResponse.json();
-
-                const usageClass = dbData.usage_percentage >= 90 ? 'negative' : (dbData.usage_percentage >= 75 ? 'warning' : 'positive');
-                dbHtml = `
-                    <div class="card">
-                        <h2>💾 Database Size</h2>
-                        <div class="stat-row">
-                            <span class="stat-label">Current Size</span>
-                            <span class="stat-value">${dbData.size_gb} GB</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Max Size</span>
-                            <span class="stat-value">${dbData.max_size_gb} GB</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Usage</span>
-                            <span class="stat-value ${usageClass}">${dbData.usage_percentage}%</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Auto-Cleanup Threshold</span>
-                            <span class="stat-value">${dbData.threshold_size_gb} GB (${dbData.auto_cleanup_percentage}%)</span>
-                        </div>
-                    </div>
-                `;
-            } catch (error) {
-                dbHtml = `
-                    <div class="card">
-                        <h2>💾 Database Size</h2>
-                        <div class="error">Failed to load database info</div>
-                    </div>
-                `;
-            }
-
-            const html = `
-                <div class="grid">
-                    <div class="card">
-                        <h2>🧠 Training Stats</h2>
-                        <div class="stat-row">
-                            <span class="stat-label">Total Interactions</span>
-                            <span class="stat-value">${stats.training.total_interactions || 0}</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">New Since Training</span>
-                            <span class="stat-value">${stats.training.new_since_training || 0}</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Hours Since Interaction</span>
-                            <span class="stat-value">${stats.training.hours_since_interaction || 0}</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Days Since Training</span>
-                            <span class="stat-value">${stats.training.days_since_training || 0}</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Last Training</span>
-                            <span class="stat-value">${formatLocalTime(stats.training.last_training)}</span>
-                        </div>
-                    </div>
-
-                    <div class="card" id="live-training-card" style="display: none;">
-                        <h2>🔄 Live Training Status</h2>
-                        <div id="live-training-content">
-                            <div class="stat-row">
-                                <span class="stat-label">Loading...</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="card">
-                        <h2>💾 Memory Stats</h2>
-                        <div class="stat-row">
-                            <span class="stat-label">Total Interactions</span>
-                            <span class="stat-value">${stats.memory.total_interactions || 0}</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Golden Examples</span>
-                            <span class="stat-value">${stats.memory.golden_examples || 0}
-                                <button class="warning" style="font-size:11px;padding:2px 8px;margin-left:8px;" onclick="reevaluateGolden()">Re-evaluate</button>
-                            </span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Positive Sentiment</span>
-                            <span class="stat-value positive">${stats.memory.sentiment_distribution.positive || 0}</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Negative Sentiment</span>
-                            <span class="stat-value negative">${stats.memory.sentiment_distribution.negative || 0}</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Neutral Sentiment</span>
-                            <span class="stat-value neutral">${stats.memory.sentiment_distribution.neutral || 0}</span>
-                        </div>
-                    </div>
-
-                    <div class="card">
-                        <h2>⚙️ System Stats</h2>
-                        <div class="stat-row">
-                            <span class="stat-label">Model Status</span>
-                            <span class="stat-value ${stats.system.is_reloading ? 'warning' : (stats.system.model_loaded ? 'positive' : 'negative')}">
-                                ${stats.system.is_reloading ? '⟳ Reloading...' : (stats.system.model_loaded ? '✓ Loaded' : '✗ Not Loaded')}
-                            </span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Active Checkpoint</span>
-                            <span class="stat-value">${stats.system.current_checkpoint || 'Base model'}</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Model Path</span>
-                            <span class="stat-value" style="font-size: 11px; word-break: break-all;">${stats.system.model_path || 'N/A'}</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Memory Usage</span>
-                            <span class="stat-value">${stats.system.memory_usage_mb} MB</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">CPU Usage</span>
-                            <span class="stat-value">${stats.system.cpu_percent}%</span>
-                        </div>
-                    </div>
-
-                    ${dbHtml}
-                </div>
-
-                <div class="refreshed">
-                    Last refreshed: ${new Date().toLocaleTimeString()}
-                </div>
-            `;
-
-            document.getElementById('stats-content').innerHTML = html;
-        }
-
-        // Track consecutive inactive responses to prevent flickering
-        let inactiveCount = 0;
-        let lastTrainingData = null; // Cache last successful data
-        const INACTIVE_THRESHOLD = 3; // Hide after 3 consecutive inactive responses
-
-        async function loadLiveTrainingStatus() {
-            const card = document.getElementById('live-training-card');
-            const content = document.getElementById('live-training-content');
-
-            try {
-                const response = await fetch('/admin/api/training/progress');
-                const data = await response.json();
-
-                if (!data.training_active) {
-                    inactiveCount++;
-                    // Only hide after multiple consecutive inactive responses
-                    if (inactiveCount >= INACTIVE_THRESHOLD) {
-                        card.style.display = 'none';
-                        lastTrainingData = null;
-                    }
-                    return;
-                }
-
-                // Reset counter, cache data, and show the card when training is active
-                inactiveCount = 0;
-                lastTrainingData = data;
-                card.style.display = 'block';
-
-                let html = '';
-
-                // Training checkpoint info
-                html += `
-                    <div class="stat-row">
-                        <span class="stat-label">Checkpoint</span>
-                        <span class="stat-value" style="font-size: 11px;">${data.checkpoint_id || 'N/A'}</span>
-                    </div>
-                `;
-
-                // Overall progress
-                if (data.current_pass && data.total_passes) {
-                    const progress = Math.round((data.current_pass / data.total_passes) * 100);
-                    html += `
-                        <div class="stat-row">
-                            <span class="stat-label">Overall Progress</span>
-                            <span class="stat-value">Pass ${data.current_pass}/${data.total_passes} (${progress}%)</span>
-                        </div>
-                    `;
-                }
-
-                // Current pass details
-                if (data.passes && data.passes.length > 0) {
-                    const currentPass = data.passes[data.passes.length - 1];
-
-                    html += `
-                        <div class="stat-row">
-                            <span class="stat-label">Current Layers</span>
-                            <span class="stat-value">${currentPass.layers}</span>
-                        </div>
-                    `;
-
-                    if (currentPass.epoch) {
-                        html += `
-                            <div class="stat-row">
-                                <span class="stat-label">Epoch</span>
-                                <span class="stat-value">${currentPass.epoch}/${currentPass.epochs || 3}</span>
-                            </div>
-                        `;
-                    }
-
-                    if (currentPass.train_loss) {
-                        html += `
-                            <div class="stat-row">
-                                <span class="stat-label">Train Loss</span>
-                                <span class="stat-value">${currentPass.train_loss.toFixed(4)}</span>
-                            </div>
-                        `;
-                    }
-
-                    if (currentPass.eval_loss) {
-                        html += `
-                            <div class="stat-row">
-                                <span class="stat-label">Eval Loss</span>
-                                <span class="stat-value">${currentPass.eval_loss.toFixed(4)}</span>
-                            </div>
-                        `;
-                    }
-                }
-
-                // Pass history table
-                if (data.passes && data.passes.length > 0) {
-                    html += `
-                        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #333;">
-                            <div style="font-size: 11px; color: #888; margin-bottom: 8px;">Pass History:</div>
-                            <div style="max-height: 200px; overflow-y: auto;">
-                                <table style="width: 100%; font-size: 11px;">
-                                    <thead>
-                                        <tr style="color: #888;">
-                                            <th style="text-align: left; padding: 4px;">Pass</th>
-                                            <th style="text-align: left; padding: 4px;">Layers</th>
-                                            <th style="text-align: right; padding: 4px;">Loss</th>
-                                            <th style="text-align: center; padding: 4px;">Status</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                    `;
-
-                    data.passes.forEach(pass => {
-                        const status = pass.completed ? '✓' : '⟳';
-                        const statusColor = pass.completed ? '#4ade80' : '#fbbf24';
-                        html += `
-                            <tr>
-                                <td style="padding: 4px;">${pass.pass_number}</td>
-                                <td style="padding: 4px;">${pass.layers}</td>
-                                <td style="padding: 4px; text-align: right;">${pass.train_loss ? pass.train_loss.toFixed(4) : 'N/A'}</td>
-                                <td style="padding: 4px; text-align: center; color: ${statusColor};">${status}</td>
-                            </tr>
-                        `;
-                    });
-
-                    html += `
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    `;
-                }
-
-                content.innerHTML = html;
-            } catch (error) {
-                // On fetch error, keep card visible if we have cached data
-                // This prevents flickering during slow API responses
-                if (lastTrainingData) {
-                    // Keep showing last known data, just don't update
-                    console.log('Live training status fetch failed, showing cached data');
-                } else {
-                    // No cached data and fetch failed - hide the card
-                    card.style.display = 'none';
-                }
-            }
-        }
-
-        async function loadTrainingCharts() {
-            try {
-                const response = await fetch('/admin/api/training/history');
-                const data = await response.json();
-
-                if (!data.success || data.history.length === 0) {
-                    document.getElementById('charts-content').innerHTML = '<div class="no-data-message">No training history available yet. Train your model to see progress charts here.</div>';
-                    return;
-                }
-
-                renderTrainingCharts(data.history);
-            } catch (error) {
-                document.getElementById('charts-content').innerHTML = `<div class="error">Failed to load training history: ${error.message}</div>`;
-            }
-        }
-
-        function renderTrainingCharts(history) {
-            // Extract data
-            const timestamps = history.map(h => formatChartDate(h.timestamp));
-            const trainLoss = history.map(h => h.train_loss);
-            const evalLoss = history.map(h => h.eval_loss);
-            const trainSamples = history.map(h => h.train_samples);
-
-            // Destroy existing charts
-            Object.values(trainingCharts).forEach(chart => chart.destroy());
-            trainingCharts = {};
-
-            const html = `
-                <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));">
-                    <div class="chart-container">
-                        <h3>📉 Training Loss</h3>
-                        <div class="chart-wrapper">
-                            <canvas id="trainLossChart"></canvas>
-                        </div>
-                    </div>
-                    <div class="chart-container">
-                        <h3>📊 Evaluation Loss</h3>
-                        <div class="chart-wrapper">
-                            <canvas id="evalLossChart"></canvas>
-                        </div>
-                    </div>
-                    <div class="chart-container">
-                        <h3>📈 Training Samples</h3>
-                        <div class="chart-wrapper">
-                            <canvas id="samplesChart"></canvas>
-                        </div>
-                    </div>
-                </div>
-            `;
-
-            document.getElementById('charts-content').innerHTML = html;
-
-            // Create charts
-            const chartConfig = {
-                type: 'line',
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            display: false
-                        }
-                    },
-                    scales: {
-                        y: {
-                            beginAtZero: false
-                        }
-                    }
-                }
-            };
-
-            // Training Loss Chart
-            const trainLossCtx = document.getElementById('trainLossChart').getContext('2d');
-            trainingCharts.trainLoss = new Chart(trainLossCtx, {
-                ...chartConfig,
-                data: {
-                    labels: timestamps,
-                    datasets: [{
-                        label: 'Training Loss',
-                        data: trainLoss,
-                        borderColor: '#667eea',
-                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                        tension: 0.4,
-                        fill: true
-                    }]
-                }
-            });
-
-            // Evaluation Loss Chart
-            const evalLossCtx = document.getElementById('evalLossChart').getContext('2d');
-            trainingCharts.evalLoss = new Chart(evalLossCtx, {
-                ...chartConfig,
-                data: {
-                    labels: timestamps,
-                    datasets: [{
-                        label: 'Evaluation Loss',
-                        data: evalLoss,
-                        borderColor: '#f39c12',
-                        backgroundColor: 'rgba(243, 156, 18, 0.1)',
-                        tension: 0.4,
-                        fill: true
-                    }]
-                }
-            });
-
-            // Training Samples Chart
-            const samplesCtx = document.getElementById('samplesChart').getContext('2d');
-            trainingCharts.samples = new Chart(samplesCtx, {
-                ...chartConfig,
-                data: {
-                    labels: timestamps,
-                    datasets: [{
-                        label: 'Training Samples',
-                        data: trainSamples,
-                        borderColor: '#27ae60',
-                        backgroundColor: 'rgba(39, 174, 96, 0.1)',
-                        tension: 0.4,
-                        fill: true
-                    }]
-                },
-                options: {
-                    ...chartConfig.options,
-                    scales: {
-                        y: {
-                            beginAtZero: true
-                        }
-                    }
-                }
-            });
-        }
-
-        async function loadMemories() {
-            const limit = parseInt(document.getElementById('page-limit').value);
-            const filter = document.getElementById('sentiment-filter').value;
-            const goldenFilter = document.getElementById('golden-filter').value;
-            const timeFilter = document.getElementById('time-filter').value;
-            const skip = currentPage * limit;
-
-            try {
-                let url = `/admin/api/memories?skip=${skip}&limit=${limit}`;
-                if (filter) {
-                    url += `&sentiment_filter=${filter}`;
-                }
-                if (goldenFilter) {
-                    url += `&is_golden=${goldenFilter}`;
-                }
-                if (timeFilter) {
-                    url += `&hours=${timeFilter}`;
-                }
-
-                const response = await fetch(url);
-                const data = await response.json();
-
-                if (data.error) {
-                    document.getElementById('memories-content').innerHTML = `<div class="error">API Error: ${data.error}</div>`;
-                    return;
-                }
-
-                renderMemories(data);
-            } catch (error) {
-                document.getElementById('memories-content').innerHTML = `<div class="error">Failed to load memories: ${error.message}</div>`;
-            }
-        }
-
-        function renderMemories(data) {
-            if (data.items.length === 0) {
-                document.getElementById('memories-content').innerHTML = '<p style="text-align: center; color: #999;">No memories found.</p>';
-                document.getElementById('memories-pagination').innerHTML = '';
-                return;
-            }
-
-            let html = data.items.map(item => {
-                const sentimentClass = item.sentiment > 0.3 ? 'positive' : (item.sentiment < -0.3 ? 'negative' : 'neutral');
-                return `
-                    <div class="memory-item ${item.is_golden ? 'golden' : ''}" id="memory-${item.id}">
-                        <div class="memory-header">
-                            <div>
-                                <span class="memory-id">${item.id}</span>
-                                ${item.is_golden ? '<span class="badge golden">⭐ Golden</span>' : ''}
-                                <span class="badge ${sentimentClass}">Sentiment: ${item.sentiment}</span>
-                            </div>
-                            <div>
-                                <span style="font-size: 12px; color: #999;">${formatLocalTime(item.timestamp)}</span>
-                            </div>
-                        </div>
-                        <div class="memory-meta">
-                            <strong>Conversation:</strong> ${item.conversation_id} | <strong>Weight:</strong> ${item.weight}
-                        </div>
-                        <div class="memory-text collapsed" id="user-${item.id}">
-                            <strong>User:</strong> ${escapeHtml(item.user_message)}
-                        </div>
-                        <div class="memory-text collapsed" id="assistant-${item.id}">
-                            <strong>Assistant:</strong> ${escapeHtml(item.assistant_response)}
-                        </div>
-                        <div class="memory-actions">
-                            <button class="primary" onclick="toggleExpand('${item.id}')">📖 Expand/Collapse</button>
-                            <button class="warning" onclick="toggleGolden('${item.id}', ${item.is_golden})">
-                                ${item.is_golden ? '⭐ Unmark Golden' : '☆ Mark Golden'}
-                            </button>
-                            <button class="danger" onclick="deleteMemory('${item.id}')">🗑️ Delete</button>
-                        </div>
-                    </div>
-                `;
-            }).join('');
-
-            document.getElementById('memories-content').innerHTML = html;
-
-            // Render pagination
-            const totalPages = Math.ceil(data.total / parseInt(document.getElementById('page-limit').value));
-            let paginationHtml = '';
-
-            if (currentPage > 0) {
-                paginationHtml += '<button class="primary" onclick="changePage(-1)">← Previous</button>';
-            }
-
-            paginationHtml += `<span style="padding: 8px;">Page ${currentPage + 1} of ${totalPages} (${data.total} total)</span>`;
-
-            if ((currentPage + 1) * parseInt(document.getElementById('page-limit').value) < data.total) {
-                paginationHtml += '<button class="primary" onclick="changePage(1)">Next →</button>';
-            }
-
-            document.getElementById('memories-pagination').innerHTML = paginationHtml;
-        }
-
-        async function toggleExpand(id) {
-            const userDiv = document.getElementById(`user-${id}`);
-            const assistantDiv = document.getElementById(`assistant-${id}`);
-
-            // Check if we need to fetch full content
-            if (!userDiv.dataset.fullLoaded) {
-                try {
-                    const response = await fetch(`/admin/api/memories/${id}`);
-                    if (!response.ok) throw new Error('Failed to fetch full content');
-
-                    const data = await response.json();
-
-                    // Update with full content
-                    userDiv.innerHTML = `<strong>User:</strong> ${escapeHtml(data.user_message)}`;
-                    assistantDiv.innerHTML = `<strong>Assistant:</strong> ${escapeHtml(data.assistant_response)}`;
-
-                    // Mark as loaded
-                    userDiv.dataset.fullLoaded = 'true';
-                    assistantDiv.dataset.fullLoaded = 'true';
-                } catch (error) {
-                    console.error('Error fetching full content:', error);
-                    alert('Failed to load full content');
-                    return;
-                }
-            }
-
-            // Toggle visibility
-            userDiv.classList.toggle('collapsed');
-            assistantDiv.classList.toggle('collapsed');
-        }
-
-        async function toggleGolden(id, currentGolden) {
-            if (!confirm(`Are you sure you want to ${currentGolden ? 'unmark' : 'mark'} this as a golden example?`)) {
-                return;
-            }
-
-            try {
-                const response = await fetch(`/admin/api/memories/${id}/toggle-golden`, {
-                    method: 'POST'
-                });
-
-                if (response.ok) {
-                    loadMemories(); // Reload the list
-                } else {
-                    alert('Failed to toggle golden status');
-                }
-            } catch (error) {
-                alert(`Error: ${error.message}`);
-            }
-        }
-
-        async function reevaluateGolden() {
-            if (!confirm('Re-evaluate all golden examples against current criteria?\n\nThis will un-golden any interactions that no longer qualify.')) {
-                return;
-            }
-            try {
-                const response = await fetch('/admin/api/golden/re-evaluate', { method: 'POST' });
-                const data = await response.json();
-                if (response.ok) {
-                    alert(`Re-evaluation complete:\n\nPreviously golden: ${data.total_golden}\nRemoved: ${data.removed}\nKept: ${data.kept}`);
-                    loadStats();
-                    loadMemories();
-                } else {
-                    alert(`Failed: ${data.detail || 'Unknown error'}`);
-                }
-            } catch (error) {
-                alert(`Error: ${error.message}`);
-            }
-        }
-
-        async function deleteMemory(id) {
-            if (!confirm('Are you sure you want to delete this memory? This action cannot be undone.')) {
-                return;
-            }
-
-            try {
-                const response = await fetch(`/admin/api/memories/${id}`, {
-                    method: 'DELETE'
-                });
-
-                if (response.ok) {
-                    loadMemories(); // Reload the list
-                } else {
-                    alert('Failed to delete memory');
-                }
-            } catch (error) {
-                alert(`Error: ${error.message}`);
-            }
-        }
-
-        function changePage(delta) {
-            currentPage += delta;
-            if (currentPage < 0) currentPage = 0;
-            loadMemories();
-        }
-
-        async function loadApiRequests() {
-            try {
-                const response = await fetch('/admin/api/recent-requests');
-                const data = await response.json();
-
-                if (data.error) {
-                    document.getElementById('api-requests-content').innerHTML = `<div class="error">API Error: ${data.error}</div>`;
-                    return;
-                }
-
-                renderApiRequests(data);
-            } catch (error) {
-                document.getElementById('api-requests-content').innerHTML = `<div class="error">Failed to load API requests: ${error.message}</div>`;
-            }
-        }
-
-        function renderApiRequests(data) {
-            if (data.items.length === 0) {
-                document.getElementById('api-requests-content').innerHTML = '<p style="text-align: center; color: #999;">No API requests logged yet.</p>';
-                return;
-            }
-
-            let html = '<p style="margin-bottom: 15px;"><strong>Showing ' + data.total + ' most recent API requests</strong></p>';
-
-            data.items.forEach((item, index) => {
-                const jsonStr = JSON.stringify(item, null, 2);
-
-                // Extract messages from new nested structure or legacy flat structure
-                const req = item.request || {};
-                const messages = req.messages || item.messages || [];
-                const msgCount = req.messages_count || messages.length;
-                const tools = req.tools || item.tools;
-                const toolChoice = req.tool_choice || item.tool_choice;
-
-                // Build tools info
-                let toolsInfo = 'no-tools';
-                if (tools && tools.length > 0) {
-                    toolsInfo = `${tools.length} tool(s)`;
-                    if (toolChoice) {
-                        const choice = typeof toolChoice === 'string' ? toolChoice : toolChoice.type || 'auto';
-                        toolsInfo += ` [${choice}]`;
-                    }
-                }
-
-                const duration = item.duration_seconds ? `${item.duration_seconds}s` : '';
-                const meta = [
-                    item.model || 'N/A',
-                    item.stream ? 'stream' : 'sync',
-                    toolsInfo,
-                    duration,
-                ].filter(Boolean).join(' | ');
-
-                // Build message previews
-                let msgHtml = '';
-                if (messages.length > 0) {
-                    messages.forEach(msg => {
-                        const role = msg.role || '?';
-                        const roleColor = role === 'system' ? '#e74c3c' : role === 'user' ? '#3498db' : role === 'tool' ? '#9b59b6' : '#27ae60';
-                        let preview = '';
-                        if (typeof msg.content === 'string') {
-                            preview = msg.content.length > 150 ? msg.content.substring(0, 150) + '...' : msg.content;
-                        } else if (msg.content === null || msg.content === undefined) {
-                            preview = msg.tool_calls ? `[tool_calls: ${JSON.stringify(msg.tool_calls).substring(0, 100)}]` : '(null)';
-                        } else {
-                            preview = JSON.stringify(msg.content).substring(0, 150);
-                        }
-                        msgHtml += `<div style="margin: 4px 0; font-size: 12px;"><span style="display: inline-block; width: 70px; font-weight: bold; color: ${roleColor};">[${role}]</span><span style="color: #555;">${escapeHtml(preview)}</span></div>`;
-                    });
-                } else if (msgCount) {
-                    msgHtml = `<div style="font-size: 12px; color: #888;">${msgCount} message(s)</div>`;
-                }
-
-                // Build response section
-                let responseHtml = '';
-                const resp = item.response;
-                if (resp) {
-                    const fr = resp.finish_reason || 'unknown';
-                    const frColor = fr === 'tool_calls' ? '#f39c12' : fr === 'stop' ? '#27ae60' : '#e74c3c';
-                    const borderColor = resp.tool_calls ? '#f39c12' : '#27ae60';
-
-                    responseHtml = `<div style="margin-top:8px; padding:10px; background:#f8fdf8; border-radius:4px; border-left:3px solid ${borderColor};">`;
-                    responseHtml += `<div style="font-size:12px; margin-bottom:6px; display:flex; align-items:center; gap:8px;">`;
-                    responseHtml += `<span style="font-weight:bold; color:${frColor}; background:${frColor}15; padding:2px 8px; border-radius:3px;">finish_reason: ${fr}</span>`;
-                    if (resp.length !== undefined) responseHtml += `<span style="color:#888; font-size:11px;">${resp.length} chars</span>`;
-                    responseHtml += `</div>`;
-
-                    // Tool calls (prominent pretty-printed display)
-                    if (resp.tool_calls) {
-                        const tcJson = JSON.stringify(resp.tool_calls, null, 2);
-                        responseHtml += `<div style="background:#1e1e1e; color:#d4d4d4; padding:12px; border-radius:4px; font-family:'Courier New',monospace; font-size:12px; margin-bottom:6px; max-height:300px; overflow-y:auto; line-height:1.5;">`;
-                        responseHtml += `<div style="color:#f39c12; font-weight:bold; margin-bottom:4px;">tool_calls:</div>`;
-                        responseHtml += `<pre style="margin:0; white-space:pre-wrap; word-wrap:break-word;">${syntaxHighlight(tcJson)}</pre>`;
-                        responseHtml += `</div>`;
-                    }
-
-                    // Content preview
-                    if (resp.content) {
-                        responseHtml += `<div style="font-size:12px; color:#555; max-height:120px; overflow-y:auto; padding:6px; background:#fff; border-radius:3px; border:1px solid #eee; line-height:1.5;">${escapeHtml(resp.content)}</div>`;
-                    }
-
-                    // Thinking preview
-                    if (resp.thinking) {
-                        responseHtml += `<div style="font-size:11px; color:#9b59b6; margin-top:6px; padding:6px; background:#f5f0ff; border-radius:3px; font-style:italic; line-height:1.4;">thinking: ${escapeHtml(resp.thinking)}</div>`;
-                    }
-
-                    responseHtml += `</div>`;
-                }
-
-                // Build request tools pretty-print (when tools are present)
-                let requestToolsHtml = '';
-                if (tools && tools.length > 0) {
-                    const toolNames = tools.map(t => t.function ? t.function.name : (t.name || '?')).join(', ');
-                    requestToolsHtml = `<div style="margin-top:6px; padding:6px 8px; background:#fff8e1; border-radius:3px; font-size:11px; border:1px solid #ffe082;">`;
-                    requestToolsHtml += `<strong style="color:#f57f17;">Tools sent:</strong> ${escapeHtml(toolNames)}`;
-                    requestToolsHtml += ` <button style="font-size:10px; padding:1px 6px; margin-left:6px;" onclick="toggleApiTools(${index})">show definitions</button>`;
-                    requestToolsHtml += `<div id="api-tools-${index}" style="display:none; margin-top:6px;">`;
-                    requestToolsHtml += `<pre style="margin:0; font-size:11px; white-space:pre-wrap; background:#1e1e1e; color:#d4d4d4; padding:8px; border-radius:4px; max-height:200px; overflow-y:auto;">${syntaxHighlight(JSON.stringify(tools, null, 2))}</pre>`;
-                    requestToolsHtml += `</div></div>`;
-                }
-
-                html += `
-                    <div style="background: #f9f9f9; border-radius: 6px; padding: 12px; margin-bottom: 12px; border-left: 4px solid ${resp && resp.tool_calls ? '#f39c12' : '#667eea'};">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                            <div>
-                                <strong style="font-size: 13px;">#${index + 1}</strong>
-                                <span style="font-size: 11px; color: #999; margin-left: 10px;">${formatLocalTime(item.timestamp)}</span>
-                                <span style="font-size: 11px; color: #666; margin-left: 10px;">${item.endpoint || ''}</span>
-                                <span style="font-size: 11px; color: #666; margin-left: 10px;">${meta}</span>
-                            </div>
-                            <div style="display:flex; gap:4px;">
-                                <button class="primary" onclick="toggleApiJson(${index})">Raw JSON</button>
-                            </div>
-                        </div>
-                        <div style="background: #fff; border-radius: 4px; padding: 8px; font-family: monospace; font-size: 12px;">
-                            ${msgHtml}
-                        </div>
-                        ${requestToolsHtml}
-                        ${responseHtml}
-                        <div id="api-json-${index}" class="json-viewer" style="display: none; margin-top: 8px;">
-                            <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">${syntaxHighlight(jsonStr)}</pre>
-                        </div>
-                    </div>
-                `;
-            });
-
-            document.getElementById('api-requests-content').innerHTML = html;
-        }
-
-        function toggleApiJson(index) {
-            const el = document.getElementById(`api-json-${index}`);
-            el.style.display = el.style.display === 'none' ? 'block' : 'none';
-        }
-
-        function toggleApiTools(index) {
-            const el = document.getElementById(`api-tools-${index}`);
-            el.style.display = el.style.display === 'none' ? 'block' : 'none';
-        }
-
-        async function loadDebugData() {
-            const limit = parseInt(document.getElementById('debug-limit').value);
-
-            try {
-                const response = await fetch(`/admin/api/recent-interactions?limit=${limit}`);
-                const data = await response.json();
-
-                if (data.error) {
-                    document.getElementById('debug-content').innerHTML = `<div class="error">API Error: ${data.error}</div>`;
-                    return;
-                }
-
-                renderDebugData(data);
-            } catch (error) {
-                document.getElementById('debug-content').innerHTML = `<div class="error">Failed to load debug data: ${error.message}</div>`;
-            }
-        }
-
-        function renderDebugData(data) {
-            if (data.items.length === 0) {
-                document.getElementById('debug-content').innerHTML = '<p style="text-align: center; color: #999;">No interactions found.</p>';
-                return;
-            }
-
-            let html = '<p style="margin-bottom: 15px;"><strong>Showing ' + data.returned + ' of ' + data.total + ' interactions</strong></p>';
-
-            data.items.forEach((item, index) => {
-                const jsonStr = JSON.stringify(item, null, 2);
-                html += `
-                    <div class="card">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                            <h3 style="margin: 0; font-size: 14px;">#${index + 1} - ${formatLocalTime(item.timestamp)}</h3>
-                            <button class="primary" onclick="toggleJson(${index})">Toggle JSON</button>
-                        </div>
-                        <div id="json-${index}" class="json-viewer" style="display: block;">
-                            <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">${syntaxHighlight(jsonStr)}</pre>
-                        </div>
-                    </div>
-                `;
-            });
-
-            document.getElementById('debug-content').innerHTML = html;
-        }
-
-        function toggleJson(index) {
-            const el = document.getElementById(`json-${index}`);
-            el.style.display = el.style.display === 'none' ? 'block' : 'none';
-        }
-
-        function syntaxHighlight(json) {
-            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
-                let cls = 'json-number';
-                if (/^"/.test(match)) {
-                    if (/:$/.test(match)) {
-                        cls = 'json-key';
-                    } else {
-                        cls = 'json-string';
-                    }
-                } else if (/true|false/.test(match)) {
-                    cls = 'json-boolean';
-                } else if (/null/.test(match)) {
-                    cls = 'json-null';
-                }
-                return '<span class="' + cls + '">' + match + '</span>';
-            });
-        }
-
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        // Database cleanup functions
-        async function cleanupByAge() {
-            const days = prompt('Enter age threshold in days (entries older than this will be deleted):', '90');
-            if (days === null) return;
-
-            const daysNum = parseInt(days);
-            if (isNaN(daysNum) || daysNum < 1 || daysNum > 3650) {
-                alert('Invalid number of days. Please enter a number between 1 and 3650 (10 years).');
-                return;
-            }
-
-            if (!confirm(`Remove all entries older than ${daysNum} days?\n\nGolden examples will be preserved.\nThis action cannot be undone.`)) {
-                return;
-            }
-
-            try {
-                const response = await fetch(`/admin/api/database/cleanup/age?days=${daysNum}`, {
-                    method: 'POST'
-                });
-                const data = await response.json();
-
-                if (data.success) {
-                    alert(`✓ Cleanup complete!\n\nDeleted: ${data.deleted_count} entries\nNew size: ${data.new_size_gb} GB\nRemaining entries: ${data.remaining_interactions}`);
-                    loadStats();
-                    loadMemories();
-                } else {
-                    alert('Cleanup failed: ' + (data.error || 'Unknown error'));
-                }
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        }
-
-        async function cleanupByWeight() {
-            const threshold = prompt('Enter weight threshold (entries below this will be deleted):', '0.5');
-            if (threshold === null) return;
-
-            const thresholdNum = parseFloat(threshold);
-            if (isNaN(thresholdNum) || thresholdNum < 0 || thresholdNum > 5) {
-                alert('Invalid threshold. Please enter a number between 0 and 5.');
-                return;
-            }
-
-            if (!confirm(`Remove all entries with weight < ${thresholdNum}?\n\nGolden examples will be preserved.\nThis action cannot be undone.`)) {
-                return;
-            }
-
-            try {
-                const response = await fetch(`/admin/api/database/cleanup/weight?threshold=${thresholdNum}`, {
-                    method: 'POST'
-                });
-                const data = await response.json();
-
-                if (data.success) {
-                    alert(`✓ Cleanup complete!\n\nDeleted: ${data.deleted_count} entries\nNew size: ${data.new_size_gb} GB\nRemaining entries: ${data.remaining_interactions}`);
-                    loadStats();
-                    loadMemories();
-                } else {
-                    alert('Cleanup failed: ' + (data.error || 'Unknown error'));
-                }
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        }
-
-        async function cleanupLowest() {
-            const percentage = prompt('Enter percentage to remove (e.g., 10 for bottom 10%):', '10');
-            if (percentage === null) return;
-
-            const percentNum = parseFloat(percentage);
-            if (isNaN(percentNum) || percentNum <= 0 || percentNum > 50) {
-                alert('Invalid percentage. Please enter a number between 1 and 50.');
-                return;
-            }
-
-            const percentDecimal = percentNum / 100;
-
-            if (!confirm(`Remove the bottom ${percentNum}% of entries by weight?\n\nThis will delete the ${percentNum}% lowest-weight entries.\nGolden examples will be preserved.\n\nThis action cannot be undone.`)) {
-                return;
-            }
-
-            try {
-                const response = await fetch(`/admin/api/database/cleanup/lowest?percentage=${percentDecimal}`, {
-                    method: 'POST'
-                });
-                const data = await response.json();
-
-                if (data.success) {
-                    alert(`✓ Cleanup complete!\n\nDeleted: ${data.deleted_count} entries\nNew size: ${data.new_size_gb} GB\nRemaining entries: ${data.remaining_interactions}`);
-                    loadStats();
-                    loadMemories();
-                } else {
-                    alert('Cleanup failed: ' + (data.error || 'Unknown error'));
-                }
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        }
-
-        // Model & Training controls
-        async function loadModelControls() {
-            try {
-                const response = await fetch('/admin/api/model/status');
-                const data = await response.json();
-                renderModelControls(data);
-            } catch (error) {
-                document.getElementById('model-controls-content').innerHTML = `<div class="error">Failed to load model status: ${error.message}</div>`;
-            }
-        }
-
-        function renderModelControls(status) {
-            let statusClass, statusText;
-
-            if (status.training_in_progress) {
-                statusClass = 'warning';
-                statusText = '🔥 Training in Progress';
-            } else if (status.is_reloading) {
-                statusClass = 'warning';
-                statusText = '⟳ Reloading...';
-            } else if (status.model_loaded) {
-                statusClass = 'positive';
-                statusText = '✓ Serving';
-            } else {
-                statusClass = 'negative';
-                statusText = '✗ Unavailable';
-            }
-
-            let metricsHtml = '';
-            if (status.deployed_metrics) {
-                const m = status.deployed_metrics;
-                metricsHtml = Object.entries(m).map(([k, v]) =>
-                    `<span class="badge" style="background:#667eea;color:white;margin-right:6px;">${k}: ${typeof v === 'number' ? v.toFixed(3) : v}</span>`
-                ).join('');
-            }
-
-            const html = `
-                <div class="card" style="margin-bottom: 20px;">
-                    <h2>🤖 Model & Training Controls</h2>
-                    <p style="font-size: 13px; color: #666; margin-bottom: 15px;">
-                        Models are served by the Ollama container with GPU acceleration. Training happens in the trainer container using CPU-based LoRA fine-tuning.
-                    </p>
-                    <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start;">
-                        <div style="flex: 1; min-width: 280px;">
-                            <div class="stat-row">
-                                <span class="stat-label">Model Status (Ollama)</span>
-                                <span class="stat-value ${statusClass}">${statusText}</span>
-                            </div>
-                            ${status.external_model_name ? `<div class="stat-row">
-                                <span class="stat-label">Model Name</span>
-                                <span class="stat-value">${status.external_model_name}</span>
-                            </div>` : ''}
-                            <div class="stat-row">
-                                <span class="stat-label">Active Checkpoint</span>
-                                <span class="stat-value">${status.current_checkpoint_id || 'Base model (no fine-tuning)'}</span>
-                            </div>
-                            ${status.deployed_at ? `<div class="stat-row">
-                                <span class="stat-label">Deployed At</span>
-                                <span class="stat-value">${formatLocalTime(status.deployed_at)}</span>
-                            </div>` : ''}
-                            ${metricsHtml ? `<div class="stat-row">
-                                <span class="stat-label">Metrics</span>
-                                <span class="stat-value">${metricsHtml}</span>
-                            </div>` : ''}
-                        </div>
-                        <div style="display: flex; flex-direction: column; gap: 8px; min-width: 200px;">
-                            <button class="success" onclick="triggerTraining()" ${status.is_reloading ? 'disabled' : ''}>
-                                🚀 Trigger Training Now
-                            </button>
-                            <button class="primary" onclick="reloadBaseModel()" ${status.is_reloading ? 'disabled' : ''}>
-                                ↩️ Revert to Base Model
-                            </button>
-                            <button class="primary" onclick="loadModelControls(); loadCheckpointsList(); loadStats();">
-                                🔄 Refresh
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            `;
-            document.getElementById('model-controls-content').innerHTML = html;
-        }
-
-        async function triggerTraining() {
-            if (!confirm('Trigger a training run now?\n\nLow-weight entries will be cleaned up before training begins.\nAfter training completes, the LoRA adapter will be automatically deployed to Ollama if it passes validation.\n\nTraining will start within ~30 seconds.')) return;
-
-            try {
-                const response = await fetch('/admin/api/training/trigger', { method: 'POST' });
-                const data = await response.json();
-                if (data.success) {
-                    alert('✓ Training requested!\n\nPre-training cleanup removed ' + data.pre_training_cleanup_deleted + ' low-weight entries.\nTraining will begin within ~30 seconds.');
-                } else {
-                    alert('Failed to trigger training: ' + (data.message || 'Unknown error'));
-                }
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        }
-
-        async function reloadBaseModel() {
-            if (!confirm('Revert to the original base model?\n\nThis will replace the current fine-tuned model with the base model in Ollama.\nFine-tuned checkpoints are preserved and can be re-deployed later.')) return;
-
-            try {
-                const response = await fetch('/admin/api/model/reload-base', { method: 'POST' });
-                const data = await response.json();
-                if (data.success) {
-                    alert('✓ ' + data.message);
-                    loadModelControls();
-                    loadStats();
-                } else {
-                    alert('Reload failed: ' + data.message);
-                }
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        }
-
-        async function rollbackToCheckpoint(checkpointId) {
-            if (!confirm(`Deploy checkpoint:\n${checkpointId}\n\nThe LoRA adapter will be applied to the base model in Ollama.\nRequests will briefly return 503 during the model swap (~5-15s).`)) return;
-
-            try {
-                const response = await fetch(`/admin/api/model/rollback?checkpoint_id=${encodeURIComponent(checkpointId)}`, { method: 'POST' });
-                const data = await response.json();
-                if (data.success) {
-                    alert('✓ ' + data.message);
-                    loadModelControls();
-                    loadStats();
-                    loadCheckpointsList();
-                } else {
-                    alert('Rollback failed: ' + data.message);
-                }
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        }
-
-        async function loadCheckpointsList() {
-            try {
-                const response = await fetch('/admin/api/checkpoints');
-                const data = await response.json();
-
-                // Also get current active checkpoint for highlighting
-                let currentCpId = null;
-                try {
-                    const statusResp = await fetch('/admin/api/model/status');
-                    const statusData = await statusResp.json();
-                    currentCpId = statusData.current_checkpoint_id;
-                } catch (e) {}
-
-                renderCheckpointsList(data.checkpoints || [], currentCpId);
-            } catch (error) {
-                document.getElementById('checkpoints-content').innerHTML = `<div class="error">Failed to load checkpoints: ${error.message}</div>`;
-            }
-        }
-
-        function renderCheckpointsList(checkpoints, currentCpId) {
-            if (checkpoints.length === 0) {
-                document.getElementById('checkpoints-content').innerHTML = `
-                    <div class="card" style="margin-top: 20px;">
-                        <h2>📦 Training Checkpoints</h2>
-                        <p style="text-align: center; color: #999; padding: 20px;">
-                            No checkpoints yet. Click "Trigger Training Now" to create your first checkpoint.<br/>
-                            After training, LoRA adapters are automatically deployed to Ollama.
-                        </p>
-                    </div>`;
-                return;
-            }
-
-            let rows = checkpoints.map(cp => {
-                const cpId = cp.checkpoint_id || 'unknown';
-                const isCurrent = cpId === currentCpId;
-                const hasAdapter = !!cp.adapter_path;
-                const deployed = cp.deployed;
-                const perplexity = cp.metrics?.perplexity;
-                const alignment = cp.metrics?.sentiment_alignment;
-                const samples = cp.training_samples || 0;
-
-                return `
-                    <tr style="${isCurrent ? 'background: #eef6ff;' : ''}">
-                        <td style="padding: 8px; font-family: monospace; font-size: 12px;">
-                            ${cpId}
-                            ${isCurrent ? '<span class="badge" style="background: #27ae60; color: white; margin-left: 6px;">ACTIVE</span>' : ''}
-                        </td>
-                        <td style="padding: 8px;">${formatLocalTime(cp.timestamp)}</td>
-                        <td style="padding: 8px;">${perplexity !== undefined ? perplexity.toFixed(2) : '-'}</td>
-                        <td style="padding: 8px;">${alignment !== undefined ? alignment.toFixed(3) : '-'}</td>
-                        <td style="padding: 8px;">${samples}</td>
-                        <td style="padding: 8px;">
-                            ${deployed ? '<span class="badge positive">Deployed</span>' : '<span class="badge neutral">Not deployed</span>'}
-                            ${hasAdapter ? ' <span class="badge" style="background: #667eea; color: white;">LoRA</span>' : ''}
-                        </td>
-                        <td style="padding: 8px;">
-                            ${hasAdapter && !isCurrent ? `<button class="warning" onclick="rollbackToCheckpoint('${cpId}')" style="font-size: 11px;">⏪ Deploy</button>` : ''}
-                            ${isCurrent ? '<span style="color: #27ae60; font-size: 12px; font-weight: bold;">Active</span>' : ''}
-                            ${!hasAdapter ? '<span style="color: #999; font-size: 12px;">No adapter</span>' : ''}
-                        </td>
-                    </tr>`;
-            }).join('');
-
-            const html = `
-                <div class="card" style="margin-top: 20px;">
-                    <h2>📦 Training Checkpoints</h2>
-                    <p style="font-size: 13px; color: #666; margin-bottom: 15px;">
-                        After each training run, LoRA adapters are deployed to Ollama via adapter layering if they pass validation.
-                        Use the Deploy button to switch to a different checkpoint.
-                    </p>
-                    <div style="overflow-x: auto;">
-                        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-                            <thead>
-                                <tr style="border-bottom: 2px solid #667eea; text-align: left;">
-                                    <th style="padding: 8px;">Checkpoint ID</th>
-                                    <th style="padding: 8px;">Timestamp</th>
-                                    <th style="padding: 8px;">Perplexity</th>
-                                    <th style="padding: 8px;">Alignment</th>
-                                    <th style="padding: 8px;">Samples</th>
-                                    <th style="padding: 8px;">Status</th>
-                                    <th style="padding: 8px;">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>${rows}</tbody>
-                        </table>
-                    </div>
-                </div>`;
-
-            document.getElementById('checkpoints-content').innerHTML = html;
-        }
-
-        // Load stats on page load
-        loadStats();
-        loadTrainingCharts();
-        loadModelControls();
-        loadCheckpointsList();
-        loadLiveTrainingStatus();
-
-        // Refresh stats every 60 seconds
-        setInterval(() => {
-            if (document.getElementById('stats-tab').classList.contains('active')) {
-                loadStats();
-                loadTrainingCharts();
-                loadModelControls();
-                loadLiveTrainingStatus();
-            }
-        }, 60000);
-
-        // ----------------------------------------------------------------
-        // Prompt Interceptor Rules
-        // ----------------------------------------------------------------
-
-        async function loadPromptRules() {
-            const container = document.getElementById('rules-list-content');
-            try {
-                const resp = await fetch('/admin/api/prompt-rules');
-                const data = await resp.json();
-                const rules = data.rules || [];
-
-                if (rules.length === 0) {
-                    container.innerHTML = '<div class="no-data-message">No rules defined yet. Click "+ Add Rule" to create one.</div>';
-                    return;
-                }
-
-                let html = '<table class="rules-table"><thead><tr>';
-                html += '<th>Pri</th><th>Description</th><th>Pattern</th><th>Replacement</th><th>Targets</th><th>Enabled</th><th>Actions</th>';
-                html += '</tr></thead><tbody>';
-
-                for (const rule of rules) {
-                    const enabledClass = rule.enabled ? 'enabled' : 'disabled';
-                    const enabledIcon = rule.enabled ? '&#9679;' : '&#9675;';
-                    const patternDisplay = escapeHtml(rule.pattern.length > 50 ? rule.pattern.substring(0, 50) + '...' : rule.pattern);
-                    const replacementDisplay = escapeHtml((rule.replacement || '(empty)').length > 30 ? rule.replacement.substring(0, 30) + '...' : (rule.replacement || '(empty)'));
-                    const targets = (rule.target_roles || []).join(', ');
-
-                    html += '<tr>';
-                    html += `<td>${rule.priority}</td>`;
-                    html += `<td>${escapeHtml(rule.description || '(unnamed)')}</td>`;
-                    html += `<td class="pattern-cell" title="${escapeHtml(rule.pattern)}">${patternDisplay}</td>`;
-                    html += `<td class="pattern-cell">${replacementDisplay}</td>`;
-                    html += `<td>${targets}</td>`;
-                    html += `<td><span class="toggle-switch ${enabledClass}" onclick="toggleRule('${rule.id}')" title="Click to toggle">${enabledIcon}</span></td>`;
-                    html += `<td class="actions-cell">`;
-                    html += `<button onclick="editRule('${rule.id}')">Edit</button>`;
-                    html += `<button class="danger" onclick="deleteRule('${rule.id}')">Delete</button>`;
-                    html += `</td></tr>`;
-                }
-                html += '</tbody></table>';
-                container.innerHTML = html;
-            } catch (e) {
-                container.innerHTML = `<div class="error">Failed to load rules: ${e.message}</div>`;
-            }
-        }
-
-        function escapeHtml(str) {
-            const div = document.createElement('div');
-            div.textContent = str;
-            return div.innerHTML;
-        }
-
-        function showRuleForm(rule = null) {
-            document.getElementById('rule-form-container').style.display = 'block';
-            document.getElementById('rule-form-title').textContent = rule ? 'Edit Rule' : 'Add Rule';
-            document.getElementById('rule-edit-id').value = rule ? rule.id : '';
-            document.getElementById('rule-description').value = rule ? rule.description : '';
-            document.getElementById('rule-priority').value = rule ? rule.priority : 50;
-            document.getElementById('rule-pattern').value = rule ? rule.pattern : '';
-            document.getElementById('rule-replacement').value = rule ? (rule.replacement || '') : '';
-
-            const targets = rule ? (rule.target_roles || ['system']) : ['system'];
-            document.getElementById('role-system').checked = targets.includes('system');
-            document.getElementById('role-user').checked = targets.includes('user');
-            document.getElementById('role-assistant').checked = targets.includes('assistant');
-        }
-
-        function hideRuleForm() {
-            document.getElementById('rule-form-container').style.display = 'none';
-        }
-
-        async function editRule(ruleId) {
-            try {
-                const resp = await fetch('/admin/api/prompt-rules');
-                const data = await resp.json();
-                const rule = (data.rules || []).find(r => r.id === ruleId);
-                if (rule) showRuleForm(rule);
-            } catch (e) {
-                alert('Failed to load rule: ' + e.message);
-            }
-        }
-
-        async function saveRule() {
-            const editId = document.getElementById('rule-edit-id').value;
-            const targets = [];
-            if (document.getElementById('role-system').checked) targets.push('system');
-            if (document.getElementById('role-user').checked) targets.push('user');
-            if (document.getElementById('role-assistant').checked) targets.push('assistant');
-            if (targets.length === 0) targets.push('system');
-
-            const body = {
-                description: document.getElementById('rule-description').value,
-                pattern: document.getElementById('rule-pattern').value,
-                replacement: document.getElementById('rule-replacement').value,
-                target_roles: targets,
-                priority: parseInt(document.getElementById('rule-priority').value) || 50,
-                enabled: true,
-            };
-
-            if (!body.pattern) { alert('Pattern is required'); return; }
-
-            try {
-                const url = editId ? `/admin/api/prompt-rules/${editId}` : '/admin/api/prompt-rules';
-                const method = editId ? 'PUT' : 'POST';
-                const resp = await fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
-                const data = await resp.json();
-                if (!resp.ok) { alert('Error: ' + (data.detail || 'Unknown error')); return; }
-                hideRuleForm();
-                loadPromptRules();
-            } catch (e) {
-                alert('Failed to save rule: ' + e.message);
-            }
-        }
-
-        async function deleteRule(ruleId) {
-            if (!confirm('Delete this rule?')) return;
-            try {
-                await fetch(`/admin/api/prompt-rules/${ruleId}`, { method: 'DELETE' });
-                loadPromptRules();
-            } catch (e) {
-                alert('Failed to delete rule: ' + e.message);
-            }
-        }
-
-        async function toggleRule(ruleId) {
-            try {
-                await fetch(`/admin/api/prompt-rules/${ruleId}/toggle`, { method: 'POST' });
-                loadPromptRules();
-            } catch (e) {
-                alert('Failed to toggle rule: ' + e.message);
-            }
-        }
-
-        async function testRules() {
-            const text = document.getElementById('rule-test-input').value;
-            if (!text) { alert('Enter some text to test'); return; }
-
-            try {
-                const resp = await fetch('/admin/api/prompt-rules/test', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ text })
-                });
-                const data = await resp.json();
-                document.getElementById('rule-test-output').style.display = 'block';
-                document.getElementById('rule-test-result').textContent = data.output;
-
-                let matchHtml = '';
-                for (const r of (data.rules_applied || [])) {
-                    const cls = r.matched ? 'matched' : 'not-matched';
-                    const icon = r.matched ? '&#10003;' : '&#10007;';
-                    matchHtml += `<span class="${cls}">${icon} ${escapeHtml(r.description || r.id)}</span>&nbsp;&nbsp;`;
-                }
-                document.getElementById('rule-test-matches').innerHTML = matchHtml || '<span class="not-matched">No rules to apply</span>';
-            } catch (e) {
-                alert('Test failed: ' + e.message);
-            }
-        }
-    </script>
+    <div class="header-right">
+      <div class="model" id="header-model">—</div>
+      <div id="header-checkpoint">no checkpoint</div>
+    </div>
+  </header>
+
+  <!-- Quick stats row -->
+  <div class="quick-stats">
+    <div class="stat-chip">
+      <div class="label">Conversations Evaluated</div>
+      <div class="value" id="stat-evaluated">—</div>
+      <div class="sub" id="stat-unevaluated-sub">— pending</div>
+    </div>
+    <div class="stat-chip golden">
+      <div class="label">Golden Examples</div>
+      <div class="value" id="stat-golden">—</div>
+      <div class="sub">high-value behavioral signal</div>
+    </div>
+    <div class="stat-chip noise">
+      <div class="label">Noise Filtered</div>
+      <div class="value" id="stat-noise">—</div>
+      <div class="sub">skipped from training</div>
+    </div>
+    <div class="stat-chip quality">
+      <div class="label">Avg Quality Score</div>
+      <div class="value" id="stat-quality">—</div>
+      <div class="sub">out of 10</div>
+    </div>
+  </div>
+
+  <!-- Status cards -->
+  <div class="cards">
+    <div class="card">
+      <h2>Evaluation Pipeline</h2>
+      <div class="row"><span class="lbl">Backlog</span><span class="val blue" id="ep-backlog">—</span></div>
+      <div class="row"><span class="lbl">Window</span><span class="val" id="ep-window">—</span></div>
+      <div class="row"><span class="lbl">Batch Size</span><span class="val" id="ep-batch">—</span></div>
+      <div class="row"><span class="lbl">Sidecar Mode</span><span class="val" id="ep-sidecar">—</span></div>
+      <div class="row"><span class="lbl">Total Evaluated</span><span class="val" id="ep-total">—</span></div>
+    </div>
+    <div class="card">
+      <h2>Training Pipeline</h2>
+      <div class="row"><span class="lbl">Last Training</span><span class="val" id="tp-last">—</span></div>
+      <div class="row"><span class="lbl">Days Since</span><span class="val" id="tp-days">—</span></div>
+      <div class="row"><span class="lbl">Pending (SFT)</span><span class="val" id="tp-pending-sft">—</span></div>
+      <div class="row"><span class="lbl">Pending (DPO neg)</span><span class="val" id="tp-pending-dpo">—</span></div>
+      <div class="row"><span class="lbl">New Golden</span><span class="val" id="tp-golden">—</span></div>
+    </div>
+    <div class="card">
+      <h2>llama.cpp Server</h2>
+      <div class="row"><span class="lbl">Status</span><span class="val" id="llm-status">checking…</span></div>
+      <div class="row"><span class="lbl">URL</span><span class="val" id="llm-url" style="font-size:11px;word-break:break-all">—</span></div>
+      <div class="row"><span class="lbl">Active Adapters</span><span class="val" id="llm-adapters">—</span></div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn btn-primary btn-sm" onclick="refreshServerStatus()">Refresh Status</button>
+        <button class="btn btn-warning btn-sm" onclick="unloadAllAdapters()">Unload Adapters</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Interactions browser -->
+  <div class="section">
+    <h2>
+      Interaction Browser
+      <button class="btn btn-primary btn-sm" onclick="loadInteractions(0)">Refresh</button>
+    </h2>
+    <div class="filter-bar">
+      <select id="filter-sentiment" onchange="loadInteractions(0)">
+        <option value="">All sentiments</option>
+        <option value="positive">Positive</option>
+        <option value="negative">Negative</option>
+        <option value="neutral">Neutral</option>
+      </select>
+      <select id="filter-golden" onchange="loadInteractions(0)">
+        <option value="">All types</option>
+        <option value="true">Golden only</option>
+        <option value="false">Non-golden</option>
+      </select>
+      <select id="filter-limit">
+        <option value="25">25 per page</option>
+        <option value="50" selected>50 per page</option>
+        <option value="100">100 per page</option>
+      </select>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Timestamp</th>
+          <th>Quality</th>
+          <th>Sentiment</th>
+          <th>Tags</th>
+          <th>Topics</th>
+          <th>Preview</th>
+        </tr>
+      </thead>
+      <tbody id="interactions-tbody">
+        <tr><td colspan="6" style="text-align:center;color:#aaa;padding:30px">Loading…</td></tr>
+      </tbody>
+    </table>
+    <div class="pagination" id="pagination"></div>
+  </div>
+
+  <!-- Checkpoints -->
+  <div class="section">
+    <h2>
+      Checkpoints
+      <button class="btn btn-primary btn-sm" onclick="loadCheckpoints()">Refresh</button>
+    </h2>
+    <div id="checkpoints-list"><div style="color:#aaa;text-align:center;padding:20px">Loading…</div></div>
+  </div>
+
+  <!-- System -->
+  <div class="section">
+    <h2>System Resources</h2>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">
+      <div class="row"><span class="lbl">CPU Usage</span><span class="val" id="sys-cpu">—</span></div>
+      <div class="row"><span class="lbl">Memory (RSS)</span><span class="val" id="sys-mem">—</span></div>
+      <div class="row"><span class="lbl">ES Index</span><span class="val" id="sys-index">—</span></div>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn btn-secondary" onclick="triggerEvaluation()">Run Evaluation Now</button>
+      <button class="btn btn-warning" onclick="triggerTraining()">Trigger Training Now</button>
+    </div>
+  </div>
+
+  <div class="last-refresh">Last refresh: <span id="last-refresh-time">—</span> &nbsp;(auto-refreshes every 30s)</div>
+</div>
+
+<script>
+let currentPage = 0;
+
+// ── Main refresh ──────────────────────────────────────────────────────────
+async function refreshAll() {
+  await Promise.allSettled([
+    refreshStats(),
+    refreshServerStatus(),
+    loadInteractions(currentPage),
+    loadCheckpoints(),
+  ]);
+  document.getElementById('last-refresh-time').textContent = new Date().toLocaleTimeString();
+}
+
+async function refreshStats() {
+  try {
+    const r = await fetch('/admin/api/stats');
+    const d = await r.json();
+
+    // Header
+    document.getElementById('header-model').textContent = d.system?.model_id || '—';
+    document.getElementById('header-checkpoint').textContent = d.system?.current_checkpoint || 'no checkpoint';
+
+    // Quick stats
+    set('stat-evaluated', fmt(d.evaluation?.evaluated_count));
+    set('stat-unevaluated-sub', `${fmt(d.evaluation?.unevaluated_count)} pending`);
+    set('stat-golden', fmt(d.evaluation?.golden_count));
+    set('stat-noise', fmt(d.evaluation?.noise_count));
+    set('stat-quality', d.evaluation?.avg_quality ?? '—');
+
+    // Eval pipeline card
+    set('ep-backlog', `${fmt(d.evaluation?.unevaluated_count)} docs`);
+    set('ep-window', d.evaluation?.evaluation_window || '—');
+    set('ep-batch', '25 docs / batch');
+    set('ep-sidecar', d.evaluation?.sidecar_mode ? '✓ active' : '✗ off');
+    set('ep-total', fmt(d.evaluation?.evaluated_count));
+
+    // Training pipeline card
+    const lastTrain = d.training?.last_training ? new Date(d.training.last_training).toLocaleString() : 'never';
+    set('tp-last', lastTrain);
+    const days = d.training?.days_since_training;
+    set('tp-days', days !== undefined ? (days > 999 ? 'never' : days.toFixed(1) + 'd ago') : '—');
+    set('tp-pending-sft', `${fmt(d.training?.new_since_training)} new / ${fmt(d.training?.new_positive)} positive`);
+    set('tp-pending-dpo', `${fmt(d.training?.new_negative)} negative`);
+    set('tp-golden', fmt(d.training?.new_golden));
+
+    // System
+    set('sys-cpu', `${d.system?.cpu_percent ?? '—'}%`);
+    set('sys-mem', `${d.system?.memory_usage_mb ?? '—'} MB`);
+    set('llm-url', d.system?.llama_cpp_url || '—');
+
+    // DB info
+    try {
+      const dbr = await fetch('/admin/api/database/info');
+      const db = await dbr.json();
+      set('sys-index', `${db.size_gb?.toFixed(2) ?? '—'} GB`);
+    } catch {}
+
+  } catch(e) { console.error('stats error', e); }
+}
+
+async function refreshServerStatus() {
+  try {
+    const r = await fetch('/admin/api/model/server-status');
+    const d = await r.json();
+    const statusEl = document.getElementById('llm-status');
+    if (d.reachable && d.healthy) {
+      statusEl.innerHTML = '<span class="dot dot-green"></span>healthy';
+      statusEl.className = 'val ok';
+    } else if (d.reachable) {
+      statusEl.innerHTML = '<span class="dot dot-red"></span>unhealthy';
+      statusEl.className = 'val err';
+    } else {
+      statusEl.innerHTML = '<span class="dot dot-red"></span>unreachable';
+      statusEl.className = 'val err';
+    }
+    const adapters = d.loaded_adapters || [];
+    set('llm-adapters', adapters.length === 0 ? 'none (base model)' : adapters.map(a => a.path?.split('/').pop() || '?').join(', '));
+  } catch(e) {
+    set('llm-status', 'error');
+  }
+}
+
+// ── Interactions ──────────────────────────────────────────────────────────
+async function loadInteractions(page) {
+  currentPage = page;
+  const limit = parseInt(document.getElementById('filter-limit').value) || 50;
+  const sentiment = document.getElementById('filter-sentiment').value;
+  const golden = document.getElementById('filter-golden').value;
+  let url = `/admin/api/memories?skip=${page * limit}&limit=${limit}`;
+  if (sentiment) url += `&sentiment_filter=${sentiment}`;
+  if (golden) url += `&is_golden=${golden}`;
+
+  const tbody = document.getElementById('interactions-tbody');
+  tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#aaa;padding:20px">Loading…</td></tr>';
+
+  try {
+    const r = await fetch(url);
+    const d = await r.json();
+    renderInteractions(d.items || [], d.total || 0, page, limit);
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color:#e74c3c;padding:20px">Error loading interactions</td></tr>';
+  }
+}
+
+function renderInteractions(items, total, page, limit) {
+  const tbody = document.getElementById('interactions-tbody');
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#aaa;padding:20px">No interactions found</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = items.map((item, idx) => {
+    const ts = item.timestamp ? new Date(item.timestamp).toLocaleString() : '—';
+    const quality = item.metadata?.rlhfl_quality ?? '?';
+    const qPct = Math.min(100, (quality / 10) * 100);
+    const sentiment = (item.sentiment ?? 0).toFixed(2);
+    const sentClass = item.sentiment > 0.3 ? 'ok' : item.sentiment < -0.3 ? 'err' : '';
+    const isGolden = item.metadata?.rlhfl_is_golden;
+    const isNoise = item.metadata?.rlhfl_is_noise;
+    const topics = (item.metadata?.rlhfl_topics || []).slice(0, 3).join(', ') || '—';
+    const preview = (item.user_message || '').slice(0, 80).replace(/</g, '&lt;');
+    const expandId = `expand-${idx}`;
+
+    const badges = [
+      isGolden ? '<span class="badge badge-golden">★ golden</span>' : '',
+      isNoise ? '<span class="badge badge-noise">noise</span>' : '',
+    ].filter(Boolean).join(' ');
+
+    return `<tr onclick="toggleExpand('${expandId}')">
+      <td>${ts}</td>
+      <td>${quality}<span class="quality-bar"><span class="quality-fill" style="width:${qPct}%"></span></span></td>
+      <td class="val ${sentClass}">${sentiment}</td>
+      <td>${badges || '<span style="color:#ccc">—</span>'}</td>
+      <td style="font-size:11px;color:#888">${topics}</td>
+      <td>
+        <div>${preview}${item.user_message?.length > 80 ? '…' : ''}</div>
+        <div class="expand-content" id="${expandId}">
+          <div class="msg-block"><div class="msg-label">User Message</div><div class="msg-text">${(item.metadata?.rlhfl_user_message || item.user_message || '').replace(/</g, '&lt;')}</div></div>
+          <div class="msg-block"><div class="msg-label">Assistant Response</div><div class="msg-text">${(item.metadata?.rlhfl_assistant_response || item.assistant_response || '').replace(/</g, '&lt;')}</div></div>
+          <div class="msg-block"><div class="msg-label">Reasoning</div><div class="msg-text">${(item.metadata?.rlhfl_reasoning || '—').replace(/</g, '&lt;')}</div></div>
+          <div style="font-size:11px;color:#888;margin-top:6px">Weight: ${(item.weight || 0).toFixed(3)} | ID: ${item.id}</div>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  // Pagination
+  const totalPages = Math.ceil(total / limit);
+  const pag = document.getElementById('pagination');
+  if (totalPages <= 1) { pag.innerHTML = `<span style="font-size:12px;color:#aaa">${total} total</span>`; return; }
+  let html = `<span style="font-size:12px;color:#aaa;margin-right:8px">${total} total</span>`;
+  for (let i = 0; i < Math.min(totalPages, 10); i++) {
+    html += `<button class="page-btn${i === page ? ' active' : ''}" onclick="loadInteractions(${i})">${i+1}</button>`;
+  }
+  pag.innerHTML = html;
+}
+
+function toggleExpand(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('open');
+}
+
+// ── Checkpoints ───────────────────────────────────────────────────────────
+async function loadCheckpoints() {
+  try {
+    const r = await fetch('/admin/api/checkpoints');
+    const d = await r.json();
+    const list = document.getElementById('checkpoints-list');
+    if (!d.length) { list.innerHTML = '<div style="color:#aaa;text-align:center;padding:20px">No checkpoints found</div>'; return; }
+    list.innerHTML = d.map(cp => {
+      const id = cp.checkpoint_id || cp.name;
+      const date = cp.created_at ? new Date(cp.created_at).toLocaleString() : '—';
+      const loss = cp.metrics?.eval_loss !== undefined ? `loss: ${cp.metrics.eval_loss.toFixed(4)}` : '';
+      const mode = cp.training_mode || '—';
+      const deployed = cp.deployed ? '<span class="deployed-tag">deployed</span>' : '';
+      return `<div class="cp-row">
+        <div class="cp-id">${id}</div>
+        <div class="cp-meta">${date} &nbsp;|&nbsp; ${mode} &nbsp;|&nbsp; ${loss} ${deployed}</div>
+        <div>
+          <button class="btn btn-primary btn-sm" onclick="deployLora('${id}')">Deploy to llama.cpp</button>
+          <button class="btn btn-sm" style="background:#eee" onclick="rollback('${id}')">Set Active</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    document.getElementById('checkpoints-list').innerHTML = '<div style="color:#e74c3c">Error loading checkpoints</div>';
+  }
+}
+
+// ── Actions ───────────────────────────────────────────────────────────────
+async function deployLora(checkpointId) {
+  if (!confirm(`Deploy checkpoint ${checkpointId} to llama-server?\nThis will convert to GGUF and call POST /lora.`)) return;
+  try {
+    const r = await fetch(`/admin/api/model/deploy-lora?checkpoint_id=${encodeURIComponent(checkpointId)}`, { method: 'POST' });
+    const d = await r.json();
+    alert(d.message || (d.success ? 'Deployed!' : 'Deployment failed — check logs'));
+    if (d.success) refreshAll();
+  } catch(e) { alert('Request failed: ' + e.message); }
+}
+
+async function rollback(checkpointId) {
+  if (!confirm(`Load checkpoint ${checkpointId} as current?`)) return;
+  try {
+    const r = await fetch(`/admin/api/model/rollback?checkpoint_id=${encodeURIComponent(checkpointId)}`, { method: 'POST' });
+    const d = await r.json();
+    alert(d.message || (d.success ? 'Done!' : 'Failed'));
+    if (d.success) refreshAll();
+  } catch(e) { alert('Request failed: ' + e.message); }
+}
+
+async function unloadAllAdapters() {
+  if (!confirm('Unload all LoRA adapters from llama-server? This reverts to the base model.')) return;
+  try {
+    const r = await fetch('/admin/api/model/reload-base', { method: 'POST' });
+    const d = await r.json();
+    alert(d.message || (d.success ? 'Adapters unloaded' : 'Failed'));
+    refreshServerStatus();
+  } catch(e) { alert('Request failed: ' + e.message); }
+}
+
+async function triggerEvaluation() {
+  if (!confirm('Run an evaluation batch now (bypasses off-hours window)?')) return;
+  try {
+    const r = await fetch('/admin/api/evaluation/trigger', { method: 'POST' });
+    const d = await r.json();
+    alert(d.message || 'Evaluation complete');
+    refreshStats();
+  } catch(e) { alert('Request failed: ' + e.message); }
+}
+
+async function triggerTraining() {
+  if (!confirm('Trigger a training run now?')) return;
+  try {
+    const r = await fetch('/admin/api/training/trigger', { method: 'POST' });
+    const d = await r.json();
+    alert(d.message || 'Training requested');
+  } catch(e) { alert('Request failed: ' + e.message); }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+function set(id, val) { const el = document.getElementById(id); if (el) el.textContent = val ?? '—'; }
+function fmt(n) { return n !== undefined && n !== null ? n.toLocaleString() : '—'; }
+
+// ── Init ──────────────────────────────────────────────────────────────────
+refreshAll();
+setInterval(refreshAll, 30000);
+</script>
 </body>
 </html>

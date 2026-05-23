@@ -40,9 +40,6 @@ volumes/checkpoints/*
 # Keep configuration
 !volumes/config/
 
-# Scripts (not needed in containers)
-scripts/
-
 # Environment
 .env
 .env.example

@@ -23,20 +23,14 @@ admin_router = APIRouter(prefix="/admin", tags=["admin"])
 
 # These will be set by main.py
 memory_manager = None
-llm_proxy = None
 api_request_log = None
-prompt_interceptor = None
-sentiment_analyzer = None
-
-
-def set_dependencies(mm, proxy, request_log=None, interceptor=None, analyzer=None):
+es_ingester = None
+def set_dependencies(mm, request_log=None, ingester=None):
     """Set global dependencies from main.py."""
-    global memory_manager, llm_proxy, api_request_log, prompt_interceptor, sentiment_analyzer
+    global memory_manager, api_request_log, es_ingester
     memory_manager = mm
-    llm_proxy = proxy
     api_request_log = request_log
-    prompt_interceptor = interceptor
-    sentiment_analyzer = analyzer
+    es_ingester = ingester
 
 
 @admin_router.get("/", response_class=HTMLResponse)
@@ -59,76 +53,86 @@ async def admin_dashboard():
 @admin_router.get("/api/stats")
 async def get_admin_stats():
     """Get comprehensive system statistics."""
-    logger.info(f"admin_ui: memory_manager={memory_manager}, llm_proxy={llm_proxy}")
     try:
-        if not memory_manager or not llm_proxy:
+        if not memory_manager:
             return {
                 "training": {"total_interactions": 0, "new_since_training": 0, "hours_since_interaction": 0, "days_since_training": 0, "last_training": None},
-                "memory": {"total_interactions": 0, "golden_examples": 0, "sentiment_distribution": {"positive": 0, "negative": 0, "neutral": 0}},
-                "system": {"model_loaded": False, "current_checkpoint": None, "memory_usage_mb": 0, "cpu_percent": 0}
+                "evaluation": {"evaluated_count": 0, "unevaluated_count": 0, "golden_count": 0, "noise_count": 0, "avg_quality": 0.0, "sidecar_mode": False},
+                "system": {"current_checkpoint": None, "memory_usage_mb": 0, "cpu_percent": 0}
             }
-        
+
         # Training stats
         training_stats = memory_manager.get_training_stats()
-        
-        # Memory stats
-        all_interactions = memory_manager.get_interactions_since(None)
-        golden_examples = memory_manager.get_golden_examples()
-        
-        # Sentiment distribution
-        positive = sum(1 for i in all_interactions if i.sentiment > 0.3)
-        negative = sum(1 for i in all_interactions if i.sentiment < -0.3)
-        neutral = len(all_interactions) - positive - negative
-        
+        config = load_config()
+
+        # Evaluation pipeline stats from ES
+        eval_stats = {"evaluated_count": 0, "unevaluated_count": 0, "golden_count": 0, "noise_count": 0, "avg_quality": 0.0}
+        try:
+            agg_result = memory_manager.client.search(
+                index=memory_manager.index,
+                query={"bool": {"filter": [{"term": {"data.type": "conversation"}}]}},
+                aggs={
+                    "evaluated": {"filter": {"exists": {"field": "meta.rlhfl_evaluated_at"}}},
+                    "unevaluated": {"filter": {"bool": {"must_not": [{"exists": {"field": "meta.rlhfl_evaluated_at"}}]}}},
+                    "golden": {"filter": {"term": {"meta.rlhfl_is_golden": True}}},
+                    "noise": {"filter": {"term": {"meta.rlhfl_is_noise": True}}},
+                    "avg_quality": {"avg": {"field": "meta.rlhfl_quality"}},
+                },
+                size=0,
+            )
+            aggs = agg_result["aggregations"]
+            eval_stats = {
+                "evaluated_count": aggs["evaluated"]["doc_count"],
+                "unevaluated_count": aggs["unevaluated"]["doc_count"],
+                "golden_count": aggs["golden"]["doc_count"],
+                "noise_count": aggs["noise"]["doc_count"],
+                "avg_quality": round(aggs["avg_quality"].get("value") or 0.0, 2),
+                "sidecar_mode": config.elasticsearch.sidecar_mode,
+                "evaluation_window": f"{config.elasticsearch.evaluation_window.start}–{config.elasticsearch.evaluation_window.end} {config.elasticsearch.evaluation_window.timezone}",
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get evaluation stats: {e}")
+
         # System resources
         process = psutil.Process(os.getpid())
         memory_info = process.memory_info()
-        
-        result = {
+
+        # Current checkpoint
+        current_checkpoint = None
+        try:
+            cp_file = Path(settings.checkpoints_path) / "current_checkpoint.json"
+            if cp_file.exists():
+                current_checkpoint = json.load(open(cp_file)).get("checkpoint_id")
+        except Exception:
+            pass
+
+        return {
             "training": {
                 "total_interactions": training_stats.total_interactions,
                 "new_since_training": training_stats.new_interactions_since_last_training,
                 "hours_since_interaction": round(training_stats.hours_since_last_interaction, 2),
                 "days_since_training": round(training_stats.days_since_last_training, 2),
-                "last_training": training_stats.last_training_timestamp.isoformat() if training_stats.last_training_timestamp else None
+                "last_training": training_stats.last_training_timestamp.isoformat() if training_stats.last_training_timestamp else None,
+                "new_positive": training_stats.new_positive_count,
+                "new_negative": training_stats.new_negative_count,
+                "new_golden": training_stats.new_golden_count,
             },
-            "memory": {
-                "total_interactions": len(all_interactions),
-                "golden_examples": len(golden_examples),
-                "sentiment_distribution": {
-                    "positive": positive,
-                    "negative": negative,
-                    "neutral": neutral
-                }
-            },
+            "evaluation": eval_stats,
             "system": {
-                "model_loaded": llm_proxy.is_loaded(),
-                "is_reloading": getattr(llm_proxy, 'is_reloading', lambda: False)(),
-                "current_checkpoint": getattr(llm_proxy, 'current_checkpoint_id', None),
-                "model_path": getattr(llm_proxy, 'model_path', None),
+                "current_checkpoint": current_checkpoint,
                 "memory_usage_mb": round(memory_info.rss / 1024 / 1024, 2),
-                "cpu_percent": psutil.cpu_percent(interval=0.1)
-            }
+                "cpu_percent": psutil.cpu_percent(interval=0.1),
+                "model_id": config.model.model_id,
+                "llama_cpp_url": config.llama_cpp.base_url,
+            },
         }
-
-        # Fall back to current_checkpoint.json if llm_proxy doesn't track it
-        if not result["system"]["current_checkpoint"]:
-            try:
-                cp_file = Path(settings.checkpoints_path) / "current_checkpoint.json"
-                if cp_file.exists():
-                    with open(cp_file, "r") as f:
-                        result["system"]["current_checkpoint"] = json.load(f).get("checkpoint_id")
-            except Exception:
-                pass
-
-        return result
     except Exception as e:
         logger.error(f"Error getting admin stats: {e}", exc_info=True)
         return {
             "error": str(e),
             "training": {"total_interactions": 0, "new_since_training": 0, "hours_since_interaction": 0, "days_since_training": 0, "last_training": None},
-            "memory": {"total_interactions": 0, "golden_examples": 0, "sentiment_distribution": {"positive": 0, "negative": 0, "neutral": 0}},
-            "system": {"model_loaded": False, "current_checkpoint": None, "memory_usage_mb": 0, "cpu_percent": 0}
+            "evaluation": {"evaluated_count": 0, "unevaluated_count": 0, "golden_count": 0, "noise_count": 0, "avg_quality": 0.0},
+            "system": {"current_checkpoint": None, "memory_usage_mb": 0, "cpu_percent": 0}
         }
 
 
@@ -159,7 +163,7 @@ async def get_memories(
         # Apply is_golden filter
         if is_golden:
             is_golden_bool = is_golden.lower() == "true"
-            interactions = [i for i in interactions if i.metadata.get("is_golden", False) == is_golden_bool]
+            interactions = [i for i in interactions if i.metadata.get("rlhfl_is_golden", False) == is_golden_bool]
 
         # Apply time filter
         if hours:
@@ -183,11 +187,18 @@ async def get_memories(
                     "id": i.id,
                     "timestamp": i.timestamp.isoformat(),
                     "conversation_id": i.conversation_id,
-                    "user_message": i.user_message[:200],  # Truncate for display
+                    "user_message": i.user_message[:200],
                     "assistant_response": i.assistant_response[:200],
                     "sentiment": round(i.sentiment, 3),
                     "weight": round(i.weight, 2),
-                    "is_golden": i.metadata.get("is_golden", False)
+                    "is_golden": i.metadata.get("rlhfl_is_golden", False),
+                    "metadata": {
+                        "rlhfl_quality": i.metadata.get("rlhfl_quality"),
+                        "rlhfl_topics": i.metadata.get("rlhfl_topics", []),
+                        "rlhfl_reasoning": i.metadata.get("rlhfl_reasoning", ""),
+                        "rlhfl_is_golden": i.metadata.get("rlhfl_is_golden", False),
+                        "rlhfl_is_noise": i.metadata.get("rlhfl_is_noise", False),
+                    }
                 }
                 for i in paginated
             ]
@@ -204,27 +215,23 @@ async def get_memory_detail(interaction_id: str):
         if not memory_manager:
             raise HTTPException(status_code=503, detail="Memory manager not initialized")
 
-        # Get from ChromaDB
-        results = memory_manager.collection.get(
-            ids=[interaction_id],
-            include=["metadatas", "documents"]
-        )
-
-        if not results['ids']:
-            raise HTTPException(status_code=404, detail="Interaction not found")
-
-        metadata = results['metadatas'][0]
+        result = memory_manager.client.get(index=memory_manager.index, id=interaction_id)
+        src = result["_source"]
+        meta = src.get("meta", {})
 
         return {
-            "id": results['ids'][0],
-            "conversation_id": metadata['conversation_id'],
-            "timestamp": metadata['timestamp'],
-            "user_message": metadata['user_message'],
-            "assistant_response": metadata['assistant_response'],
-            "sentiment": metadata.get('sentiment', 0.0),
-            "weight": metadata.get('weight', 1.0),
-            "is_golden": metadata.get('is_golden', False),
-            "metadata": metadata
+            "id": interaction_id,
+            "conversation_id": meta.get("conversation_id", interaction_id),
+            "timestamp": src.get("@timestamp"),
+            "user_message": meta.get("rlhfl_user_message", ""),
+            "assistant_response": meta.get("rlhfl_assistant_response", ""),
+            "sentiment": meta.get("rlhfl_sentiment", 0.0),
+            "weight": meta.get("rlhfl_weight", 1.0),
+            "is_golden": meta.get("rlhfl_is_golden", False),
+            "quality": meta.get("rlhfl_quality"),
+            "topics": meta.get("rlhfl_topics", []),
+            "reasoning": meta.get("rlhfl_reasoning", ""),
+            "evaluated_at": meta.get("rlhfl_evaluated_at"),
         }
     except HTTPException:
         raise
@@ -235,64 +242,28 @@ async def get_memory_detail(interaction_id: str):
 
 @admin_router.put("/api/memories/{interaction_id}")
 async def update_memory(interaction_id: str, updates: dict):
-    """Update a specific interaction's metadata."""
+    """Update rlhfl evaluation fields on a specific interaction."""
     try:
         if not memory_manager:
             raise HTTPException(status_code=503, detail="Memory manager not initialized")
 
-        # Get existing data
-        results = memory_manager.collection.get(
-            ids=[interaction_id],
-            include=["metadatas", "documents", "embeddings"]
-        )
+        patch: dict = {}
+        if "sentiment" in updates:
+            patch["rlhfl_sentiment"] = float(updates["sentiment"])
+        if "weight" in updates:
+            patch["rlhfl_weight"] = float(updates["weight"])
+        if "is_golden" in updates:
+            patch["rlhfl_is_golden"] = bool(updates["is_golden"])
 
-        if not results['ids']:
-            raise HTTPException(status_code=404, detail="Interaction not found")
+        if not patch:
+            raise HTTPException(status_code=400, detail="No updatable fields provided")
 
-        metadata = results['metadatas'][0]
-
-        # Update allowed fields
-        if 'sentiment' in updates:
-            metadata['sentiment'] = float(updates['sentiment'])
-        if 'weight' in updates:
-            metadata['weight'] = float(updates['weight'])
-        if 'is_golden' in updates:
-            metadata['is_golden'] = bool(updates['is_golden'])
-
-        # Update in main collection
-        memory_manager.collection.update(
-            ids=[interaction_id],
-            metadatas=[metadata]
-        )
-
-        # Handle golden collection
-        is_golden = metadata.get('is_golden', False)
-        try:
-            golden_results = memory_manager.golden_collection.get(ids=[interaction_id])
-            exists_in_golden = len(golden_results['ids']) > 0
-        except:
-            exists_in_golden = False
-
-        if is_golden and not exists_in_golden:
-            # Add to golden collection
-            memory_manager.golden_collection.add(
-                ids=[interaction_id],
-                embeddings=[results['embeddings'][0]],
-                documents=[results['documents'][0]],
-                metadatas=[metadata]
-            )
-        elif not is_golden and exists_in_golden:
-            # Remove from golden collection
-            memory_manager.golden_collection.delete(ids=[interaction_id])
-        elif is_golden and exists_in_golden:
-            # Update in golden collection
-            memory_manager.golden_collection.update(
-                ids=[interaction_id],
-                metadatas=[metadata]
-            )
+        ok = memory_manager.update_with_evaluation(interaction_id, patch)
+        if not ok:
+            raise HTTPException(status_code=500, detail="ES update failed")
 
         logger.info(f"Updated interaction: {interaction_id}")
-        return {"status": "updated", "id": interaction_id, "metadata": metadata}
+        return {"status": "updated", "id": interaction_id, "updates": patch}
     except HTTPException:
         raise
     except Exception as e:
@@ -307,49 +278,16 @@ async def toggle_golden(interaction_id: str):
         if not memory_manager:
             raise HTTPException(status_code=503, detail="Memory manager not initialized")
 
-        # Get existing data
-        results = memory_manager.collection.get(
-            ids=[interaction_id],
-            include=["metadatas", "documents", "embeddings"]
-        )
+        result = memory_manager.client.get(index=memory_manager.index, id=interaction_id)
+        current = result["_source"].get("meta", {}).get("rlhfl_is_golden", False)
+        new_golden = not current
 
-        if not results['ids']:
-            raise HTTPException(status_code=404, detail="Interaction not found")
+        ok = memory_manager.update_with_evaluation(interaction_id, {"rlhfl_is_golden": new_golden})
+        if not ok:
+            raise HTTPException(status_code=500, detail="ES update failed")
 
-        metadata = results['metadatas'][0]
-        current_golden = metadata.get('is_golden', False)
-        new_golden = not current_golden
-        metadata['is_golden'] = new_golden
-
-        # Update in main collection
-        memory_manager.collection.update(
-            ids=[interaction_id],
-            metadatas=[metadata]
-        )
-
-        # Handle golden collection
-        if new_golden:
-            # Add to golden collection
-            memory_manager.golden_collection.add(
-                ids=[interaction_id],
-                embeddings=[results['embeddings'][0]],
-                documents=[results['documents'][0]],
-                metadatas=[metadata]
-            )
-            logger.info(f"Added to golden examples: {interaction_id}")
-        else:
-            # Remove from golden collection
-            try:
-                memory_manager.golden_collection.delete(ids=[interaction_id])
-                logger.info(f"Removed from golden examples: {interaction_id}")
-            except:
-                pass
-
-        return {
-            "status": "toggled",
-            "id": interaction_id,
-            "is_golden": new_golden
-        }
+        logger.info(f"{'Added to' if new_golden else 'Removed from'} golden examples: {interaction_id}")
+        return {"status": "toggled", "id": interaction_id, "is_golden": new_golden}
     except HTTPException:
         raise
     except Exception as e:
@@ -359,98 +297,62 @@ async def toggle_golden(interaction_id: str):
 
 @admin_router.post("/api/golden/re-evaluate")
 async def reevaluate_golden_examples():
-    """Re-evaluate all golden examples against current is_golden_example() criteria.
-    Un-goldens any that no longer qualify."""
+    """Queue all golden examples for re-evaluation by clearing their rlhfl_evaluated_at field.
+    The ingester will re-evaluate them during the next evaluation window."""
     try:
         if not memory_manager:
             raise HTTPException(status_code=503, detail="Memory manager not initialized")
-        if not sentiment_analyzer:
-            raise HTTPException(status_code=503, detail="Sentiment analyzer not initialized")
 
-        # Get all golden examples
-        golden_results = memory_manager.golden_collection.get(
-            include=["metadatas", "documents"]
-        )
+        golden_interactions = await asyncio.to_thread(memory_manager.get_golden_examples)
 
-        if not golden_results['ids']:
-            return {"status": "complete", "total_golden": 0, "removed": 0, "kept": 0}
+        if not golden_interactions:
+            return {"status": "complete", "total_golden": 0, "queued": 0}
 
-        removed_ids = []
-        kept_count = 0
-
-        for i, interaction_id in enumerate(golden_results['ids']):
-            metadata = golden_results['metadatas'][i] if golden_results['metadatas'] else {}
-            document = golden_results['documents'][i] if golden_results['documents'] else ""
-
-            user_message = metadata.get('user_message', document or '')
-            stored_sentiment = float(metadata.get('sentiment', 0.0))
-            stored_weight = float(metadata.get('weight', 1.0))
-
-            # Re-evaluate with current criteria
-            still_golden = sentiment_analyzer.is_golden_example(
-                user_message=user_message,
-                sentiment=stored_sentiment,
-                weight=stored_weight,
+        queued = 0
+        for interaction in golden_interactions:
+            ok = await asyncio.to_thread(
+                memory_manager.update_with_evaluation,
+                interaction.id,
+                {"rlhfl_evaluated_at": None},
             )
+            if ok:
+                queued += 1
 
-            if not still_golden:
-                removed_ids.append(interaction_id)
-                # Update metadata in main collection to reflect non-golden status
-                try:
-                    main_results = memory_manager.collection.get(
-                        ids=[interaction_id], include=["metadatas"]
-                    )
-                    if main_results['ids']:
-                        main_meta = main_results['metadatas'][0]
-                        main_meta['is_golden'] = False
-                        memory_manager.collection.update(
-                            ids=[interaction_id], metadatas=[main_meta]
-                        )
-                except Exception:
-                    pass  # Best-effort update of main collection
-            else:
-                kept_count += 1
-
-        # Bulk delete from golden collection
-        if removed_ids:
-            memory_manager.golden_collection.delete(ids=removed_ids)
-            logger.info(
-                f"Golden re-evaluation: removed {len(removed_ids)}, kept {kept_count}"
-            )
-
+        logger.info(f"Golden re-evaluation: queued {queued}/{len(golden_interactions)} docs")
         return {
             "status": "complete",
-            "total_golden": len(golden_results['ids']),
-            "removed": len(removed_ids),
-            "kept": kept_count,
+            "total_golden": len(golden_interactions),
+            "queued": queued,
         }
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error re-evaluating golden examples: {e}", exc_info=True)
+        logger.error(f"Error queueing golden examples for re-evaluation: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @admin_router.delete("/api/memories/{interaction_id}")
 async def delete_memory(interaction_id: str):
-    """Delete a specific interaction."""
+    """Mark an interaction as noise so it is excluded from training.
+    RLHFL does not own TamAGI's documents; instead of deleting, sets rlhfl_is_noise=true."""
     try:
         if not memory_manager:
             raise HTTPException(status_code=503, detail="Memory manager not initialized")
 
-        # Delete from ChromaDB
-        memory_manager.collection.delete(ids=[interaction_id])
+        ok = await asyncio.to_thread(
+            memory_manager.update_with_evaluation,
+            interaction_id,
+            {"rlhfl_is_noise": True, "rlhfl_is_golden": False},
+        )
+        if not ok:
+            raise HTTPException(status_code=500, detail="ES update failed")
 
-        # Also try to delete from golden examples if present
-        try:
-            memory_manager.golden_collection.delete(ids=[interaction_id])
-        except:
-            pass  # May not exist in golden collection
-
-        logger.info(f"Deleted interaction: {interaction_id}")
-        return {"status": "deleted", "id": interaction_id}
+        logger.info(f"Marked as noise: {interaction_id}")
+        return {"status": "excluded", "id": interaction_id}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error deleting memory: {e}", exc_info=True)
+        logger.error(f"Error marking memory as noise: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -484,7 +386,7 @@ async def get_recent_interactions(
                     "assistant_response": i.assistant_response,
                     "sentiment": round(i.sentiment, 3),
                     "weight": round(i.weight, 2),
-                    "is_golden": i.metadata.get("is_golden", False)
+                    "is_golden": i.metadata.get("rlhfl_is_golden", False)
                 }
                 for i in recent
             ]
@@ -691,31 +593,23 @@ async def get_training_history():
 
 @admin_router.get("/api/database/info")
 async def get_database_info():
-    """Get database size and statistics."""
+    """Get ES index size and interaction statistics."""
     try:
         if not memory_manager:
             raise HTTPException(status_code=503, detail="Memory manager not initialized")
 
-        import asyncio
-
-        # Get size in thread pool to avoid blocking
         size_gb = await asyncio.to_thread(memory_manager.get_db_size_gb)
         all_interactions = await asyncio.to_thread(memory_manager.get_interactions_since, None)
         golden_examples = await asyncio.to_thread(memory_manager.get_golden_examples)
 
-        max_size_gb = memory_manager.config.memory.max_db_size_gb
-        threshold = memory_manager.config.memory.auto_cleanup_threshold
-        threshold_size_gb = max_size_gb * threshold
+        max_size_gb = memory_manager.config.elasticsearch.max_index_size_gb
 
         return {
             "size_gb": round(size_gb, 3),
             "max_size_gb": max_size_gb,
-            "threshold_size_gb": round(threshold_size_gb, 3),
             "usage_percentage": round((size_gb / max_size_gb) * 100, 1) if max_size_gb > 0 else 0,
             "total_interactions": len(all_interactions),
             "golden_examples": len(golden_examples),
-            "auto_cleanup_enabled": True,
-            "auto_cleanup_percentage": memory_manager.config.memory.auto_cleanup_percentage * 100
         }
     except HTTPException:
         raise
@@ -727,7 +621,8 @@ async def get_database_info():
 @admin_router.post("/api/database/cleanup/age")
 async def cleanup_by_age(days: Optional[int] = None):
     """
-    Manually trigger age-based cleanup (removes entries older than specified days).
+    Report interactions older than the specified threshold.
+    RLHFL does not delete TamAGI's documents; age filtering is applied at query time.
 
     Args:
         days: Number of days threshold. Uses config default if not provided.
@@ -736,46 +631,20 @@ async def cleanup_by_age(days: Optional[int] = None):
         if not memory_manager:
             raise HTTPException(status_code=503, detail="Memory manager not initialized")
 
-        import asyncio
-        from datetime import datetime, timedelta
+        age_days = days if days is not None else memory_manager.config.elasticsearch.max_memory_age_days
+        await asyncio.to_thread(memory_manager.cleanup_old_memories)
 
-        # Use custom days or config default
-        age_days = days if days is not None else memory_manager.config.memory.max_memory_age_days
-
-        # Run custom cleanup with specified days
-        cutoff = datetime.now() - timedelta(days=age_days)
-
-        def cleanup_with_custom_age():
-            try:
-                results = memory_manager.collection.get(include=["metadatas"])
-
-                ids_to_delete = []
-                for i, metadata in enumerate(results['metadatas']):
-                    timestamp = datetime.fromisoformat(metadata['timestamp'])
-                    if timestamp < cutoff and not metadata.get('is_golden', False):
-                        ids_to_delete.append(results['ids'][i])
-
-                if ids_to_delete:
-                    memory_manager.collection.delete(ids=ids_to_delete)
-                    logger.info(f"Cleaned up {len(ids_to_delete)} old memories (older than {age_days} days)")
-                    return len(ids_to_delete)
-                return 0
-            except Exception as e:
-                logger.error(f"Failed to cleanup memories: {e}")
-                return 0
-
-        # Run cleanup in thread pool to avoid blocking
-        deleted_count = await asyncio.to_thread(cleanup_with_custom_age)
-
-        # Get new stats
         size_gb = await asyncio.to_thread(memory_manager.get_db_size_gb)
         all_interactions = await asyncio.to_thread(memory_manager.get_interactions_since, None)
 
         return {
             "success": True,
-            "message": f"Age-based cleanup completed (threshold: {age_days} days)",
-            "deleted_count": deleted_count,
-            "new_size_gb": round(size_gb, 3),
+            "message": (
+                f"Age-based query filter active (threshold: {age_days} days). "
+                "RLHFL does not delete TamAGI documents; old interactions are excluded at query time."
+            ),
+            "deleted_count": 0,
+            "current_size_gb": round(size_gb, 3),
             "remaining_interactions": len(all_interactions)
         }
     except HTTPException:
@@ -788,77 +657,33 @@ async def cleanup_by_age(days: Optional[int] = None):
 @admin_router.post("/api/database/cleanup/weight")
 async def cleanup_by_weight(threshold: Optional[float] = None):
     """
-    Manually trigger weight-based cleanup (removes entries below weight threshold).
-
-    Args:
-        threshold: Optional weight threshold. Uses config default if not provided.
+    Weight-based filtering is applied at query time via rlhfl_weight sort + rlhfl_is_noise flag.
+    RLHFL does not delete TamAGI's documents.
+    Use the DELETE /api/memories/{id} endpoint to mark individual interactions as noise.
     """
-    try:
-        if not memory_manager:
-            raise HTTPException(status_code=503, detail="Memory manager not initialized")
-
-        import asyncio
-
-        # Run cleanup in thread pool to avoid blocking
-        deleted_count = await asyncio.to_thread(
-            memory_manager.cleanup_low_weight_entries,
-            threshold
-        )
-
-        # Get new stats
-        size_gb = await asyncio.to_thread(memory_manager.get_db_size_gb)
-        all_interactions = await asyncio.to_thread(memory_manager.get_interactions_since, None)
-
-        return {
-            "success": True,
-            "message": f"Weight-based cleanup completed",
-            "deleted_count": deleted_count,
-            "new_size_gb": round(size_gb, 3),
-            "remaining_interactions": len(all_interactions)
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error during weight-based cleanup: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    size_gb = await asyncio.to_thread(memory_manager.get_db_size_gb) if memory_manager else 0.0
+    return {
+        "success": True,
+        "message": "Weight-based filtering is applied at query time. No documents deleted.",
+        "deleted_count": 0,
+        "current_size_gb": round(size_gb, 3),
+    }
 
 
 @admin_router.post("/api/database/cleanup/lowest")
 async def cleanup_lowest_weight(percentage: Optional[float] = None):
     """
-    Manually trigger cleanup of lowest-weight entries.
-
-    Args:
-        percentage: Percentage to remove (0.0-1.0). Uses config default if not provided.
+    Weight-based filtering is applied at query time via rlhfl_weight sort + rlhfl_is_noise flag.
+    RLHFL does not delete TamAGI's documents.
+    Use the DELETE /api/memories/{id} endpoint to mark individual interactions as noise.
     """
-    try:
-        if not memory_manager:
-            raise HTTPException(status_code=503, detail="Memory manager not initialized")
-
-        import asyncio
-
-        # Run cleanup in thread pool to avoid blocking
-        deleted_count = await asyncio.to_thread(
-            memory_manager.cleanup_lowest_weight_entries,
-            percentage
-        )
-
-        # Get new stats
-        size_gb = await asyncio.to_thread(memory_manager.get_db_size_gb)
-        all_interactions = await asyncio.to_thread(memory_manager.get_interactions_since, None)
-
-        return {
-            "success": True,
-            "message": f"Lowest-weight cleanup completed",
-            "deleted_count": deleted_count,
-            "new_size_gb": round(size_gb, 3),
-            "remaining_interactions": len(all_interactions)
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error during lowest-weight cleanup: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    size_gb = await asyncio.to_thread(memory_manager.get_db_size_gb) if memory_manager else 0.0
+    return {
+        "success": True,
+        "message": "Weight-based filtering is applied at query time. No documents deleted.",
+        "deleted_count": 0,
+        "current_size_gb": round(size_gb, 3),
+    }
 
 
 @admin_router.get("/api/model/status")
@@ -869,26 +694,10 @@ async def get_model_status():
         from api.main import training_in_progress, config
 
         result = {
-            "model_loaded": False,
-            "is_reloading": False,
             "training_in_progress": training_in_progress,
             "current_checkpoint_id": None,
-            "model_path": None,
-            "external_model_name": None,
+            "model_name": config.model.model_id if config else None,
         }
-
-        if llm_proxy:
-            # Proxy mode
-            result["model_loaded"] = llm_proxy.is_loaded() and not training_in_progress
-            result["is_reloading"] = training_in_progress  # Training = reloading in proxy mode
-            result["current_checkpoint_id"] = getattr(llm_proxy, "current_checkpoint_id", None)
-            result["model_path"] = getattr(llm_proxy, "model_path", None)
-
-            # Add external model name for Ollama
-            if hasattr(llm_proxy, "model_name"):
-                result["external_model_name"] = llm_proxy.model_name
-            elif config:
-                result["external_model_name"] = config.llm_proxy.external_model_name
 
         # Read current_checkpoint.json for checkpoint ID, metrics, deployment info
         checkpoint_file = Path(settings.checkpoints_path) / "current_checkpoint.json"
@@ -896,7 +705,7 @@ async def get_model_status():
             try:
                 with open(checkpoint_file, "r") as f:
                     cp_data = json.load(f)
-                # Use checkpoint_id from file if not set by llm_proxy
+                # Use checkpoint_id from file if not already set
                 if not result["current_checkpoint_id"]:
                     result["current_checkpoint_id"] = cp_data.get("checkpoint_id")
                 result["adapter_path"] = cp_data.get("adapter_path")
@@ -918,21 +727,36 @@ async def trigger_training():
         if not memory_manager:
             raise HTTPException(status_code=503, detail="Memory manager not initialized")
 
-        # Pre-training cleanup
-        deleted_count = await asyncio.to_thread(memory_manager.cleanup_low_weight_entries)
-
         # Request manual training (bypasses schedule, auto-selects mode)
         memory_manager.request_training(reason="manual", training_mode="auto")
 
         return {
             "success": True,
             "message": "Manual training requested. It will begin immediately (bypasses schedule).",
-            "pre_training_cleanup_deleted": deleted_count,
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error triggering training: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/api/evaluation/trigger")
+async def trigger_evaluation():
+    """Force an immediate evaluation batch, bypassing the off-hours window check."""
+    if not es_ingester:
+        raise HTTPException(status_code=503, detail="Ingester not initialized")
+    try:
+        evaluated = await asyncio.get_event_loop().run_in_executor(
+            None, es_ingester._run_batch
+        )
+        return {
+            "success": True,
+            "evaluated": evaluated,
+            "message": f"Evaluation batch complete: {evaluated} document(s) evaluated.",
+        }
+    except Exception as e:
+        logger.error(f"Error triggering evaluation: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1167,9 +991,9 @@ async def get_training_progress():
 
 @admin_router.post("/api/model/rollback")
 async def rollback_model(checkpoint_id: str = Query(..., description="Checkpoint ID to deploy")):
-    """Deploy a specific checkpoint's LoRA adapter to Ollama."""
+    """Deploy a specific checkpoint's LoRA adapter to llama-server."""
     try:
-        from shared.ollama_deployer import OllamaDeployer
+        from shared.llama_cpp_deployer import LlamaCppDeployer
 
         checkpoints_path = Path(settings.checkpoints_path)
         checkpoint_dir = checkpoints_path / checkpoint_id
@@ -1182,19 +1006,16 @@ async def rollback_model(checkpoint_id: str = Query(..., description="Checkpoint
             raise HTTPException(status_code=400, detail=f"No adapter found in checkpoint {checkpoint_id}")
 
         config = load_config()
-        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
-        model_name = config.training.ollama_model_name
+        deployer = LlamaCppDeployer(config.llama_cpp)
 
         success = await asyncio.to_thread(
-            deployer.deploy_model,
+            deployer.deploy_lora,
             adapter_path=str(adapter_dir),
-            model_name=model_name,
-            base_model_name=model_name,
             checkpoint_id=checkpoint_id,
         )
 
         if not success:
-            raise HTTPException(status_code=500, detail="Ollama deployment failed. Check logs.")
+            raise HTTPException(status_code=500, detail="llama.cpp deployment failed. Check logs.")
 
         # Update current_checkpoint.json
         metadata_file = checkpoints_path / f"{checkpoint_id}_metadata.json"
@@ -1217,7 +1038,7 @@ async def rollback_model(checkpoint_id: str = Query(..., description="Checkpoint
         with open(checkpoints_path / "current_checkpoint.json", "w") as f:
             json.dump(cp_data, f, indent=2)
 
-        return {"success": True, "message": f"Deployed checkpoint {checkpoint_id} to Ollama as {model_name}"}
+        return {"success": True, "message": f"Deployed checkpoint {checkpoint_id} to llama-server"}
 
     except HTTPException:
         raise
@@ -1228,36 +1049,25 @@ async def rollback_model(checkpoint_id: str = Query(..., description="Checkpoint
 
 @admin_router.post("/api/model/reload-base")
 async def reload_base_model():
-    """Revert to the base model by recreating it without any adapter."""
+    """Unload all LoRA adapters from llama-server, reverting to the base model."""
     try:
-        from shared.ollama_deployer import OllamaDeployer
         import requests as req
-
         config = load_config()
-        model_name = config.training.ollama_model_name
-        base_model = config.model.ollama_base_model
-        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
 
-        # Unload current model
-        deployer._unload_model(model_name)
-
-        # Recreate from base (no adapter)
+        # POST empty adapter list to unload all adapters
         response = req.post(
-            f"{deployer.ollama_api}/create",
-            json={"model": model_name, "from": base_model, "stream": False},
-            timeout=120,
+            f"{config.llama_cpp.base_url.rstrip('/')}/lora",
+            json=[],
+            timeout=30,
         )
         response.raise_for_status()
-
-        # Update config pointer
-        deployer.update_config_pointer(model_name)
 
         # Clear current_checkpoint.json
         cp_file = Path(settings.checkpoints_path) / "current_checkpoint.json"
         if cp_file.exists():
             cp_file.unlink()
 
-        return {"success": True, "message": f"Reverted {model_name} to base model (no adapter)"}
+        return {"success": True, "message": "All adapters unloaded — llama-server running base model"}
 
     except Exception as e:
         logger.error(f"Error reverting to base model: {e}", exc_info=True)
@@ -1265,230 +1075,61 @@ async def reload_base_model():
 
 
 # ------------------------------------------------------------------ #
-#  Ollama Model Deployment
+#  llama.cpp Server Management
 # ------------------------------------------------------------------ #
 
-@admin_router.post("/api/ollama/deploy-checkpoint")
-async def deploy_checkpoint_to_ollama(checkpoint_id: str = Query(..., description="Checkpoint ID to deploy")):
-    """
-    Deploy a specific checkpoint to Ollama.
-
-    This will:
-    1. Find the LoRA adapter for the checkpoint
-    2. Deploy it to Ollama via adapter layering (replaces current model)
-    3. Update config pointer
-    4. Next API request will use the deployed model
-    """
+@admin_router.get("/api/model/server-status")
+async def get_llm_server_status():
+    """Query the llama-server health and active LoRA adapters."""
     try:
-        import sys
-        sys.path.insert(0, '/app/trainer')
-        from shared.ollama_deployer import OllamaDeployer
+        from shared.llama_cpp_deployer import LlamaCppDeployer
+        config = load_config()
+        deployer = LlamaCppDeployer(config.llama_cpp)
+        status = await asyncio.to_thread(deployer.get_server_status)
+        return {"server_url": config.llama_cpp.base_url, **status}
+    except Exception as e:
+        logger.error(f"Error querying server status: {e}", exc_info=True)
+        return {"server_url": "", "reachable": False, "healthy": False, "loaded_adapters": [], "error": str(e)}
+
+
+@admin_router.post("/api/model/deploy-lora")
+async def deploy_lora_adapter(checkpoint_id: str = Query(..., description="Checkpoint ID to deploy")):
+    """Convert and load a checkpoint's LoRA adapter into llama-server via POST /lora."""
+    try:
+        from shared.llama_cpp_deployer import LlamaCppDeployer
 
         checkpoints_path = Path(settings.checkpoints_path)
         checkpoint_dir = checkpoints_path / checkpoint_id
 
         if not checkpoint_dir.exists():
-            raise HTTPException(status_code=404, detail=f"Checkpoint directory not found: {checkpoint_id}")
+            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {checkpoint_id}")
 
-        # Look for adapter directory
         adapter_dir = checkpoint_dir / "adapter"
-        adapter_file = adapter_dir / "adapter_model.safetensors"
-        if not adapter_file.exists():
-            raise HTTPException(
-                status_code=400,
-                detail=f"No adapter found in checkpoint {checkpoint_id}. Expected {adapter_file}"
-            )
+        if not (adapter_dir / "adapter_model.safetensors").exists():
+            raise HTTPException(status_code=400, detail=f"No adapter found in checkpoint {checkpoint_id}")
 
-        # Load config
         config = load_config()
+        deployer = LlamaCppDeployer(config.llama_cpp)
+        logger.info(f"Admin UI: deploying {checkpoint_id} to llama-server")
 
-        # Deploy to Ollama via adapter layering
-        logger.info(f"Admin UI: Deploying checkpoint {checkpoint_id} to Ollama")
-        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
-
-        model_name = config.training.ollama_model_name
-        base_model = config.model.ollama_base_model
-        success = deployer.deploy_model(
+        success = await asyncio.to_thread(
+            deployer.deploy_lora,
             adapter_path=str(adapter_dir),
-            model_name=model_name,
-            base_model_name=base_model,
             checkpoint_id=checkpoint_id,
         )
 
         if success:
-            # Update config pointer
-            deployer.update_config_pointer(model_name)
-
             return {
                 "success": True,
-                "message": f"Checkpoint {checkpoint_id} deployed to Ollama as {model_name}",
+                "message": f"Checkpoint {checkpoint_id} loaded into llama-server",
                 "checkpoint_id": checkpoint_id,
-                "model_name": model_name,
-                "adapter_path": str(adapter_dir)
             }
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail="Ollama deployment failed. Check trainer logs for details."
-            )
+        raise HTTPException(status_code=500, detail="Deployment failed — check logs for details")
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deploying checkpoint to Ollama: {e}", exc_info=True)
+        logger.error(f"Error deploying LoRA adapter: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Deployment error: {str(e)}")
 
 
-@admin_router.post("/api/ollama/deploy-base")
-async def deploy_base_model_to_ollama():
-    """
-    Deploy the original base model to Ollama.
-
-    This reverts to the unmodified base model (configured in system_config.yaml).
-    """
-    try:
-        import sys
-        import subprocess
-        sys.path.insert(0, '/app/trainer')
-        from shared.ollama_deployer import OllamaDeployer
-
-        # Load config
-        config = load_config()
-
-        base_model = config.model.ollama_base_model
-        logger.info(f"Admin UI: Reverting to base model {base_model} in Ollama")
-        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
-
-        # Pull the original base model from Ollama registry
-        try:
-            result = subprocess.run(
-                ["ollama", "pull", base_model],
-                capture_output=True,
-                text=True,
-                timeout=600
-            )
-
-            if result.returncode == 0:
-                # Update config to point to base model
-                deployer.update_config_pointer(base_model)
-
-                return {
-                    "success": True,
-                    "message": f"Reverted to base {base_model} model",
-                    "model_name": base_model
-                }
-            else:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to pull base model: {result.stderr}"
-                )
-
-        except subprocess.TimeoutExpired:
-            raise HTTPException(status_code=500, detail="Timeout pulling base model from Ollama")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deploying base model: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Deployment error: {str(e)}")
-
-
-@admin_router.get("/api/ollama/models")
-async def list_ollama_models():
-    """List all models available in Ollama."""
-    try:
-        import sys
-        sys.path.insert(0, '/app/trainer')
-        from shared.ollama_deployer import OllamaDeployer
-
-        # Load config
-        config = load_config()
-
-        deployer = OllamaDeployer(ollama_base_url=config.llm_proxy.base_url)
-        models = deployer.list_models()
-
-        return {
-            "models": models,
-            "current_model": config.llm_proxy.external_model_name
-        }
-
-    except Exception as e:
-        logger.error(f"Error listing Ollama models: {e}", exc_info=True)
-        return {"models": [], "error": str(e)}
-
-
-# ------------------------------------------------------------------ #
-#  Prompt Interceptor Rules
-# ------------------------------------------------------------------ #
-
-@admin_router.get("/api/prompt-rules")
-async def list_prompt_rules():
-    """List all prompt interceptor rules."""
-    if not prompt_interceptor:
-        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
-    return {"rules": prompt_interceptor.get_rules()}
-
-
-@admin_router.post("/api/prompt-rules")
-async def add_prompt_rule(body: dict):
-    """Add a new prompt interceptor rule."""
-    if not prompt_interceptor:
-        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
-    try:
-        rule = prompt_interceptor.add_rule(
-            pattern=body.get("pattern", ""),
-            replacement=body.get("replacement", ""),
-            description=body.get("description", ""),
-            target_roles=body.get("target_roles", ["system"]),
-            enabled=body.get("enabled", True),
-            priority=body.get("priority", 50),
-        )
-        return {"success": True, "rule": rule}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@admin_router.put("/api/prompt-rules/{rule_id}")
-async def update_prompt_rule(rule_id: str, body: dict):
-    """Update an existing prompt interceptor rule."""
-    if not prompt_interceptor:
-        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
-    try:
-        rule = prompt_interceptor.update_rule(rule_id, body)
-        if rule is None:
-            raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
-        return {"success": True, "rule": rule}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@admin_router.delete("/api/prompt-rules/{rule_id}")
-async def delete_prompt_rule(rule_id: str):
-    """Delete a prompt interceptor rule."""
-    if not prompt_interceptor:
-        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
-    if not prompt_interceptor.delete_rule(rule_id):
-        raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
-    return {"success": True}
-
-
-@admin_router.post("/api/prompt-rules/{rule_id}/toggle")
-async def toggle_prompt_rule(rule_id: str):
-    """Toggle a prompt interceptor rule's enabled state."""
-    if not prompt_interceptor:
-        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
-    rule = prompt_interceptor.toggle_rule(rule_id)
-    if rule is None:
-        raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
-    return {"success": True, "rule": rule}
-
-
-@admin_router.post("/api/prompt-rules/test")
-async def test_prompt_rules(body: dict):
-    """Test all enabled rules against sample text."""
-    if not prompt_interceptor:
-        raise HTTPException(status_code=503, detail="Prompt interceptor not initialized")
-    text = body.get("text", "")
-    if not text:
-        raise HTTPException(status_code=400, detail="'text' field is required")
-    return prompt_interceptor.test(text)

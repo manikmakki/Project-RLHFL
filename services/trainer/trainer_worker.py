@@ -43,10 +43,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.config import load_config, settings
 from shared.models import Interaction
-from api.memory_manager import MemoryManager
+from api.es_memory_manager import ElasticsearchMemoryManager
 from trainer.training_scheduler import TrainingScheduler
 from trainer.dataset_builder import DatasetBuilder
-from trainer.lora_trainer_dense import LoRATrainerDense
+from trainer.lora_trainer_MoE import LoRATrainer
 from trainer.model_evaluator import ModelEvaluator
 
 logging.basicConfig(
@@ -62,10 +62,10 @@ class TrainerWorker:
     def __init__(self):
         logger.info("Initializing training worker...")
         self.config = load_config()
-        self.memory_manager = MemoryManager(self.config)
+        self.memory_manager = ElasticsearchMemoryManager(self.config)
         self.scheduler = TrainingScheduler(self.config)
         self.dataset_builder = DatasetBuilder(self.config)
-        self.lora_trainer = LoRATrainerDense(self.config, settings.base_model_path)
+        self.lora_trainer = LoRATrainer(self.config, settings.base_model_path)
         self.model_evaluator = ModelEvaluator(
             self.config, settings.base_model_path, settings.checkpoints_path
         )
@@ -163,6 +163,10 @@ class TrainerWorker:
 
         self._cleanup_dangling_checkpoints()
 
+        lock_file = Path(settings.data_path) / "training.lock"
+        lock_file.touch()
+        logger.info("Training lock acquired")
+
         start_time = time.time()
         selected_mode = "sft"
 
@@ -170,7 +174,7 @@ class TrainerWorker:
             # Step 1: Collect training data
             logger.info("Step 1: Collecting training data...")
             golden_examples = self.memory_manager.get_golden_examples()
-            top_n = self.config.memory.top_n_weighted_interactions
+            top_n = self.config.elasticsearch.top_n_weighted_interactions
             top_n_adjusted = max(0, top_n - len(golden_examples))
             interactions = self.memory_manager.get_top_interactions_by_weight(top_n_adjusted)
 
@@ -182,7 +186,7 @@ class TrainerWorker:
             logger.info("Step 2: Selecting training mode...")
             if requested_mode == "auto":
                 stats = self.memory_manager.get_training_stats()
-                selected_mode = self.scheduler._select_mode_from_stats(stats)
+                selected_mode = self.scheduler._select_mode(stats)
             elif requested_mode in ["sft", "dpo"]:
                 selected_mode = requested_mode
             else:
@@ -221,17 +225,17 @@ class TrainerWorker:
                     from trainer.rejection_generator import RejectionGenerator
 
                     generator = RejectionGenerator(
-                        ollama_url="http://llm-ollama:11434",
-                        model_name=self.config.training.ollama_model_name,
+                        llama_cpp_url=self.config.llama_cpp.base_url,
+                        model_name=self.config.model.model_id,
                     )
                     all_prompts = []
 
-                    positive = [i for i in interactions if i.sentiment > self.config.sentiment.positive_threshold]
+                    positive = [i for i in interactions if i.sentiment > 0.3]
                     neutral = [
                         i for i in interactions
                         if abs(i.sentiment) <= max(
-                            self.config.sentiment.positive_threshold,
-                            abs(self.config.sentiment.negative_threshold)
+                            0.3,
+                            abs(-0.3)
                         )
                     ]
                     for interaction in positive + neutral:
@@ -303,16 +307,16 @@ class TrainerWorker:
             )
 
             # Step 8: Deploy if validation passed
-            if should_deploy and self.config.training.enable_ollama_deployment:
-                logger.info("Step 8: Merging and deploying to Ollama...")
+            if should_deploy and self.config.training.enable_deployment:
+                logger.info("Step 8: Converting and deploying adapter to llama-server...")
                 try:
                     self._merge_and_deploy(adapter_path, checkpoint_id, checkpoint_dir, metadata)
                 except Exception as e:
                     logger.error(f"Deployment failed: {e}", exc_info=True)
-                    logger.info("Keeping current model; adapter saved for retry")
+                    logger.info("Keeping current adapter; GGUF saved for manual reload")
                     self._notify_api_reload()
             elif should_deploy:
-                logger.info(f"Step 8: Adapter saved at {adapter_path} (Ollama deployment disabled)")
+                logger.info(f"Step 8: Adapter saved at {adapter_path} (deployment disabled)")
             else:
                 logger.warning("Checkpoint failed validation, not deployed")
                 self._notify_api_reload()
@@ -345,55 +349,38 @@ class TrainerWorker:
         finally:
             if 'original_enable_dpo' in locals():
                 self.config.training.enable_dpo = original_enable_dpo
+            lock_file.unlink(missing_ok=True)
+            logger.info("Training lock released")
             gc.collect()
 
     def _merge_and_deploy(self, adapter_path, checkpoint_id, checkpoint_dir, metadata):
-        """Deploy LoRA adapter to Ollama via adapter layering (no merge needed)."""
-        from shared.ollama_deployer import OllamaDeployer
+        """Convert and deploy LoRA adapter to llama-server via /lora API."""
+        from shared.llama_cpp_deployer import LlamaCppDeployer
 
-        # Deploy adapter directly to Ollama (layers adapter on base model)
-        deployer = OllamaDeployer(ollama_base_url=self.config.llm_proxy.base_url)
-        model_name = self.config.training.ollama_model_name
-        base_model = self.config.model.ollama_base_model
+        deployer = LlamaCppDeployer(self.config.llama_cpp)
 
-        success = deployer.deploy_model(
+        success = deployer.deploy_lora(
             adapter_path=adapter_path,
-            model_name=model_name,
-            base_model_name=base_model,
             checkpoint_id=checkpoint_id,
         )
 
         if not success:
-            raise RuntimeError("Ollama deployment failed")
+            raise RuntimeError("llama.cpp deployment failed")
 
-        # Update metadata and config
+        # Update metadata and config pointer
         metadata.deployed = True
         self.model_evaluator._save_checkpoint_metadata(metadata)
         self.model_evaluator._set_current_checkpoint(checkpoint_id, metadata)
-        deployer.update_config_pointer(model_name)
-
-        # Notify API to resume inference
-        self._notify_api_reload()
+        deployer.update_config_pointer(self.config.model.model_id)
 
         # Rotate old checkpoints
         deployer.rotate_checkpoints(keep_count=self.config.training.max_checkpoint_count)
 
-        logger.info(f"Deployed {model_name} from checkpoint {checkpoint_id}")
+        logger.info(f"Deployed adapter from checkpoint {checkpoint_id}")
 
     def _notify_api_reload(self):
-        """Notify API to reload model from Ollama."""
-        try:
-            response = requests.post(
-                "http://api:8000/v1/model/reload",
-                json={"checkpoint_id": None},
-                timeout=60,
-            )
-            if response.status_code == 200:
-                logger.info("API notified to reload model")
-            else:
-                logger.warning(f"API reload returned {response.status_code}")
-        except Exception as e:
-            logger.warning(f"Failed to notify API: {e}")
+        """Signal that a training cycle has completed (informational only)."""
+        logger.info("Training cycle complete — llama.cpp adapter already loaded via /lora API")
 
     def _cleanup_checkpoint_dir(self, checkpoint_dir: str):
         """Remove a failed checkpoint directory and its metadata."""

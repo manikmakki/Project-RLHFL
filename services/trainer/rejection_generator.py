@@ -16,18 +16,18 @@ from shared.config import load_config
 logger = logging.getLogger(__name__)
 
 class RejectionGenerator:
-    """Generates synthetic rejected responses via Ollama API."""
+    """Generates synthetic rejected responses via llama.cpp OpenAI-compat API."""
 
-    def __init__(self, ollama_url: str = "http://llm-ollama:11434", model_name: Optional[str] = None):
-        model_name = model_name or load_config().model.model_id
+    def __init__(self, llama_cpp_url: str = "http://host.docker.internal:8080", model_name: Optional[str] = None):
         """
         Initialize rejection generator.
 
         Args:
-            ollama_url: Base URL for Ollama API (defaults to API service)
-            model_name: Model name for generation requests
+            llama_cpp_url: Base URL for the llama-server HTTP API
+            model_name: Model name (ignored by llama.cpp single-model server, kept for logging)
         """
-        self.ollama_url = ollama_url
+        model_name = model_name or load_config().model.model_id
+        self.llama_cpp_url = llama_cpp_url
         self.model_name = model_name
 
     def generate_rejections(
@@ -102,7 +102,7 @@ class RejectionGenerator:
         try:
             # Call chat completion endpoint with degraded parameters
             response = requests.post(
-                f"{self.ollama_url}/v1/chat/completions",
+                f"{self.llama_cpp_url}/v1/chat/completions",
                 json={
                     "model": self.model_name,
                     "messages": [

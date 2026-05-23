@@ -1,11 +1,11 @@
 """
 Project RLHFL - LoRA Trainer (CPU-only)
 
-Trains LoRA adapters for GPT-OSS 20B using CPU-only training.
+Trains LoRA adapters for Gemma-4-26B-A4B (MoE, 128 experts, top-8 active).
 Supports SFT (Supervised Fine-Tuning) and DPO (Direct Preference Optimization).
 
-Adapters are parameter-efficient (~10-20MB), requiring only ~1-2% of full
-fine-tuning memory while achieving comparable results.
+Adapters are parameter-efficient, requiring only ~1-2% of full fine-tuning
+memory while achieving comparable results.
 """
 
 import gc
@@ -34,7 +34,7 @@ from shared.config import SystemConfig
 logger = logging.getLogger(__name__)
 
 # Monkey-patch transformers to bypass PyTorch 2.6 requirement for torch.load
-# Safe because we trust official GPT-OSS model files from HuggingFace
+# Safe because we trust official Gemma-4 model files from HuggingFace
 try:
     from transformers.utils import import_utils
     from transformers import modeling_utils
@@ -57,7 +57,7 @@ except ImportError as e:
 
 
 class LoRATrainer:
-    """Train LoRA adapters for the GPT-OSS base model (CPU-only)."""
+    """Train LoRA adapters for Gemma-4-26B-A4B (MoE, CPU-only)."""
 
     def __init__(self, config: SystemConfig, base_model_path: str):
         self.config = config
@@ -65,14 +65,16 @@ class LoRATrainer:
         self.lora_config = self._create_lora_config()
 
     def _create_lora_config(self) -> LoraConfig:
-        """Create LoRA configuration targeting attention + MoE expert layers."""
+        """Create LoRA configuration for Gemma-4 MoE.
+
+        Targets attention projections and FFN projections. For MoE layers
+        (128 experts, top-8 active), PEFT suffix-matches gate_proj/up_proj/down_proj
+        inside each expert's sub-module, so no expert-path overrides are needed.
+        Gemma-4 uses separate gate_proj + up_proj (use_double_wide_mlp=false).
+        """
         target_modules = [
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-            # GPT-OSS MoE expert FFN components
-            "mlp.experts.down_proj",
-            "mlp.experts.gate_up_proj",
-            "mlp.experts.up_proj",
+            "q_proj", "k_proj", "v_proj", "o_proj",  # attention (GQA + sliding)
+            "gate_proj", "up_proj", "down_proj",       # FFN + all MoE expert internals
         ]
         return LoraConfig(
             r=self.config.training.lora_rank,
@@ -84,19 +86,23 @@ class LoRATrainer:
         )
 
     def _load_tokenizer(self):
-        """Load tokenizer for GPT-OSS models."""
+        """Load tokenizer for Gemma-4."""
         tokenizer = AutoTokenizer.from_pretrained(self.base_model_path)
         logger.info(f"Tokenizer loaded: {type(tokenizer).__name__}, vocab_size={tokenizer.vocab_size}")
 
         if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token or "<|endoftext|>"
-        if tokenizer.eos_token is None:
-            tokenizer.eos_token = "<|return|>"
+            tokenizer.pad_token = tokenizer.eos_token or "<eos>"
 
         return tokenizer
 
     def _load_model(self):
-        """Load the base model on CPU in float32."""
+        """Load Gemma-4 on CPU in float32.
+
+        Gemma4ForConditionalGeneration is a VLM; AutoModelForCausalLM maps to it
+        via the auto-class registry. Vision encoder LoRA params will be initialized
+        to zero (identity) and stay there since we train on text-only data — harmless.
+        MoE router params are unfrozen in train() after get_peft_model() runs.
+        """
         # Re-apply safety patch before each model load
         try:
             from transformers.utils import import_utils
@@ -117,16 +123,28 @@ class LoRATrainer:
             device_map="cpu",
             torch_dtype=torch.float32,
             trust_remote_code=True,
-            use_cache=False,
             low_cpu_mem_usage=True,
         )
         model = model.float()
+        return model
 
-        # Freeze base parameters; only LoRA + router layers will train
-        for name, param in model.named_parameters():
-            if "lora" in name or "router" in name.lower():
-                param.requires_grad = True
+    def _unwrap_clippable_linear(self, model):
+        """Replace Gemma4ClippableLinear wrappers with their inner nn.Linear.
 
+        PEFT only recognises standard torch.nn.Linear. Gemma4 wraps projections in
+        ClippableLinear (a weight-clipping guard used during full fine-tuning). LoRA
+        freezes all base weights so the clipping is never applied — unwrapping is safe
+        and the forward pass is numerically identical.
+        """
+        replaced = 0
+        for parent_module in model.modules():
+            for child_name, child_module in list(parent_module.named_children()):
+                if type(child_module).__name__ == "Gemma4ClippableLinear":
+                    if hasattr(child_module, "linear"):
+                        setattr(parent_module, child_name, child_module.linear)
+                        replaced += 1
+        if replaced:
+            logger.info(f"Unwrapped {replaced} Gemma4ClippableLinear → nn.Linear for PEFT")
         return model
 
     def train(
@@ -150,11 +168,25 @@ class LoRATrainer:
 
             tokenizer = self._load_tokenizer()
             model = self._load_model()
+            model = self._unwrap_clippable_linear(model)
 
-            # Apply LoRA
+            # Apply LoRA — this freezes all base params and enables only LoRA params
             model = get_peft_model(model, self.lora_config)
-            model.print_trainable_parameters()
             model.config.use_cache = False
+
+            # Also train MoE router params: get_peft_model froze them, re-enable here.
+            # Match module path components (not the trailing "weight"/"bias" suffix),
+            # so "gate" matches mlp.gate.weight but not mlp.experts.Y.gate_proj.weight.
+            router_count = 0
+            for name, param in model.named_parameters():
+                path_parts = set(name.split(".")[:-1])
+                if path_parts & {"router", "gate"}:
+                    param.requires_grad = True
+                    router_count += 1
+            if router_count:
+                logger.info(f"Unfroze {router_count} MoE router parameters for training")
+
+            model.print_trainable_parameters()
 
             is_dpo_mode = self.config.training.enable_dpo and DPO_AVAILABLE
 
@@ -322,13 +354,18 @@ class LoRATrainer:
         return adapter_path, metrics
 
     def _prepare_dataset(self, dataset: List[Dict[str, Any]], tokenizer) -> Dataset:
-        """Tokenize SFT dataset using GPT-OSS Harmony format."""
+        """Tokenize SFT dataset using Gemma-4 chat template."""
 
         def format_example(example):
             prompt = example["prompt"]
             completion = example["completion"]
 
-            prompt_text = f"<|start|>user<|message|>{prompt}<|end|><|start|>assistant<|channel|>final<|message|>"
+            # Use model's built-in chat template for correct special token formatting
+            prompt_text = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
             prompt_tokens = tokenizer(
                 prompt_text,
                 truncation=True,
@@ -338,7 +375,14 @@ class LoRATrainer:
             )
             prompt_len = len(prompt_tokens["input_ids"])
 
-            full_text = f"<|start|>user<|message|>{prompt}<|end|><|start|>assistant<|channel|>final<|message|>{completion}<|return|>"
+            full_text = tokenizer.apply_chat_template(
+                [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": completion},
+                ],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
             tokens = tokenizer(
                 full_text,
                 truncation=True,
@@ -379,7 +423,6 @@ class LoRATrainer:
                 self.base_model_path,
                 device_map="cpu",
                 torch_dtype="auto",
-                use_cache=False,
             )
             model = PeftModel.from_pretrained(model, adapter_path)
             model = model.merge_and_unload()

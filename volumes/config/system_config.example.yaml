@@ -1,0 +1,53 @@
+elasticsearch:
+  host: "http://localhost:9200"   # Update with TamAGI's ES host
+  api_key: null                   # Set if ES requires authentication
+  index: echo_memory
+  sidecar_mode: true
+  evaluation_window:
+    start: "01:00"
+    end: "05:00"
+    timezone: America/New_York
+  batch_size: 25
+  max_memory_age_days: 90
+  max_index_size_gb: 25
+  top_n_weighted_interactions: 1000
+
+model:
+  model_id: gemma4:27b
+  base_model_path: /models/gemma-4-26B-A4B
+  context_length: 32768
+  max_tokens: 4096
+
+llama_cpp:
+  base_url: http://host.docker.internal:8080   # llama-server running on the host
+  api_key: null
+  read_timeout_seconds: 120
+  lora_scale: 1.0
+  host_checkpoints_path: null   # set if host path differs from /checkpoints
+
+training:
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-05
+  lora_alpha: 32
+  lora_rank: 8
+  max_days_between_training: 7
+  max_grad_norm: 1.0
+  min_interactions_threshold: 50
+  num_epochs: 3
+  validation_split: 0.1
+  warmup_steps: 100
+  weight_decay: 0.01
+  cpu_threads: 32
+  enable_dpo: true
+  dpo_beta: 0.1
+  dpo_batch_size: 8
+  dpo_rejection_timeout: 300
+  dpo_trigger_threshold: 5      # new negative signals since last DPO to switch mode
+  schedule_enabled: true
+  schedule_time: "01:00"
+  schedule_timezone: America/New_York
+  schedule_window_minutes: 60
+  enable_deployment: true
+  max_checkpoint_count: 3
+  max_gguf_files: 2

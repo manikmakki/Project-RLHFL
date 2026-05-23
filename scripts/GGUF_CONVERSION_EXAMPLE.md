@@ -1,157 +1,98 @@
-# GGUF Conversion - Quick Reference
+# LoRA Adapter Deployment — Quick Reference
 
-## Basic Usage
+RLHFL trains LoRA adapters (not full models). After training, the adapter is
+converted to GGUF LoRA format and hot-loaded into the running llama-server via
+its `/lora` API — no model restart required.
 
-```bash
-python3 convert_hf_to_gguf.py <MODEL_DIR> --outfile <OUTPUT.gguf> --outtype <TYPE>
-```
+## Automatic Flow (default)
 
-## Example: Convert a Trained Checkpoint
+When `enable_deployment: true` in `system_config.yaml`, the trainer does this
+automatically after every successful training run:
 
-### Step 1: Find Your Checkpoint
+1. PEFT adapter (`adapter_model.safetensors`) is written to the checkpoint dir
+2. `scripts/convert_lora_to_gguf.py` converts it to `adapter.gguf`
+3. `POST /lora` is called on the llama-server to hot-load the adapter
 
-```bash
-# List available checkpoints
-ls -lh /opt/project-rlhfl/volumes/checkpoints/
+No manual steps needed.
 
-# Example output:
-# checkpoint_20260217_050631/
-#   ├── adapter_sequential_final/  ← This is what we convert
-#   ├── training_metadata.json
-#   └── pass_1_layers_0_4/
-```
-
-### Step 2: Convert to F16 GGUF
+## Manual Conversion
 
 ```bash
-# Inside trainer container:
-docker exec -it llm-trainer python3 /app/scripts/convert_hf_to_gguf.py \
-  /checkpoints/checkpoint_20260217_050631/adapter_sequential_final \
-  --outfile /checkpoints/checkpoint_20260217_050631/converted_f16.gguf \
-  --outtype f16
+# Inside the running container:
+docker exec -it rlhfl python3 /app/scripts/convert_lora_to_gguf.py \
+  /checkpoints/checkpoint_20260217_050631/adapter_model.safetensors \
+  --out /checkpoints/checkpoint_20260217_050631/adapter.gguf
 ```
 
-**Or from host (if script is in volumes):**
+## Manual Deployment via Admin UI
+
+Open `http://localhost:8000/admin/` → Checkpoints → **Deploy to llama.cpp**
+
+Or via API:
 
 ```bash
-# From host machine:
-cd /opt/project-rlhfl
-docker exec -it llm-trainer python3 /app/scripts/convert_hf_to_gguf.py \
-  /checkpoints/checkpoint_$(ls -t volumes/checkpoints/ | head -1)/adapter_sequential_final \
-  --outfile /checkpoints/latest_f16.gguf \
-  --outtype f16
+curl -X POST "http://localhost:8000/admin/api/model/deploy-lora?checkpoint_id=checkpoint_20260217_050631"
 ```
 
-### Step 3: Quantize to Q4_K_M (Production)
+## Manual Deployment via llama-server API
 
 ```bash
-# Quantize for production use (reduces size by ~15%)
-docker exec -it llm-trainer /app/bin/llama-quantize \
-  /checkpoints/checkpoint_20260217_050631/converted_f16.gguf \
-  /checkpoints/checkpoint_20260217_050631/converted_Q4_K_M.gguf \
-  Q4_K_M
+# Load adapter (path must be accessible from the host running llama-server):
+curl -X POST http://localhost:8080/lora \
+  -H "Content-Type: application/json" \
+  -d '[{"id": 0, "path": "/checkpoints/checkpoint_20260217_050631/adapter.gguf", "scale": 1.0}]'
+
+# Check loaded adapters:
+curl http://localhost:8080/lora
+
+# Unload all adapters (revert to base model):
+curl -X POST http://localhost:8080/lora \
+  -H "Content-Type: application/json" \
+  -d '[]'
 ```
 
-### Step 4: Deploy to Ollama
+## Path Note
+
+The llama-server runs on the host, not in the container. The `adapter.gguf`
+path sent to `/lora` must be the **host path**. If your host mounts the
+checkpoints volume at a different path than `/checkpoints`, set
+`host_checkpoints_path` in `system_config.yaml`:
+
+```yaml
+llama_cpp:
+  host_checkpoints_path: /opt/project-rlhfl/volumes/checkpoints
+```
+
+## Checking Server Status
 
 ```bash
-# Via API (recommended):
-curl -X POST "http://localhost:8000/admin/api/ollama/deploy-checkpoint?checkpoint_id=checkpoint_20260217_050631"
-
-# Or manually create Modelfile and deploy:
-cat > /tmp/Modelfile <<EOF
-FROM /checkpoints/checkpoint_20260217_050631/converted_Q4_K_M.gguf
-TEMPLATE """<|start|>user<|message|>{{ .Prompt }}<|end|><|start|>assistant<|channel|>final<|message|>"""
-EOF
-
-ollama create qwen3-abliterated:30b-a3b-ft -f /tmp/Modelfile
+curl http://localhost:8000/admin/api/model/server-status
+# {"reachable": true, "healthy": true, "loaded_adapters": [...]}
 ```
-
-## Output Types Explained
-
-| Type   | Size (20B model) | Quality | Speed | Use Case |
-|--------|------------------|---------|-------|----------|
-| `f32`  | ~80GB           | Best    | Slow  | Research/evaluation |
-| `f16`  | ~40GB           | Excellent | Medium | Intermediate step |
-| `q8_0` | ~20GB           | Very Good | Fast | High-quality production |
-| `q4_k_m` | ~12GB         | Good    | Fastest | Production (recommended) |
-
-## File Size Reference
-
-For a 20B parameter model:
-- **HuggingFace (FP32)**: ~80GB
-- **F16 GGUF**: ~40GB
-- **Q8_0 GGUF**: ~20GB
-- **Q4_K_M GGUF**: ~12GB (production default)
 
 ## Common Issues
 
-### "Model GptOssForCausalLM is not supported"
-```bash
-# Install required library:
-docker exec -it llm-trainer pip install gguf==0.10.0
-```
+### Adapter not loading
 
-### "GGUF CONVERSION FAILED: Missing required library"
-```bash
-# Install gguf:
-docker exec -it llm-trainer pip install gguf==0.10.0
-```
-
-### "File not found: /checkpoints/..."
-```bash
-# Make sure you're using the container path, not host path:
-# ✓ Correct: /checkpoints/checkpoint_*/adapter_sequential_final
-# ✗ Wrong: /opt/project-rlhfl/volumes/checkpoints/...
-
-# Verify path inside container:
-docker exec -it llm-trainer ls -la /checkpoints/
-```
-
-### Out of memory during conversion
-```bash
-# Check available RAM (needs ~50GB):
-free -h
-
-# If low on RAM, close other applications
-# The conversion loads the entire model into memory
-```
-
-## Automated vs Manual
-
-**Automatic (default):**
-- Enabled in `system_config.yaml`: `enable_gguf_conversion: true`
-- Runs after every successful training
-- Creates Q4_K_M GGUF automatically
-- Deploys to Ollama automatically
-- No manual intervention needed
-
-**Manual (this guide):**
-- For testing different quantization levels
-- For debugging conversion issues
-- For custom deployments
-- For educational purposes
-
-## Quick Commands
+Check that the GGUF LoRA file exists and the path is correct for the host:
 
 ```bash
-# Latest checkpoint to F16:
-docker exec -it llm-trainer python3 /app/scripts/convert_hf_to_gguf.py \
-  /checkpoints/$(ls -t /opt/project-rlhfl/volumes/checkpoints/ | head -1)/adapter_sequential_final \
-  --outfile /checkpoints/latest.gguf --outtype f16
-
-# Then quantize:
-docker exec -it llm-trainer /app/bin/llama-quantize \
-  /checkpoints/latest.gguf \
-  /checkpoints/latest_q4.gguf \
-  Q4_K_M
-
-# Deploy:
-curl -X POST "http://localhost:8000/admin/api/ollama/deploy-checkpoint?checkpoint_id=$(ls -t /opt/project-rlhfl/volumes/checkpoints/ | head -1)"
+ls -lh /opt/project-rlhfl/volumes/checkpoints/checkpoint_*/adapter.gguf
 ```
 
-## See Also
+### Conversion fails
 
-- [QUICKSTART.md](../QUICKSTART.md#manual-gguf-conversion) - Full setup guide
-- [FOR_NERDS.md](../FOR_NERDS.md) - Technical architecture details
-- Admin UI: http://localhost:8000/admin - Web-based model deployment
+The `gguf` package must be installed (it is in `requirements.txt`). Verify:
+
+```bash
+docker exec -it rlhfl python3 -c "import gguf; print(gguf.__version__)"
+```
+
+### llama-server not reachable
+
+The server is expected at `http://host.docker.internal:8080` by default.
+Check `base_url` in `system_config.yaml` and verify the server is running:
+
+```bash
+curl http://localhost:8080/health
+```

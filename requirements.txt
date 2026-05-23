@@ -1,0 +1,35 @@
+# Project RLHFL — Unified Dependencies
+
+# ── Core API ──────────────────────────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+httpx>=0.27.0
+
+# ── Elasticsearch ─────────────────────────────────────────────────────────
+elasticsearch>=8.0.0
+
+# ── PyTorch (CPU-only) ────────────────────────────────────────────────────
+# Dockerfile installs this separately via the CPU wheel index first for layer caching.
+# Keep this version in sync with the Dockerfile RUN pip install torch==X line.
+torch==2.6.0
+
+# ── Training & Fine-tuning ────────────────────────────────────────────────
+# transformers >=5.5.0.dev0 required for Gemma4ForConditionalGeneration
+transformers>=5.5.0.dev0
+peft>=0.18.0
+trl>=0.14.0
+datasets>=3.0.0
+
+# ── GGUF Conversion (safetensors LoRA → GGUF LoRA for llama.cpp) ─────────
+gguf>=0.10.0
+
+# ── Scheduling ────────────────────────────────────────────────────────────
+apscheduler>=3.10.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────
+PyYAML>=6.0.1
+pytz>=2024.1
+psutil>=5.9.0
+requests>=2.31.0

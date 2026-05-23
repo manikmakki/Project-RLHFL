@@ -319,6 +319,7 @@ class Interaction(BaseModel):
     timestamp: datetime
     user_message: str
     assistant_response: str
+    user_followup: Optional[str] = None
     sentiment: float = 0.0
     weight: float = 1.0
     metadata: Dict[str, Any] = Field(default_factory=dict)

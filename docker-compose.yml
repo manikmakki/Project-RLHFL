@@ -1,11 +1,11 @@
 version: '3.8'
 
 services:
-  api:
+  rlhfl:
     build:
       context: .
-      dockerfile: Dockerfile.api
-    container_name: llm-api
+      dockerfile: Dockerfile
+    container_name: rlhfl
     ports:
       - "8000:8000"
     volumes:
@@ -13,29 +13,6 @@ services:
       - ./volumes/data:/data
       - ./volumes/config:/config
       - ./volumes/checkpoints:/checkpoints
-    environment:
-      - CONFIG_PATH=/config/system_config.yaml
-      - DATA_PATH=/data
-      - CHECKPOINTS_PATH=/checkpoints
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - llm-network
-
-  trainer:
-    build:
-      context: .
-      dockerfile: Dockerfile.trainer
-    container_name: llm-trainer
-    volumes:
-      - ./volumes/models:/models
-      - ./volumes/data:/data
-      - ./volumes/checkpoints:/checkpoints
-      - ./volumes/config:/config
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - CONFIG_PATH=/config/system_config.yaml
@@ -47,41 +24,14 @@ services:
       - MKL_NUM_THREADS=32
       - OPENBLAS_NUM_THREADS=32
     restart: unless-stopped
-    depends_on:
-      api:
-        condition: service_healthy
-    networks:
-      - llm-network
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: llm-ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ./volumes/checkpoints:/checkpoints
-      - ./volumes/models:/models
-      - ./volumes/data/ollama:/root/.ollama
-    environment:
-      - OLLAMA_HOST=0.0.0.0:11434
-      - OLLAMA_KEEP_ALIVE=30m
-      - OLLAMA_NUM_PARALLEL=1
-      - OLLAMA_MAX_LOADED_MODELS=2
-      - OLLAMA_CONTEXT_LENGTH=32768
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     networks:
       - llm-network
 
 networks:
   llm-network:
     driver: bridge
-
-volumes:
-  ollama-data:

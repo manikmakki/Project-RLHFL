@@ -22,19 +22,8 @@ fi
 
 git lfs install
 
-# Download GGUF model for inference (optional - can use Ollama instead)
-echo "Step 1: GGUF model for Ollama inference..."
-echo "This is optional if you already have the model in Ollama"
-echo "Skip this if you have 'ollama pull ministral-3:14b' already"
-echo ""
-
-echo "Pull via Ollama:"
-echo "  ollama pull ministral-3:14b"
-
-echo ""
-
 # Download HuggingFace model for training
-echo "Step 2: Downloading Ministral-3-14B (HuggingFace format)..."
+echo "Step 1: Downloading Ministral-3-14B (HuggingFace format)..."
 echo "This is the base model used for LoRA training (~60 GB)"
 echo ""
 
@@ -51,8 +40,8 @@ echo "Model download complete!"
 echo "=================================================="
 echo ""
 echo "Models downloaded:"
-echo "  - Inference: Use Ollama (ollama pull ministral-3:14b)"
-echo "  - Training (HF):    $MODELS_DIR/Ministral-3-14B"
+echo "  - Training (HF): $MODELS_DIR/Ministral-3-14B"
+echo "  - Inference: run llama-server on the host pointing at your GGUF"
 echo ""
 echo "Next steps:"
 echo "  1. Review and customize volumes/config/system_config.yaml if needed"

@@ -31,13 +31,13 @@ class DatasetBuilder:
         )
         
         # Separate by sentiment
-        positive = [i for i in interactions if i.sentiment > self.config.sentiment.positive_threshold]
-        negative = [i for i in interactions if i.sentiment < self.config.sentiment.negative_threshold]
+        positive = [i for i in interactions if i.sentiment > 0.3]
+        negative = [i for i in interactions if i.sentiment < -0.3]
         neutral = [
             i for i in interactions
             if abs(i.sentiment) <= max(
-                self.config.sentiment.positive_threshold,
-                abs(self.config.sentiment.negative_threshold)
+                0.3,
+                abs(-0.3)
             )
         ]
         
@@ -167,13 +167,13 @@ class DatasetBuilder:
         dataset = []
 
         # Separate non-refusal interactions by sentiment
-        positive = [i for i in non_refusal_interactions if i.sentiment > self.config.sentiment.positive_threshold]
-        negative = [i for i in non_refusal_interactions if i.sentiment < self.config.sentiment.negative_threshold]
+        positive = [i for i in non_refusal_interactions if i.sentiment > 0.3]
+        negative = [i for i in non_refusal_interactions if i.sentiment < -0.3]
         neutral = [
             i for i in non_refusal_interactions
             if abs(i.sentiment) <= max(
-                self.config.sentiment.positive_threshold,
-                abs(self.config.sentiment.negative_threshold)
+                0.3,
+                abs(-0.3)
             )
         ]
 

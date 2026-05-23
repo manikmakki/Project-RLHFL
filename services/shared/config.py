@@ -1,42 +1,28 @@
 """
 Project RLHFL - Configuration Management
 
-This module provides centralized configuration management using Pydantic
-for validation and YAML for storage. It defines all system parameters
-including:
-
-- Model settings (paths, context length, generation parameters)
-- Training hyperparameters (LoRA rank, learning rate, batch sizes)
-- Memory management (embeddings, golden examples, retention)
-- Sentiment analysis thresholds and weights
-
-Configuration can be loaded from YAML files or environment variables,
-with sensible defaults for all parameters. The configuration is validated
-at load time to catch errors early.
+Centralized configuration using Pydantic for validation and YAML for storage.
+RLHFL is a pure sidecar service: it reads TamAGI's echo_memory ES index,
+evaluates conversations with the LLM, and trains LoRA adapters.
 """
 
 import os
 import yaml
 from pathlib import Path
 from typing import Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
 
 class ModelConfig(BaseModel):
-    model_id: str = "ministral-3:14b"  # Model identifier for API responses / Ollama tag
-    base_model_path: str = "/models/Ministral-3-14B"  # HF safetensors for training
-    ollama_base_model: str = "ministral-3:14b"  # Ollama base model tag (for adapter FROM)
-    hf_model_id: str = "dphn/Ministral-3-14B"  # HuggingFace model ID (reference)
+    model_id: str = "gemma4:27b"
+    base_model_path: str = "/models/gemma-4-26B-A4B"
     context_length: int = 8192
     max_tokens: int = 2048
-    n_threads: int = 4
-    response_format: str = "openai"  # "openai" or "openclaw"
 
 
 class TrainingConfig(BaseModel):
     min_interactions_threshold: int = 50
-    inactivity_threshold_hours: int = 8
     max_days_between_training: int = 7
     lora_rank: int = 16
     lora_alpha: int = 32
@@ -48,143 +34,80 @@ class TrainingConfig(BaseModel):
     validation_split: float = 0.1
     max_grad_norm: float = 1.0
     weight_decay: float = 0.01
-    max_seq_length: int = 256  # Reduced from 512 for attention mask compatibility
+    max_seq_length: int = 256
 
-    # CPU training threads (leave room for inference on the same machine)
     cpu_threads: int = 32
 
-    # DPO (Direct Preference Optimization) settings
-    enable_dpo: bool = False  # Master DPO toggle (if false, always use SFT)
-    dpo_beta: float = 0.1  # DPO temperature parameter (controls strength of preference)
-    dpo_batch_size: int = 8  # Batch size for rejection generation
-    dpo_rejection_timeout: int = 300  # Timeout per rejection generation (seconds)
+    enable_dpo: bool = False
+    dpo_beta: float = 0.1
+    dpo_batch_size: int = 8
+    dpo_rejection_timeout: int = 300
 
-    # Sentiment-based training triggers
-    sft_trigger_threshold: int = 20  # Trigger SFT when ≥ this many new positive/golden
-    dpo_trigger_threshold: int = 5   # Trigger DPO when ≥ this many new negative sentiments
-    dpo_mode_threshold: int = 5      # Use DPO mode if ≥ this many negatives exist
+    dpo_trigger_threshold: int = 5
 
-    # Training schedule settings
-    schedule_enabled: bool = False              # Enable scheduled training (vs immediate)
-    schedule_time: str = "01:00"                # Time to run training (24-hour format)
-    schedule_timezone: str = "America/New_York"  # Timezone for schedule_time
-    schedule_window_minutes: int = 60           # Execute if within N minutes of scheduled time
+    schedule_enabled: bool = False
+    schedule_time: str = "01:00"
+    schedule_timezone: str = "America/New_York"
+    schedule_window_minutes: int = 60
 
-    # Ollama deployment
-    enable_ollama_deployment: bool = False  # Deploy to Ollama after training
-    ollama_model_name: str = "ministral-3:14b"  # Ollama model name to update
+    enable_deployment: bool = False
 
-    # Checkpoint storage management
-    max_checkpoint_count: int = 3  # Max checkpoint dirs to keep
-    max_gguf_files: int = 2  # Max old GGUF files in Ollama
+    max_checkpoint_count: int = 3
+    max_gguf_files: int = 2
 
-    # Sanity floor for perplexity comparison. A stored baseline below this value
-    # is almost certainly caused by eval/train data contamination and should not
-    # be used as the comparison target. Real LLMs on conversational data stay well
-    # above this range.
+    # A stored baseline below this value is almost certainly caused by
+    # eval/train data contamination and should not be used as the comparison target.
     min_reasonable_perplexity: float = 2.0
 
 
-class MemoryConfig(BaseModel):
+class EvaluationWindowConfig(BaseModel):
+    """Time window during which the ES ingester is allowed to run evaluations."""
+    start: str = "01:00"
+    end: str = "05:00"
+    timezone: str = "America/New_York"
+
+
+class ElasticsearchConfig(BaseModel):
+    """Elasticsearch connection and sidecar-mode settings."""
+    host: str = "http://localhost:9200"
+    api_key: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+    index: str = "echo_memory"
+
+    # When True, RLHFL reads from TamAGI's index rather than intercepting chats.
+    sidecar_mode: bool = True
+
+    evaluation_window: EvaluationWindowConfig = Field(default_factory=EvaluationWindowConfig)
+    batch_size: int = 25
+
     max_memory_age_days: int = 90
-    embedding_model: str = "all-MiniLM-L6-v2"
-    batch_size: int = 32
-    # Memory management settings
-    max_db_size_gb: float = 10.0  # Maximum database size before auto-cleanup
-    auto_cleanup_threshold: float = 0.9  # Trigger cleanup at 90% of max size
-    auto_cleanup_percentage: float = 0.1  # Remove bottom 10% by weight during auto-cleanup
-    min_weight_threshold: float = 0.5  # Remove entries below this weight during pre-training cleanup
-    top_n_weighted_interactions: int = 1000  # Total interactions (including golden) to include in training
+    max_index_size_gb: float = 25.0
+    top_n_weighted_interactions: int = 1000
 
 
-class SentimentConfig(BaseModel):
-    positive_threshold: float = 0.3
-    negative_threshold: float = -0.3
-    explicit_instruction_boost: float = 3.0
-    continuation_baseline: float = 0.1
-
-
-class LLMProxyConfig(BaseModel):
-    """Configuration for HTTP proxy to external LLM services."""
-    # External LLM endpoint URL
-    base_url: str = "http://llm-ollama:11434"  # Override with LLM_BASE_URL env var
-
-    # Endpoint type: "auto" (detect from URL), "ollama", "openai"
-    endpoint_type: str = "auto"
-
-    # Model name to request from external LLM
-    external_model_name: str = "qwen2.5:32b"  # Override with LLM_MODEL_NAME env var
-
-    # API key for authenticated endpoints (OpenAI, etc.)
-    api_key: Optional[str] = None  # Override with OPENAI_API_KEY env var
-
-    # Lightweight model for sentiment analysis via Ollama
-    sentiment_model: str = "qwen2.5:0.5b"
-
-    # Model whitelist for sentiment analysis + storage
-    # Empty list = analyze all models (default for single-model setups)
-    # Non-empty = only whitelisted models get sentiment + storage
-    sentiment_enabled_models: list[str] = []
-
-    # HTTP client settings
-    connect_timeout_seconds: int = 10
-    read_timeout_seconds: int = 120  # Long for streaming
-    max_retries: int = 2
-    retry_delay_seconds: float = 1.0
-    max_connections: int = 10
-    max_keepalive_connections: int = 5
+class LlamaCppConfig(BaseModel):
+    """Connection settings for the external llama.cpp server."""
+    base_url: str = "http://host.docker.internal:8080"
+    api_key: Optional[str] = None
+    read_timeout_seconds: int = 120
+    lora_scale: float = 1.0
+    host_checkpoints_path: Optional[str] = None
 
 
 class SystemConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
-    memory: MemoryConfig = Field(default_factory=MemoryConfig)
-    sentiment: SentimentConfig = Field(default_factory=SentimentConfig)
-    llm_proxy: LLMProxyConfig = Field(default_factory=LLMProxyConfig)
-
-    @model_validator(mode='after')
-    def _resolve_model_defaults(self) -> 'SystemConfig':
-        """
-        Auto-derive dependent model names from model.model_id when not explicitly set.
-
-        This makes model.model_id the single source of truth — changing it once
-        propagates to llm_proxy and training without editing each field.
-        """
-        mid = self.model.model_id
-
-        # LLM proxy model name
-        proxy_default = LLMProxyConfig.model_fields['external_model_name'].default
-        if not self.llm_proxy.external_model_name or self.llm_proxy.external_model_name == proxy_default:
-            self.llm_proxy.external_model_name = mid
-
-        # Sentiment model
-        sentiment_default = LLMProxyConfig.model_fields['sentiment_model'].default
-        if not self.llm_proxy.sentiment_model or self.llm_proxy.sentiment_model == sentiment_default:
-            self.llm_proxy.sentiment_model = mid
-
-        # Sentiment enabled models whitelist
-        if not self.llm_proxy.sentiment_enabled_models:
-            self.llm_proxy.sentiment_enabled_models = [mid]
-
-        # Training deployment model name
-        training_default = TrainingConfig.model_fields['ollama_model_name'].default
-        if not self.training.ollama_model_name or self.training.ollama_model_name == training_default:
-            self.training.ollama_model_name = mid
-
-        return self
+    elasticsearch: ElasticsearchConfig = Field(default_factory=ElasticsearchConfig)
+    llama_cpp: LlamaCppConfig = Field(default_factory=LlamaCppConfig)
 
 
 class Settings(BaseSettings):
-    model_path: str = os.getenv("MODEL_PATH", "/models/Ministral-3-14B")
-    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/Ministral-3-14B")
+    base_model_path: str = os.getenv("BASE_MODEL_PATH", "/models/gemma-4-26B-A4B")
     config_path: str = os.getenv("CONFIG_PATH", "/config/system_config.yaml")
     data_path: str = os.getenv("DATA_PATH", "/data")
     checkpoints_path: str = os.getenv("CHECKPOINTS_PATH", "/checkpoints")
-
-    # LLM Proxy settings (override config file)
-    llm_base_url: str = os.getenv("LLM_BASE_URL", "")
-    llm_model_name: str = os.getenv("LLM_MODEL_NAME", "")
-    openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
 
     log_level: str = os.getenv("LOG_LEVEL", "DEBUG")
 
@@ -194,17 +117,15 @@ def load_config(config_path: Optional[str] = None) -> SystemConfig:
     if config_path is None:
         settings = Settings()
         config_path = settings.config_path
-    
+
     config_file = Path(config_path)
-    
+
     if config_file.exists():
         with open(config_file, 'r') as f:
             config_dict = yaml.safe_load(f)
         return SystemConfig(**config_dict)
     else:
-        # Return default configuration
         config = SystemConfig()
-        # Save default config for future reference
         save_config(config, config_path)
         return config
 
@@ -213,7 +134,7 @@ def save_config(config: SystemConfig, config_path: str):
     """Save system configuration to YAML file."""
     config_file = Path(config_path)
     config_file.parent.mkdir(parents=True, exist_ok=True)
-    
+
     with open(config_file, 'w') as f:
         yaml.dump(config.model_dump(), f, default_flow_style=False, indent=2)
 
