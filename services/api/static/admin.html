@@ -269,7 +269,7 @@ async function refreshStats() {
     // Eval pipeline card
     set('ep-backlog', `${fmt(d.evaluation?.unevaluated_count)} docs`);
     set('ep-window', d.evaluation?.evaluation_window || '—');
-    set('ep-batch', '25 docs / batch');
+    set('ep-batch', `${fmt(d.evaluation?.batch_size)} docs / batch`);
     set('ep-sidecar', d.evaluation?.sidecar_mode ? '✓ active' : '✗ off');
     set('ep-total', fmt(d.evaluation?.evaluated_count));
 

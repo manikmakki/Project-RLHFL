@@ -89,6 +89,7 @@ async def get_admin_stats():
                 "avg_quality": round(aggs["avg_quality"].get("value") or 0.0, 2),
                 "sidecar_mode": config.elasticsearch.sidecar_mode,
                 "evaluation_window": f"{config.elasticsearch.evaluation_window.start}–{config.elasticsearch.evaluation_window.end} {config.elasticsearch.evaluation_window.timezone}",
+                "batch_size": config.elasticsearch.batch_size,
             }
         except Exception as e:
             logger.warning(f"Failed to get evaluation stats: {e}")
