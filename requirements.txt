@@ -10,10 +10,11 @@ httpx>=0.27.0
 # ── Elasticsearch ─────────────────────────────────────────────────────────
 elasticsearch>=8.0.0
 
-# ── PyTorch (CPU-only) ────────────────────────────────────────────────────
-# Dockerfile installs this separately via the CPU wheel index first for layer caching.
-# Keep this version in sync with the Dockerfile RUN pip install torch==X line.
-torch==2.6.0
+# ── PyTorch ───────────────────────────────────────────────────────────────
+# torch is pre-installed in the intel/intel-extension-for-pytorch base image
+# with XPU support. A floor pin here prevents accidental downgrades to a
+# CPU-only wheel from PyPI while still allowing the base image's version.
+torch>=2.6.0
 
 # ── Training & Fine-tuning ────────────────────────────────────────────────
 # transformers >=5.5.0.dev0 required for Gemma4ForConditionalGeneration

@@ -1,11 +1,15 @@
 """
-Project RLHFL - LoRA Trainer (CPU-only)
+Project RLHFL - LoRA Trainer (Intel XPU + CPU offload)
 
 Trains LoRA adapters for Gemma-4-26B-A4B (MoE, 128 experts, top-8 active).
 Supports SFT (Supervised Fine-Tuning) and DPO (Direct Preference Optimization).
 
 Adapters are parameter-efficient, requiring only ~1-2% of full fine-tuning
 memory while achieving comparable results.
+
+Device strategy: device_map="auto" with bfloat16. On a 24 GB Intel Arc Pro B60
+roughly half the model (~12 GB of the ~50 GB bfloat16 weight footprint) lands on
+XPU; the rest stays in CPU RAM. IPEX registers the XPU backend when imported.
 """
 
 import gc
@@ -13,6 +17,12 @@ import logging
 import os
 import json
 import torch
+
+try:
+    import intel_extension_for_pytorch as ipex  # noqa: F401 — registers XPU backend
+    _IPEX_AVAILABLE = True
+except ImportError:
+    _IPEX_AVAILABLE = False
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
@@ -85,6 +95,24 @@ class LoRATrainer:
             task_type="CAUSAL_LM",
         )
 
+    # Gemma-4's tokenizer_config.json ships without a chat_template.
+    # <|turn> / <turn|> are token ids 105 / 106 per the model's tokenizer.json.
+    _GEMMA4_CHAT_TEMPLATE = (
+        "{{ bos_token }}"
+        "{% if messages[0]['role'] == 'system' %}"
+        "{{ messages[0]['content'] }}\n"
+        "{% set messages = messages[1:] %}"
+        "{% endif %}"
+        "{% for message in messages %}"
+        "{% if message['role'] == 'user' %}"
+        "{{ '<|turn>user\n' + message['content'] | trim + '<turn|>\n' }}"
+        "{% elif message['role'] == 'assistant' %}"
+        "{{ '<|turn>model\n' + message['content'] | trim + '<turn|>\n' }}"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}{{ '<|turn>model\n' }}{% endif %}"
+    )
+
     def _load_tokenizer(self):
         """Load tokenizer for Gemma-4."""
         tokenizer = AutoTokenizer.from_pretrained(self.base_model_path)
@@ -93,15 +121,23 @@ class LoRATrainer:
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token or "<eos>"
 
+        if tokenizer.chat_template is None:
+            tokenizer.chat_template = self._GEMMA4_CHAT_TEMPLATE
+            logger.info("Set Gemma-4 chat template (not present in tokenizer_config.json)")
+
         return tokenizer
 
     def _load_model(self):
-        """Load Gemma-4 on CPU in float32.
+        """Load Gemma-4 with device_map="auto" in bfloat16.
 
         Gemma4ForConditionalGeneration is a VLM; AutoModelForCausalLM maps to it
         via the auto-class registry. Vision encoder LoRA params will be initialized
         to zero (identity) and stay there since we train on text-only data — harmless.
         MoE router params are unfrozen in train() after get_peft_model() runs.
+
+        With device_map="auto" and an Intel Arc Pro B60 (24 GB XPU), accelerate
+        fills XPU VRAM first then spills remaining layers to CPU RAM. bfloat16 halves
+        the weight footprint (~50 GB) vs float32 (~100 GB), maximising GPU residency.
         """
         # Re-apply safety patch before each model load
         try:
@@ -114,18 +150,18 @@ class LoRATrainer:
         except Exception:
             pass
 
-        logger.info(f"Loading model from {self.base_model_path} on CPU (float32)...")
+        xpu_available = _IPEX_AVAILABLE and torch.xpu.is_available()
+        device_label = f"XPU ({torch.xpu.device_count()} device(s))" if xpu_available else "CPU only"
+        logger.info(f"Loading model from {self.base_model_path} — {device_label}, bfloat16, device_map=auto")
         torch.set_num_threads(self.config.training.cpu_threads)
-        logger.info(f"PyTorch CPU threads: {torch.get_num_threads()}")
 
         model = AutoModelForCausalLM.from_pretrained(
             self.base_model_path,
-            device_map="cpu",
-            torch_dtype=torch.float32,
+            device_map="auto",
+            torch_dtype=torch.bfloat16,
             trust_remote_code=True,
             low_cpu_mem_usage=True,
         )
-        model = model.float()
         return model
 
     def _unwrap_clippable_linear(self, model):
@@ -246,12 +282,14 @@ class LoRATrainer:
             eval_strategy="epoch",
             save_strategy="epoch",
             save_total_limit=2,
+            # bf16=True would trigger torch.cuda.amp — not correct for XPU. The model
+            # is already loaded in bfloat16 so native bfloat16 math runs without AMP.
             bf16=False,
             gradient_checkpointing=False,
             report_to="none",
             remove_unused_columns=False,
             dataloader_drop_last=False,
-            use_cpu=True,
+            use_cpu=False,
         )
 
         class DataCollatorForCausalLM:

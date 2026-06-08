@@ -14,6 +14,11 @@ services:
       - ./volumes/config:/config
       - ./volumes/checkpoints:/checkpoints
       - /var/run/docker.sock:/var/run/docker.sock
+    # Intel Arc Pro B60 GPU passthrough via DRI devices.
+    # The render group (typically GID 109) owns /dev/dri/renderD* —
+    # add_group ensures the container process can open those nodes.
+    devices:
+      - /dev/dri:/dev/dri
     environment:
       - CONFIG_PATH=/config/system_config.yaml
       - DATA_PATH=/data
@@ -23,6 +28,10 @@ services:
       - OMP_NUM_THREADS=32
       - MKL_NUM_THREADS=32
       - OPENBLAS_NUM_THREADS=32
+      # Persist the SYCL JIT cache so the kernel compilation cost is paid once.
+      - SYCL_CACHE_PERSISTENT=1
+      # Tell Level Zero to use the first GPU (index 0); adjust if multi-GPU.
+      - ZE_AFFINITY_MASK=0
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
