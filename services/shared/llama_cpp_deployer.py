@@ -3,30 +3,48 @@ llama.cpp LoRA Deployer
 
 After training completes:
 1. Converts the PEFT adapter (safetensors) to GGUF LoRA format via scripts/convert_lora_to_gguf.py
-2. Loads the GGUF adapter into the running llama-server via POST /lora
-3. Verifies the adapter is active via GET /lora
+2. Atomically repoints the current_adapter_path symlink at the new GGUF file
+3. Restarts the llama-server container (via docker.sock) so it re-reads --lora
+4. Verifies the new adapter is active via GET /lora-adapters
+
+llama.cpp's server has no hot-reload for LoRA *content* — confirmed against
+the real API (tools/server/README.md): POST /lora-adapters only accepts
+{"id", "scale"} and toggles the scale of adapters already loaded into memory
+at --lora <path> startup time. It cannot point at a new file at runtime. So
+--lora is pinned to a stable symlink (current_adapter_path) and a restart is
+what actually picks up new weights.
 """
 
 import logging
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
+import docker
 import requests
 
 from shared.config import LlamaCppConfig
 
 logger = logging.getLogger(__name__)
 
-# Path to the bundled conversion script (relative to project root, mounted at /app in container)
-_CONVERT_SCRIPT = Path(__file__).parent.parent.parent / "scripts" / "convert_lora_to_gguf.py"
+# Path to the bundled conversion script. The Dockerfile does `COPY services/ ./`,
+# flattening services/shared/ straight into /app/shared/ (not /app/services/shared/),
+# so this file's parent.parent is /app, where scripts/ actually lives.
+_CONVERT_SCRIPT = Path(__file__).parent.parent / "scripts" / "convert_lora_to_gguf.py"
 
 
 class LlamaCppDeployer:
-    """Deploy LoRA adapters to an external llama-server via its HTTP /lora API."""
+    """Deploy LoRA adapters to the sibling llama-server container.
+
+    Since llama.cpp can't hot-load new adapter content via its HTTP API,
+    deployment = convert -> repoint the --lora symlink -> restart the
+    container -> verify via GET /lora-adapters.
+    """
 
     def __init__(self, config: LlamaCppConfig):
         self.config = config
@@ -34,31 +52,40 @@ class LlamaCppDeployer:
 
     def deploy_lora(self, adapter_path: str, checkpoint_id: str) -> bool:
         """
-        Full deployment pipeline: convert adapter → POST /lora → verify.
+        Full deployment pipeline: convert -> repoint symlink -> restart -> verify.
 
         adapter_path: directory containing adapter_model.safetensors
         checkpoint_id: used for logging only
         """
         logger.info(f"Deploying LoRA adapter for checkpoint {checkpoint_id}")
         logger.info(f"  Adapter dir:  {adapter_path}")
-        logger.info(f"  Server:       {self.base_url}")
+        logger.info(f"  Server:       {self.base_url}  (container: {self.config.container_name})")
 
         gguf_path = self._convert_to_gguf(adapter_path)
         if not gguf_path:
             logger.error("Conversion failed — deployment aborted")
             return False
 
-        host_path = self._to_host_path(gguf_path)
-        logger.info(f"  GGUF path (host): {host_path}")
+        if not self._update_symlink(gguf_path):
+            logger.error("Symlink update failed — deployment aborted")
+            return False
+        logger.info(f"  {self.config.current_adapter_path} -> {gguf_path}")
 
-        success = self._load_lora(host_path)
+        if not self._restart_container():
+            logger.error("Container restart failed — deployment aborted")
+            return False
+
+        if not self._wait_for_health():
+            logger.error(f"{self.config.container_name} did not become healthy after restart")
+            return False
+
+        success = self._verify_lora()
         if success:
             logger.info("=" * 60)
             logger.info(f"LLAMA.CPP DEPLOYMENT SUCCESSFUL: {checkpoint_id}")
             logger.info("=" * 60)
-            self._verify_lora(host_path)
         else:
-            logger.error(f"LLAMA.CPP DEPLOYMENT FAILED for {checkpoint_id}")
+            logger.error(f"LLAMA.CPP DEPLOYMENT FAILED for {checkpoint_id} (verification failed)")
 
         return success
 
@@ -79,7 +106,7 @@ class LlamaCppDeployer:
         if not script.exists():
             logger.error(
                 f"Conversion script not found at {script}. "
-                "Place scripts/convert_lora_to_gguf.py from the llama.cpp repo."
+                "Expected this repo's scripts/convert_lora_to_gguf.py (custom script, not from llama.cpp)."
             )
             return None
 
@@ -108,51 +135,76 @@ class LlamaCppDeployer:
             logger.error(f"Conversion error: {e}", exc_info=True)
             return None
 
-    def _to_host_path(self, container_path: str) -> str:
-        """Translate /checkpoints/... to the host-side path if configured."""
-        if self.config.host_checkpoints_path:
-            return container_path.replace("/checkpoints", self.config.host_checkpoints_path, 1)
-        return container_path
+    def _update_symlink(self, gguf_path: str) -> bool:
+        """Atomically repoint current_adapter_path at the new GGUF file.
 
-    def _load_lora(self, gguf_path: str) -> bool:
-        """POST /lora to load the adapter into the running llama-server."""
+        os.replace is atomic on POSIX even when overwriting an existing
+        symlink, so there's no window where --lora's target is missing.
+        """
+        target = Path(self.config.current_adapter_path)
+        tmp = target.with_name(target.name + f".tmp{os.getpid()}")
         try:
-            payload = [{"id": 0, "path": gguf_path, "scale": self.config.lora_scale}]
-            response = requests.post(
-                f"{self.base_url}/lora",
-                json=payload,
-                timeout=60,
-            )
-            if response.status_code == 200:
-                logger.info("llama-server accepted the adapter via POST /lora")
-                return True
-            logger.error(
-                f"POST /lora returned {response.status_code}: {response.text[:300]}"
-            )
+            if tmp.exists() or tmp.is_symlink():
+                tmp.unlink()
+            tmp.symlink_to(gguf_path)
+            os.replace(tmp, target)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to repoint {target} -> {gguf_path}: {e}", exc_info=True)
             return False
-        except requests.exceptions.ConnectionError:
-            logger.error(
-                f"Cannot reach llama-server at {self.base_url}. "
-                "Ensure llama-server is running on the host with --lora-init-without-apply."
-            )
+
+    def _restart_container(self) -> bool:
+        """Restart the sibling llama-server container via docker.sock so it
+        re-reads --lora at the (now repointed) current_adapter_path."""
+        try:
+            client = docker.from_env()
+            container = client.containers.get(self.config.container_name)
+            logger.info(f"Restarting {self.config.container_name}...")
+            container.restart(timeout=30)
+            return True
+        except docker.errors.NotFound:
+            logger.error(f"Container '{self.config.container_name}' not found")
             return False
         except Exception as e:
-            logger.error(f"Error posting to /lora: {e}", exc_info=True)
+            logger.error(f"Failed to restart {self.config.container_name}: {e}", exc_info=True)
             return False
 
-    def _verify_lora(self, gguf_path: str) -> bool:
-        """GET /lora to confirm the adapter is active."""
+    def _wait_for_health(self, timeout: float = 120.0, poll_interval: float = 3.0) -> bool:
+        """Poll GET /health until the restarted server is ready (model reload
+        on a 26B/Q4 GGUF can take a while)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                r = requests.get(f"{self.base_url}/health", timeout=5)
+                if r.status_code == 200:
+                    return True
+            except requests.exceptions.ConnectionError:
+                pass
+            time.sleep(poll_interval)
+        return False
+
+    def _verify_lora(self) -> bool:
+        """GET /lora-adapters to confirm the adapter is loaded and active.
+
+        Real API (tools/server/README.md): entries are {"id", "path", "scale"}.
+        llama-server reports the path it was launched with via --lora — the
+        stable current_adapter_path symlink — not the resolved per-checkpoint
+        file, so that's what we compare against. scale 0.0 means loaded but
+        inactive, not "this path isn't loaded".
+        """
         try:
-            response = requests.get(f"{self.base_url}/lora", timeout=10)
+            response = requests.get(f"{self.base_url}/lora-adapters", timeout=10)
             response.raise_for_status()
             loaded = response.json()
-            paths = [entry.get("path", "") for entry in (loaded if isinstance(loaded, list) else [])]
-            if gguf_path in paths:
-                logger.info(f"Verified: {gguf_path} is active in llama-server")
-                return True
-            logger.warning(
-                f"Adapter not found in GET /lora response (may still be loading): {paths}"
-            )
+            for entry in (loaded if isinstance(loaded, list) else []):
+                if entry.get("path") == self.config.current_adapter_path:
+                    scale = float(entry.get("scale", 0))
+                    if scale > 0:
+                        logger.info(f"Verified: adapter active at scale {scale}")
+                        return True
+                    logger.warning(f"Adapter loaded but scale={scale} (inactive)")
+                    return False
+            logger.warning(f"Adapter not found in GET /lora-adapters response: {loaded}")
             return False
         except Exception as e:
             logger.warning(f"Failed to verify adapter: {e}")
@@ -174,7 +226,7 @@ class LlamaCppDeployer:
             return status
 
         try:
-            lora_resp = requests.get(f"{self.base_url}/lora", timeout=5)
+            lora_resp = requests.get(f"{self.base_url}/lora-adapters", timeout=5)
             if lora_resp.status_code == 200:
                 status["loaded_adapters"] = lora_resp.json()
         except Exception:

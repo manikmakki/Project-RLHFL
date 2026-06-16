@@ -32,9 +32,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Matches: base_model.model.model.layers.{i}.{module}.lora_{A|B}.weight
+# Gemma-4 nests an extra `language_model.` nn.Module between the top-level
+# `model` and `layers` (Gemma4Model.language_model -> Gemma4TextModel.layers),
+# unlike plain Gemma/Gemma-2 where `layers` hangs directly off `model`.
+# Confirmed against a real PEFT-saved adapter_model.safetensors: the saved
+# key is base_model.model.model.language_model.layers.{i}....
 _PEFT_PATTERN = re.compile(
-    r"^base_model\.model\."       # PEFT prefix
-    r"model\.layers\.(\d+)\."    # layer index
+    r"^base_model\.model\."                  # PEFT prefix
+    r"model\.(?:language_model\.)?layers\.(\d+)\."  # layer index (Gemma-4: extra language_model hop)
     r"(.+?)\."                   # module path (e.g. self_attn.q_proj)
     r"lora_(A|B)\.weight$"       # LoRA matrix direction
 )
@@ -78,8 +83,15 @@ def _hf_to_gguf_name(hf_key: str) -> Optional[str]:
         else:
             return None
 
+    # llama.cpp strips the .lora_a/.lora_b suffix to find the matching base
+    # model tensor name, so that base name must include .weight (confirmed
+    # against ggml-org/llama.cpp's convert_lora_to_gguf.py: real GGUF LoRA
+    # tensors are named {layer}.{module}.weight.lora_a/.weight.lora_b).
+    # Without it, llama.cpp looks for e.g. "blk.0.attn_k" instead of the
+    # real "blk.0.attn_k.weight" and rejects the adapter as not matching
+    # the base model.
     suffix = "lora_a" if ab == "A" else "lora_b"
-    return f"{gguf_base}.{suffix}"
+    return f"{gguf_base}.weight.{suffix}"
 
 
 # ---------------------------------------------------------------------------

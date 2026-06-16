@@ -21,13 +21,15 @@ services:
       - ./volumes/sycl_cache:/root/.cache/sycl
       - ./volumes/opencl_cache:/root/.cache/opencl
     # Intel Arc Pro B60 GPU passthrough via DRI devices.
-    # The render group (typically GID 109) owns /dev/dri/renderD* —
-    # group_add ensures the container process can open those nodes.
+    # The render/video group GIDs are host-specific — find yours with:
+    #   getent group render video
+    # (109 is a common default for "render" on many distros, but verify;
+    # this repo's dev host uses 991/44, which won't necessarily match yours.)
     devices:
       - /dev/dri:/dev/dri
     group_add:
-      - 991 # render group (owns /dev/dri/renderD128 — compute access)
-      - 44  # video group (owns /dev/dri/card* — required by Level Zero for device init)
+      - 109 # render group (owns /dev/dri/renderD* — compute access) — VERIFY
+      - 44  # video group (owns /dev/dri/card* — required by Level Zero for device init) — VERIFY
     # Level Zero's DRM initialization on kernel 7.0 / Xe2 requires capabilities and
     # syscalls that Docker drops by default.  SYS_ADMIN is needed for some DRM memory
     # management ioctls; seccomp=unconfined unblocks any perf/io_uring paths the
@@ -77,6 +79,45 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - llm-network
+
+  llama-server:
+    # Build your own local image from llama.cpp's Intel/SYCL Dockerfile and
+    # tag it to match (or substitute a published image for your hardware).
+    image: local/llama.cpp:server-intel
+    container_name: llama-server
+    # Whole-directory passthrough, same pattern as rlhfl below — more portable
+    # than pinning specific renderD*/card* node numbers, which vary by host
+    # and by how many GPUs/drivers are present.
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      # ${HOME} expands via docker compose's shell-style interpolation.
+      # Adjust if your Hugging Face cache lives somewhere non-default
+      # (e.g. HF_HOME was overridden).
+      - ${HOME}/.cache/huggingface/hub/:/models
+      # Same absolute path as rlhfl's mount below. llama.cpp has no
+      # hot-reload for LoRA content — --lora is pinned to a stable symlink
+      # (current_adapter_path in system_config.yaml) that llama_cpp_deployer.py
+      # atomically repoints at the latest checkpoint's GGUF, then restarts
+      # this container so it re-reads the (now repointed) file at startup.
+      - ./volumes/checkpoints:/checkpoints
+    # The snapshot hash in the HF Hub cache layout (models--<org>--<repo>/
+    # snapshots/<commit-hash>/...) is unique per download — find yours with:
+    #   ls "$HOME/.cache/huggingface/hub/models--unsloth--gemma-4-26B-A4B-it-GGUF/snapshots/"
+    command: >
+      -m /models/models--unsloth--gemma-4-26B-A4B-it-GGUF/snapshots/<YOUR_SNAPSHOT_HASH>/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf
+      --mmproj /models/models--unsloth--gemma-4-26B-A4B-it-GGUF/snapshots/<YOUR_SNAPSHOT_HASH>/mmproj-BF16.gguf
+      --reasoning-budget 1024
+      --port 8080
+      --host 0.0.0.0
+      -n 512
+      --n-gpu-layers 99
+      --lora /checkpoints/current_adapter.gguf
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
     networks:
       - llm-network
 

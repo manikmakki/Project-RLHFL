@@ -94,12 +94,21 @@ class ElasticsearchConfig(BaseModel):
 
 
 class LlamaCppConfig(BaseModel):
-    """Connection settings for the external llama.cpp server."""
+    """Connection settings for the sibling llama.cpp server container.
+
+    llama.cpp's server has no hot-reload for LoRA *content* — POST
+    /lora-adapters only toggles the scale of adapters already loaded into
+    memory at startup; it can't point at a new file. So deployment works by
+    keeping --lora pinned to current_adapter_path (a symlink) and restarting
+    container_name via the docker.sock mounted into the trainer container
+    whenever the symlink target changes.
+    """
     base_url: str = "http://host.docker.internal:8080"
     api_key: Optional[str] = None
     read_timeout_seconds: int = 120
     lora_scale: float = 1.0
-    host_checkpoints_path: Optional[str] = None
+    container_name: str = "llama-server"
+    current_adapter_path: str = "/checkpoints/current_adapter.gguf"
 
 
 class SystemConfig(BaseModel):

@@ -5,3 +5,4 @@ volumes/config/prompt_rules.yaml
 volumes/config/system_config.yaml
 .env
 volumes/sycl_cache/*
+docker-compose.yml

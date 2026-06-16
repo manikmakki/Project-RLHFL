@@ -23,7 +23,8 @@ llama_cpp:
   api_key: null
   read_timeout_seconds: 120
   lora_scale: 1.0
-  host_checkpoints_path: null   # set if host path differs from /checkpoints
+  container_name: llama-server
+  current_adapter_path: /checkpoints/current_adapter.gguf
 
 training:
   batch_size: 2

@@ -39,3 +39,10 @@ PyYAML>=6.0.1
 pytz>=2024.1
 psutil>=5.9.0
 requests>=2.31.0
+
+# ── Sibling-container control (restart llama-server on new checkpoint) ────
+# llama.cpp server has no hot-reload for LoRA *content* — /lora-adapters only
+# toggles scale on adapters already loaded into memory at startup. Picking up
+# a new checkpoint requires restarting the container via the docker.sock
+# already mounted into this one.
+docker>=7.0.0
