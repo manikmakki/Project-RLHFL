@@ -506,7 +506,7 @@ class TrainerWorker:
 
 def main():
     logger.info("=" * 80)
-    logger.info("LOCAL LLM TRAINING SERVICE (CPU-only)")
+    logger.info("LOCAL LLM TRAINING SERVICE (XPU+CPU auto-select)")
     logger.info("=" * 80)
 
     logger.info("Waiting 30 seconds for API service to initialize...")

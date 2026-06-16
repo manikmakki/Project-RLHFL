@@ -1,13 +1,2 @@
-from .trainer_worker import TrainerWorker
-from .training_scheduler import TrainingScheduler
-from .dataset_builder import DatasetBuilder
-from .lora_trainer_MoE import LoRATrainer
-from .model_evaluator import ModelEvaluator
-
-__all__ = [
-    'TrainerWorker',
-    'TrainingScheduler',
-    'DatasetBuilder',
-    'LoRATrainer',
-    'ModelEvaluator'
-]
+# Intentionally empty — avoids circular import issues when running
+# trainer.trainer_worker as __main__ (python -m trainer.trainer_worker).

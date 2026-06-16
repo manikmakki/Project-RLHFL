@@ -8,17 +8,35 @@ services:
     container_name: rlhfl
     ports:
       - "8000:8000"
+    privileged: true
     volumes:
       - ./volumes/models:/models
       - ./volumes/data:/data
       - ./volumes/config:/config
       - ./volumes/checkpoints:/checkpoints
       - /var/run/docker.sock:/var/run/docker.sock
+      # Persist the Intel SYCL/OpenCL JIT cache across container restarts.
+      # Without this, every cold start recompiles all bitsandbytes XPU kernels
+      # (can take 30-60 s per kernel, potentially triggering the xe hang timeout).
+      - ./volumes/sycl_cache:/root/.cache/sycl
+      - ./volumes/opencl_cache:/root/.cache/opencl
     # Intel Arc Pro B60 GPU passthrough via DRI devices.
     # The render group (typically GID 109) owns /dev/dri/renderD* —
-    # add_group ensures the container process can open those nodes.
+    # group_add ensures the container process can open those nodes.
     devices:
       - /dev/dri:/dev/dri
+    group_add:
+      - 991 # render group (owns /dev/dri/renderD128 — compute access)
+      - 44  # video group (owns /dev/dri/card* — required by Level Zero for device init)
+    # Level Zero's DRM initialization on kernel 7.0 / Xe2 requires capabilities and
+    # syscalls that Docker drops by default.  SYS_ADMIN is needed for some DRM memory
+    # management ioctls; seccomp=unconfined unblocks any perf/io_uring paths the
+    # 26.05 GPU backend exercises during zeInit.
+    cap_add:
+      - SYS_ADMIN
+      - PERFMON
+    security_opt:
+      - seccomp:unconfined
     environment:
       - CONFIG_PATH=/config/system_config.yaml
       - DATA_PATH=/data
@@ -30,8 +48,29 @@ services:
       - OPENBLAS_NUM_THREADS=32
       # Persist the SYCL JIT cache so the kernel compilation cost is paid once.
       - SYCL_CACHE_PERSISTENT=1
-      # Tell Level Zero to use the first GPU (index 0); adjust if multi-GPU.
-      - ZE_AFFINITY_MASK=0
+      - SYCL_CACHE_DIR=/root/.cache/sycl
+      # Use Level Zero immediate command lists — submits GPU work directly to
+      # hardware without going through the GuC scheduler queue that carries the
+      # 20-second hang-detection timeout.  Required for long SYCL JIT
+      # compilations and large model dispatches on xe / Battlemage.
+      - UR_L0_USE_IMMEDIATE_COMMANDLISTS=1
+      - SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
+      # Intel NEO (compute runtime) watchdog — overrides the driver-side timeout.
+      # Set to 10 minutes to cover SYCL JIT + 13 GiB model dispatch.
+      - NEO_CSR_TIMEOUT_SECONDS=600
+      # ZE_AFFINITY_MASK with value "0" is interpreted as a bitmask (0 = no devices)
+      # in some Level Zero versions, hiding the GPU entirely.  Omitting it exposes
+      # all devices; since there is only one GPU this is equivalent to "index 0".
+      # - ZE_AFFINITY_MASK=0
+      # aten::_grouped_mm (MoE batched expert matmul) is not yet in torch-xpu-ops.
+      # This flag silently falls those ops back to CPU; everything else stays on XPU.
+      - PYTORCH_ENABLE_XPU_FALLBACK=1
+      # Emit a C-level stack trace on SIGSEGV/SIGABRT so hard crashes are visible
+      # in docker compose logs. Remove once GPU + CPU crashes are resolved.
+      - PYTHONFAULTHANDLER=1
+      # Show PyTorch C++ call stack on exceptions (complements PYTHONFAULTHANDLER
+      # which only fires on signals, not C++ exceptions).
+      - TORCH_SHOW_CPP_BACKTRACE=1
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

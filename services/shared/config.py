@@ -59,6 +59,12 @@ class TrainingConfig(BaseModel):
     # eval/train data contamination and should not be used as the comparison target.
     min_reasonable_perplexity: float = 2.0
 
+    # If XPU training is projected to exceed this many hours (measured after a short
+    # benchmark at run start), the trainer automatically falls back to CPU so llama.cpp
+    # is not displaced overnight. Set to 0 to always use CPU; set very high to always
+    # attempt XPU regardless of projected time.
+    max_training_hours: float = 8.0
+
 
 class EvaluationWindowConfig(BaseModel):
     """Time window during which the ES ingester is allowed to run evaluations."""
