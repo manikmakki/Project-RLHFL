@@ -152,12 +152,16 @@ class _TimingCallback(TrainerCallback):
     WARMUP_STEPS = 10
     MEASURE_STEPS = 5
 
+    LOG_EVERY_STEPS = 10  # progress heartbeat cadence after benchmark is done
+
     def __init__(self, max_hours: float):
         self.max_hours = max_hours
         self.too_slow = False
         self.projected_hours = 0.0
         self._t0: float = 0.0
         self._times: list = []
+        self._benchmark_logged = False
+        self._run_start: float = _time.monotonic()
 
     def on_step_begin(self, args, state, control, **kwargs):
         self._t0 = _time.monotonic()
@@ -171,18 +175,34 @@ class _TimingCallback(TrainerCallback):
 
         avg_sec = sum(measured[: self.MEASURE_STEPS]) / self.MEASURE_STEPS
         self.projected_hours = avg_sec * state.max_steps / 3600
-        logger.info(
-            f"Timing benchmark ({self.MEASURE_STEPS} steps after {self.WARMUP_STEPS} warmup): "
-            f"{avg_sec:.1f}s/step → {self.projected_hours:.1f}h projected "
-            f"({state.max_steps} total optimizer steps)"
-        )
-        if self.projected_hours > self.max_hours:
-            logger.warning(
-                f"Projected {self.projected_hours:.1f}h > {self.max_hours}h budget — "
-                f"stopping training early"
+
+        if not self._benchmark_logged:
+            self._benchmark_logged = True
+            logger.info(
+                f"Timing benchmark ({self.MEASURE_STEPS} steps after {self.WARMUP_STEPS} warmup): "
+                f"{avg_sec:.1f}s/step → {self.projected_hours:.1f}h projected "
+                f"({state.max_steps} total optimizer steps)"
             )
-            self.too_slow = True
-            control.should_training_stop = True
+            if self.projected_hours > self.max_hours:
+                logger.warning(
+                    f"Projected {self.projected_hours:.1f}h > {self.max_hours}h budget — "
+                    f"stopping training early"
+                )
+                self.too_slow = True
+                control.should_training_stop = True
+            return
+
+        # Periodic progress heartbeat every LOG_EVERY_STEPS steps
+        step = state.global_step
+        if step % self.LOG_EVERY_STEPS == 0:
+            elapsed_h = (_time.monotonic() - self._run_start) / 3600
+            remaining_steps = state.max_steps - step
+            eta_h = remaining_steps * avg_sec / 3600
+            loss = state.log_history[-1].get("loss", float("nan")) if state.log_history else float("nan")
+            logger.info(
+                f"[step {step}/{state.max_steps}] "
+                f"loss={loss:.4f}  elapsed={elapsed_h:.2f}h  eta={eta_h:.2f}h"
+            )
 
 
 

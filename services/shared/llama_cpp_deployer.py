@@ -51,15 +51,15 @@ class LlamaCppDeployer:
         self.base_url = config.base_url.rstrip("/")
 
     def deploy_lora(self, adapter_path: str, checkpoint_id: str) -> bool:
-        """
-        Full deployment pipeline: convert -> repoint symlink -> restart -> verify.
+        """Convert adapter to GGUF and repoint the stable --lora symlink.
 
-        adapter_path: directory containing adapter_model.safetensors
-        checkpoint_id: used for logging only
+        Does NOT restart the server — TrainerWorker stops the server before
+        training and starts it after (in a finally block), so the restart
+        happens regardless of training success/failure and picks up whichever
+        adapter the symlink currently points to.
         """
-        logger.info(f"Deploying LoRA adapter for checkpoint {checkpoint_id}")
-        logger.info(f"  Adapter dir:  {adapter_path}")
-        logger.info(f"  Server:       {self.base_url}  (container: {self.config.container_name})")
+        logger.info(f"Preparing LoRA adapter for checkpoint {checkpoint_id}")
+        logger.info(f"  Adapter dir: {adapter_path}")
 
         gguf_path = self._convert_to_gguf(adapter_path)
         if not gguf_path:
@@ -69,24 +69,54 @@ class LlamaCppDeployer:
         if not self._update_symlink(gguf_path):
             logger.error("Symlink update failed — deployment aborted")
             return False
+
         logger.info(f"  {self.config.current_adapter_path} -> {gguf_path}")
+        return True
 
-        if not self._restart_container():
-            logger.error("Container restart failed — deployment aborted")
+    def stop_server(self) -> bool:
+        """Stop the llama-server container to free GPU VRAM for training."""
+        try:
+            client = docker.from_env()
+            container = client.containers.get(self.config.container_name)
+            logger.info(f"Stopping {self.config.container_name} to free GPU VRAM...")
+            container.stop(timeout=30)
+            logger.info(f"{self.config.container_name} stopped")
+            return True
+        except docker.errors.NotFound:
+            logger.warning(f"Container '{self.config.container_name}' not found — may already be stopped")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to stop {self.config.container_name}: {e}", exc_info=True)
             return False
 
-        if not self._wait_for_health():
-            logger.error(f"{self.config.container_name} did not become healthy after restart")
+    def start_server(self) -> bool:
+        """Start the llama-server container after training completes.
+
+        Picks up whichever adapter the current_adapter_path symlink points to —
+        new checkpoint on success, unchanged (rollback) on failure.
+        """
+        try:
+            client = docker.from_env()
+            container = client.containers.get(self.config.container_name)
+            logger.info(f"Starting {self.config.container_name}...")
+            container.start()
+            return True
+        except docker.errors.NotFound:
+            logger.error(f"Container '{self.config.container_name}' not found — cannot start")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to start {self.config.container_name}: {e}", exc_info=True)
             return False
 
+    def verify_deployment(self) -> bool:
+        """Confirm the server loaded the current adapter after restart."""
         success = self._verify_lora()
         if success:
             logger.info("=" * 60)
-            logger.info(f"LLAMA.CPP DEPLOYMENT SUCCESSFUL: {checkpoint_id}")
+            logger.info("LLAMA.CPP DEPLOYMENT VERIFIED")
             logger.info("=" * 60)
         else:
-            logger.error(f"LLAMA.CPP DEPLOYMENT FAILED for {checkpoint_id} (verification failed)")
-
+            logger.warning("Adapter verification failed — server may still be loading")
         return success
 
     def _convert_to_gguf(self, adapter_path: str) -> Optional[str]:
@@ -151,22 +181,6 @@ class LlamaCppDeployer:
             return True
         except Exception as e:
             logger.error(f"Failed to repoint {target} -> {gguf_path}: {e}", exc_info=True)
-            return False
-
-    def _restart_container(self) -> bool:
-        """Restart the sibling llama-server container via docker.sock so it
-        re-reads --lora at the (now repointed) current_adapter_path."""
-        try:
-            client = docker.from_env()
-            container = client.containers.get(self.config.container_name)
-            logger.info(f"Restarting {self.config.container_name}...")
-            container.restart(timeout=30)
-            return True
-        except docker.errors.NotFound:
-            logger.error(f"Container '{self.config.container_name}' not found")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to restart {self.config.container_name}: {e}", exc_info=True)
             return False
 
     def _wait_for_health(self, timeout: float = 120.0, poll_interval: float = 3.0) -> bool:

@@ -95,6 +95,11 @@ tr:hover td { background: #fafbff; }
 .dot-green { background: #27ae60; }
 .dot-red { background: #e74c3c; }
 .dot-grey { background: #aaa; }
+.dot-pulse { animation: pulse 1.5s infinite; }
+@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.35; } 100% { opacity: 1; } }
+
+/* Training history sparkline */
+.spark-caption { display: flex; justify-content: space-between; font-size: 11px; color: #aaa; margin-top: 2px; }
 
 .last-refresh { font-size: 11px; color: #bbb; margin-top: 10px; text-align: right; }
 </style>
@@ -150,6 +155,7 @@ tr:hover td { background: #fafbff; }
     </div>
     <div class="card">
       <h2>Training Pipeline</h2>
+      <div class="row"><span class="lbl">Status</span><span class="val" id="tp-status">checking…</span></div>
       <div class="row"><span class="lbl">Last Training</span><span class="val" id="tp-last">—</span></div>
       <div class="row"><span class="lbl">Days Since</span><span class="val" id="tp-days">—</span></div>
       <div class="row"><span class="lbl">Pending (SFT)</span><span class="val" id="tp-pending-sft">—</span></div>
@@ -219,6 +225,29 @@ tr:hover td { background: #fafbff; }
     <div id="checkpoints-list"><div style="color:#aaa;text-align:center;padding:20px">Loading…</div></div>
   </div>
 
+  <!-- Training History -->
+  <div class="section">
+    <h2>
+      Training History
+      <button class="btn btn-primary btn-sm" onclick="loadTrainingHistory()">Refresh</button>
+    </h2>
+    <div id="history-sparkline" style="margin-bottom:14px"></div>
+    <table>
+      <thead>
+        <tr>
+          <th>Timestamp</th>
+          <th>Checkpoint</th>
+          <th>Train Loss</th>
+          <th>Eval Loss</th>
+          <th>Epochs</th>
+        </tr>
+      </thead>
+      <tbody id="history-tbody">
+        <tr><td colspan="5" style="text-align:center;color:#aaa;padding:20px">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
   <!-- System -->
   <div class="section">
     <h2>System Resources</h2>
@@ -246,6 +275,8 @@ async function refreshAll() {
     refreshServerStatus(),
     loadInteractions(currentPage),
     loadCheckpoints(),
+    refreshTrainingProgress(),
+    loadTrainingHistory(),
   ]);
   document.getElementById('last-refresh-time').textContent = new Date().toLocaleTimeString();
 }
@@ -316,6 +347,36 @@ async function refreshServerStatus() {
     set('llm-adapters', adapters.length === 0 ? 'none (base model)' : adapters.map(a => a.path?.split('/').pop() || '?').join(', '));
   } catch(e) {
     set('llm-status', 'error');
+  }
+}
+
+// ── Training progress (live) ────────────────────────────────────────────
+async function refreshTrainingProgress() {
+  const statusEl = document.getElementById('tp-status');
+  if (!statusEl) return;
+  try {
+    const r = await fetch('/admin/api/training/progress');
+    const d = await r.json();
+
+    if (d.training_active) {
+      const passes = d.passes || [];
+      const latest = passes[passes.length - 1] || {};
+      const parts = [
+        d.current_pass !== undefined && d.total_passes !== undefined ? `pass ${d.current_pass}/${d.total_passes}` : '',
+        latest.layers ? `layers ${latest.layers}` : '',
+        latest.epoch !== undefined && latest.epochs !== undefined ? `epoch ${latest.epoch}/${latest.epochs}` : '',
+        latest.global_step !== undefined && latest.max_steps !== undefined ? `step ${latest.global_step}/${latest.max_steps}` : '',
+        latest.train_loss !== undefined && latest.train_loss !== null ? `loss ${latest.train_loss.toFixed(3)}` : '',
+      ].filter(Boolean).join(' · ');
+      statusEl.innerHTML = `<span class="dot dot-green dot-pulse"></span>active${parts ? ' — ' + parts : ''}`;
+      statusEl.className = 'val ok';
+    } else {
+      statusEl.innerHTML = '<span class="dot dot-grey"></span>idle';
+      statusEl.className = 'val';
+    }
+  } catch(e) {
+    statusEl.innerHTML = '<span class="dot dot-grey"></span>unknown';
+    statusEl.className = 'val';
   }
 }
 
@@ -405,16 +466,31 @@ async function loadCheckpoints() {
     const r = await fetch('/admin/api/checkpoints');
     const d = await r.json();
     const list = document.getElementById('checkpoints-list');
-    if (!d.length) { list.innerHTML = '<div style="color:#aaa;text-align:center;padding:20px">No checkpoints found</div>'; return; }
-    list.innerHTML = d.map(cp => {
+    const cps = d.checkpoints || [];
+    if (!cps.length) { list.innerHTML = '<div style="color:#aaa;text-align:center;padding:20px">No checkpoints found</div>'; return; }
+    list.innerHTML = cps.map(cp => {
       const id = cp.checkpoint_id || cp.name;
-      const date = cp.created_at ? new Date(cp.created_at).toLocaleString() : '—';
-      const loss = cp.metrics?.eval_loss !== undefined ? `loss: ${cp.metrics.eval_loss.toFixed(4)}` : '';
-      const mode = cp.training_mode || '—';
+      const date = cp.timestamp ? new Date(cp.timestamp.replace(' ', 'T')).toLocaleString() : '—';
+      const mode = cp.mode || '—';
+      const m = cp.metrics || {};
+      const metricParts = [
+        m.train_loss !== undefined ? `train: ${m.train_loss.toFixed(4)}` : '',
+        m.eval_loss !== undefined ? `eval: ${m.eval_loss.toFixed(4)}` : '',
+        m.perplexity !== undefined ? `ppl: ${m.perplexity.toFixed(1)}` : '',
+      ].filter(Boolean).join(' &nbsp;|&nbsp; ');
+      const sampleParts = [
+        cp.training_samples !== undefined ? `${cp.training_samples} train samples` : '',
+        cp.val_samples !== undefined ? `${cp.val_samples} val` : '',
+        cp.epochs !== undefined ? `${cp.epochs} epochs` : '',
+      ].filter(Boolean).join(' &nbsp;|&nbsp; ');
       const deployed = cp.deployed ? '<span class="deployed-tag">deployed</span>' : '';
-      return `<div class="cp-row">
+      return `<div class="cp-row" style="align-items:flex-start">
         <div class="cp-id">${id}</div>
-        <div class="cp-meta">${date} &nbsp;|&nbsp; ${mode} &nbsp;|&nbsp; ${loss} ${deployed}</div>
+        <div class="cp-meta">
+          <div>${date} &nbsp;|&nbsp; ${mode} ${deployed}</div>
+          ${metricParts ? `<div style="margin-top:2px">${metricParts}</div>` : ''}
+          ${sampleParts ? `<div style="margin-top:2px;color:#aaa">${sampleParts}</div>` : ''}
+        </div>
         <div>
           <button class="btn btn-primary btn-sm" onclick="deployLora('${id}')">Deploy to llama.cpp</button>
           <button class="btn btn-sm" style="background:#eee" onclick="rollback('${id}')">Set Active</button>
@@ -424,6 +500,63 @@ async function loadCheckpoints() {
   } catch(e) {
     document.getElementById('checkpoints-list').innerHTML = '<div style="color:#e74c3c">Error loading checkpoints</div>';
   }
+}
+
+// ── Training history ──────────────────────────────────────────────────────
+async function loadTrainingHistory() {
+  const tbody = document.getElementById('history-tbody');
+  const sparkEl = document.getElementById('history-sparkline');
+  if (!tbody || !sparkEl) return;
+  try {
+    const r = await fetch('/admin/api/training/history');
+    const d = await r.json();
+    const history = d.history || [];
+    if (!history.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#aaa;padding:20px">No training history yet</td></tr>';
+      sparkEl.innerHTML = '';
+      return;
+    }
+    sparkEl.innerHTML = renderSparkline(history);
+    tbody.innerHTML = history.map(h => {
+      const ts = h.timestamp ? new Date(h.timestamp.replace(' ', 'T')).toLocaleString() : '—';
+      return `<tr>
+        <td>${ts}</td>
+        <td style="font-size:12px">${h.checkpoint_name || '—'}</td>
+        <td>${h.train_loss !== undefined && h.train_loss !== null ? h.train_loss.toFixed(4) : '—'}</td>
+        <td>${h.eval_loss !== undefined && h.eval_loss !== null ? h.eval_loss.toFixed(4) : '—'}</td>
+        <td>${h.epochs ?? '—'}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="5" style="color:#e74c3c;padding:20px">Error loading training history</td></tr>';
+    sparkEl.innerHTML = '';
+  }
+}
+
+function renderSparkline(history) {
+  const points = history.filter(h => h.eval_loss !== undefined && h.eval_loss !== null);
+  if (points.length < 2) return '<div style="color:#aaa;font-size:12px">Not enough data points for a trend line yet</div>';
+
+  const w = 600, h = 80, pad = 8;
+  const losses = points.map(p => p.eval_loss);
+  const min = Math.min(...losses), max = Math.max(...losses);
+  const range = (max - min) || 1;
+  const stepX = (w - pad * 2) / (points.length - 1);
+
+  const coords = losses.map((v, i) => {
+    const x = pad + i * stepX;
+    const y = pad + (h - pad * 2) * (1 - (v - min) / range);
+    return [x.toFixed(1), y.toFixed(1)];
+  });
+
+  const polylinePoints = coords.map(c => c.join(',')).join(' ');
+  const circles = coords.map(c => `<circle cx="${c[0]}" cy="${c[1]}" r="2.5" fill="#667eea" />`).join('');
+
+  return `<svg width="100%" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+      <polyline points="${polylinePoints}" fill="none" stroke="#667eea" stroke-width="2" />
+      ${circles}
+    </svg>
+    <div class="spark-caption"><span>eval_loss min ${min.toFixed(3)}</span><span>max ${max.toFixed(3)}</span></div>`;
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────
@@ -473,6 +606,7 @@ async function triggerTraining() {
     const r = await fetch('/admin/api/training/trigger', { method: 'POST' });
     const d = await r.json();
     alert(d.message || 'Training requested');
+    refreshTrainingProgress();
   } catch(e) { alert('Request failed: ' + e.message); }
 }
 

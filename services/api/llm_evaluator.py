@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -46,6 +47,40 @@ Return exactly this JSON structure:
 }}"""
 
 
+def _extract_json(message: dict) -> str:
+    """Extract the JSON string from a llama.cpp chat-completion message dict.
+
+    Gemma 4 with --reasoning-budget may emit the answer entirely inside the
+    reasoning/thinking phase, leaving message["content"] empty.  We fall back
+    to message["reasoning_content"] in that case.  We also strip markdown code
+    fences and, as a last resort, pull out the first {...} block.
+    """
+    raw = (message.get("content") or "").strip()
+    if not raw:
+        raw = (message.get("reasoning_content") or "").strip()
+    if not raw:
+        return ""
+
+    # Strip markdown code fences: ```json { ... } ``` or ``` { ... } ```
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    if fence:
+        return fence.group(1).strip()
+
+    # If thinking tags are still present, prefer the post-thinking content
+    post_thinking = re.search(r"</(?:antml:)?thinking>\s*(.+)", raw, re.DOTALL)
+    if post_thinking:
+        candidate = post_thinking.group(1).strip()
+        if candidate:
+            raw = candidate
+
+    # Isolate the outermost JSON object (handles preamble/postamble text)
+    json_obj = re.search(r"(\{.*\})", raw, re.DOTALL)
+    if json_obj:
+        return json_obj.group(1).strip()
+
+    return raw
+
+
 def _compute_weight(sentiment: float, quality: int, is_golden: bool) -> float:
     base = 1.0 + abs(sentiment) * 0.5
     quality_factor = (quality / 10.0) * 1.5 + 0.5
@@ -74,14 +109,13 @@ class LLMEvaluator:
                     f"{self.base_url}/v1/chat/completions",
                     json={
                         "messages": [{"role": "user", "content": prompt}],
-                        "response_format": {"type": "json_object"},
                         "temperature": 0.1,
                         "top_p": 0.9,
                         "stream": False,
                     },
                 )
                 response.raise_for_status()
-                raw = response.json()["choices"][0]["message"]["content"]
+                raw = _extract_json(response.json()["choices"][0]["message"])
 
             parsed = json.loads(raw)
             return self._build_evaluation(parsed)

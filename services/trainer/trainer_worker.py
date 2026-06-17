@@ -21,6 +21,7 @@ from pathlib import Path
 from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 # Must be set before torch (and oneDNN/MKLDNN) are imported.
 # oneDNN uses OMP for its thread pool — torch.set_num_threads() does NOT control it.
@@ -156,12 +157,29 @@ class TrainerWorker:
                     logger.warning(f"Failed to remove dangling checkpoint {d.name}: {e}")
 
     def _execute_training(self, requested_mode: str = "auto"):
-        """Execute the complete training pipeline."""
+        """Execute the complete training pipeline.
+
+        Server lifecycle when enable_deployment is True:
+          1. Stop llama-server  → frees GPU VRAM for training
+          2. Train              → uses freed VRAM
+          3. On success         → convert GGUF + repoint symlink (deploy_lora)
+             On failure         → symlink unchanged (automatic rollback)
+          4. Start llama-server → loads whichever adapter the symlink now points to
+        """
         logger.info("=" * 80)
         logger.info("STARTING TRAINING PIPELINE")
         logger.info("=" * 80)
 
         self._cleanup_dangling_checkpoints()
+
+        # Stop llama-server before acquiring the training lock so GPU VRAM is
+        # free for the full training run. Start is in the finally block so it
+        # always happens, even if training crashes.
+        deployer = None
+        if self.config.training.enable_deployment:
+            from shared.llama_cpp_deployer import LlamaCppDeployer
+            deployer = LlamaCppDeployer(self.config.llama_cpp)
+            deployer.stop_server()
 
         lock_file = Path(settings.data_path) / "training.lock"
         lock_file.touch()
@@ -306,20 +324,21 @@ class TrainerWorker:
                 training_metrics=train_metrics
             )
 
-            # Step 8: Deploy if validation passed
+            # Step 8: Prepare adapter for deployment (convert + repoint symlink).
+            # Server start is in the finally block regardless of outcome, so the
+            # rollback case (no symlink update) is automatic — llama-server just
+            # reloads whatever the symlink already points to.
             if should_deploy and self.config.training.enable_deployment:
-                logger.info("Step 8: Converting and deploying adapter to llama-server...")
+                logger.info("Step 8: Converting adapter and repointing deployment symlink...")
                 try:
                     self._merge_and_deploy(adapter_path, checkpoint_id, checkpoint_dir, metadata)
                 except Exception as e:
-                    logger.error(f"Deployment failed: {e}", exc_info=True)
-                    logger.info("Keeping current adapter; GGUF saved for manual reload")
-                    self._notify_api_reload()
+                    logger.error(f"Deployment preparation failed: {e}", exc_info=True)
+                    logger.info("Symlink unchanged — server will restart with previous adapter (rollback)")
             elif should_deploy:
                 logger.info(f"Step 8: Adapter saved at {adapter_path} (deployment disabled)")
             else:
-                logger.warning("Checkpoint failed validation, not deployed")
-                self._notify_api_reload()
+                logger.warning("Checkpoint failed validation — server will restart with previous adapter (rollback)")
                 self._cleanup_checkpoint_dir(checkpoint_dir)
 
             # Step 9: Cleanup
@@ -344,9 +363,17 @@ class TrainerWorker:
             logger.error(f"Training pipeline failed: {e}", exc_info=True)
             if 'checkpoint_dir' in locals():
                 self._cleanup_checkpoint_dir(checkpoint_dir)
-            self._notify_api_reload()
 
         finally:
+            # Always restart llama-server regardless of training outcome.
+            # Symlink unchanged on failure → automatic rollback to previous adapter.
+            if deployer:
+                deployer.start_server()
+                if deployer._wait_for_health():
+                    deployer.verify_deployment()
+                else:
+                    logger.error(f"{self.config.llama_cpp.container_name} did not become healthy after restart")
+
             if 'original_enable_dpo' in locals():
                 self.config.training.enable_dpo = original_enable_dpo
             lock_file.unlink(missing_ok=True)
@@ -354,29 +381,22 @@ class TrainerWorker:
             gc.collect()
 
     def _merge_and_deploy(self, adapter_path, checkpoint_id, checkpoint_dir, metadata):
-        """Convert and deploy LoRA adapter to llama-server via /lora API."""
+        """Convert GGUF and repoint deployment symlink. Server restart is handled
+        by the finally block in _execute_training, not here."""
         from shared.llama_cpp_deployer import LlamaCppDeployer
 
         deployer = LlamaCppDeployer(self.config.llama_cpp)
 
-        success = deployer.deploy_lora(
-            adapter_path=adapter_path,
-            checkpoint_id=checkpoint_id,
-        )
+        if not deployer.deploy_lora(adapter_path=adapter_path, checkpoint_id=checkpoint_id):
+            raise RuntimeError("GGUF conversion or symlink update failed")
 
-        if not success:
-            raise RuntimeError("llama.cpp deployment failed")
-
-        # Update metadata and config pointer
         metadata.deployed = True
         self.model_evaluator._save_checkpoint_metadata(metadata)
         self.model_evaluator._set_current_checkpoint(checkpoint_id, metadata)
         deployer.update_config_pointer(self.config.model.model_id)
-
-        # Rotate old checkpoints
         deployer.rotate_checkpoints(keep_count=self.config.training.max_checkpoint_count)
 
-        logger.info(f"Deployed adapter from checkpoint {checkpoint_id}")
+        logger.info(f"Adapter prepared for checkpoint {checkpoint_id} — server will pick it up on restart")
 
     def _notify_api_reload(self):
         """Signal that a training cycle has completed (informational only)."""
@@ -475,17 +495,44 @@ class TrainerWorker:
             logger.error(f"Error in user-request check: {e}", exc_info=True)
 
     def run(self):
-        """Run the training worker with scheduled checks."""
+        """Run the training worker scheduler.
+
+        When schedule_enabled: fires check_and_train() once per day at the
+        configured time+timezone (CronTrigger). check_and_train still respects
+        _is_within_schedule() as a secondary guard.
+
+        When not schedule_enabled: falls back to the original hourly interval.
+
+        Manual triggers (POST /v1/training/trigger) are always picked up within
+        30 seconds by check_user_requested_training, independent of the schedule.
+        """
         logger.info("Starting training worker scheduler...")
         scheduler = BlockingScheduler()
 
-        scheduler.add_job(
-            self.check_and_train,
-            trigger=IntervalTrigger(hours=1),
-            id='training_check',
-            name='Check training conditions',
-            replace_existing=True,
-        )
+        if self.config.training.schedule_enabled:
+            import pytz
+            tz = pytz.timezone(self.config.training.schedule_timezone)
+            hour, minute = map(int, self.config.training.schedule_time.split(':'))
+            logger.info(
+                f"Scheduled training: daily at {self.config.training.schedule_time} "
+                f"{self.config.training.schedule_timezone}"
+            )
+            scheduler.add_job(
+                self.check_and_train,
+                trigger=CronTrigger(hour=hour, minute=minute, timezone=tz),
+                id='training_check',
+                name=f'Daily training at {self.config.training.schedule_time} {self.config.training.schedule_timezone}',
+                replace_existing=True,
+            )
+        else:
+            scheduler.add_job(
+                self.check_and_train,
+                trigger=IntervalTrigger(hours=1),
+                id='training_check',
+                name='Check training conditions hourly',
+                replace_existing=True,
+            )
+
         scheduler.add_job(
             self.check_user_requested_training,
             trigger=IntervalTrigger(seconds=30),
@@ -494,9 +541,7 @@ class TrainerWorker:
             replace_existing=True,
         )
 
-        logger.info("Running initial training check...")
-        self.check_and_train()
-        logger.info("Training worker running. Hourly checks + 30s user-request poll.")
+        logger.info("Training worker running. Manual triggers picked up within 30s.")
 
         try:
             scheduler.start()

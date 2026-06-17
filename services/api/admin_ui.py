@@ -435,19 +435,42 @@ async def get_checkpoints():
                     with open(metadata_file, 'r') as f:
                         data = json.load(f)
 
+                    checkpoint_id = data.get("checkpoint_id")
+                    checkpoint_dir = checkpoints_path / checkpoint_id if checkpoint_id else None
+
                     # Auto-detect GGUF files if not in metadata (for manual conversions)
-                    if not data.get("gguf_model_path"):
-                        checkpoint_id = data.get("checkpoint_id")
-                        if checkpoint_id:
-                            checkpoint_dir = checkpoints_path / checkpoint_id
-                            gguf_files = list(checkpoint_dir.glob("*.gguf"))
-                            if gguf_files:
-                                # Prefer Q4_K_M quantized version, then any other GGUF
-                                q4_files = [f for f in gguf_files if "Q4_K_M" in f.name or "q4" in f.name.lower()]
-                                if q4_files:
-                                    data["gguf_model_path"] = str(q4_files[0])
-                                else:
-                                    data["gguf_model_path"] = str(gguf_files[0])
+                    if not data.get("gguf_model_path") and checkpoint_dir:
+                        gguf_files = list(checkpoint_dir.glob("*.gguf"))
+                        if gguf_files:
+                            # Prefer Q4_K_M quantized version, then any other GGUF
+                            q4_files = [f for f in gguf_files if "Q4_K_M" in f.name or "q4" in f.name.lower()]
+                            if q4_files:
+                                data["gguf_model_path"] = str(q4_files[0])
+                            else:
+                                data["gguf_model_path"] = str(gguf_files[0])
+
+                    # The outer *_metadata.json strips "mode" out of metrics and
+                    # has no epochs/val_samples; pull those back from the inner
+                    # training_metadata.json (or the last pass, for sequential runs).
+                    if checkpoint_dir and checkpoint_dir.exists():
+                        inner_metadata_file = checkpoint_dir / "training_metadata.json"
+                        if not inner_metadata_file.exists():
+                            pass_dirs = sorted(
+                                [d for d in checkpoint_dir.iterdir() if d.is_dir() and d.name.startswith("pass_")],
+                                key=lambda d: int(d.name.split("_")[1]),
+                            )
+                            if pass_dirs:
+                                inner_metadata_file = pass_dirs[-1] / "training_metadata.json"
+
+                        if inner_metadata_file.exists():
+                            try:
+                                with open(inner_metadata_file, 'r') as f:
+                                    inner_data = json.load(f)
+                                data["mode"] = inner_data.get("mode")
+                                data["epochs"] = inner_data.get("epochs")
+                                data["val_samples"] = inner_data.get("val_samples")
+                            except Exception as e:
+                                logger.warning(f"Failed to load inner training metadata for {checkpoint_id}: {e}")
 
                     checkpoints.append(data)
                 except Exception as e:
