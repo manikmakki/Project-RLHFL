@@ -69,7 +69,7 @@ services:
       - PYTORCH_ENABLE_XPU_FALLBACK=1
       # Emit a C-level stack trace on SIGSEGV/SIGABRT so hard crashes are visible
       # in docker compose logs. Remove once GPU + CPU crashes are resolved.
-      - PYTHONFAULTHANDLER=1
+      # - PYTHONFAULTHANDLER=1
       # Show PyTorch C++ call stack on exceptions (complements PYTHONFAULTHANDLER
       # which only fires on signals, not C++ exceptions).
       - TORCH_SHOW_CPP_BACKTRACE=1
@@ -87,11 +87,21 @@ services:
     # tag it to match (or substitute a published image for your hardware).
     image: local/llama.cpp:server-intel
     container_name: llama-server
-    # Whole-directory passthrough, same pattern as rlhfl below — more portable
+    # Whole-directory passthrough, same pattern as rlhfl above — more portable
     # than pinning specific renderD*/card* node numbers, which vary by host
     # and by how many GPUs/drivers are present.
     devices:
       - /dev/dri:/dev/dri
+    group_add:
+      - 109 # render group (owns /dev/dri/renderD* — compute access) — VERIFY
+      - 44  # video group (owns /dev/dri/card* — required by Level Zero for device init) — VERIFY
+    # Same Level Zero zeInit requirements as rlhfl on this kernel 7.0 / Xe2 host —
+    # see rlhfl's cap_add/security_opt comment above.
+    cap_add:
+      - SYS_ADMIN
+      - PERFMON
+    security_opt:
+      - seccomp:unconfined
     volumes:
       # ${HOME} expands via docker compose's shell-style interpolation.
       # Adjust if your Hugging Face cache lives somewhere non-default
@@ -106,14 +116,22 @@ services:
     # The snapshot hash in the HF Hub cache layout (models--<org>--<repo>/
     # snapshots/<commit-hash>/...) is unique per download — find yours with:
     #   ls "$HOME/.cache/huggingface/hub/models--unsloth--gemma-4-26B-A4B-it-GGUF/snapshots/"
+    environment:
+      # Same Level Zero/SYCL tuning as the source-built systemd service
+      # (see ~/llama-server-config.env) — without these the container falls
+      # back to default device enumeration and allocation limits.
+      - ONEAPI_DEVICE_SELECTOR=level_zero:0
+      - ZES_ENABLE_SYSMAN=1
+      - UR_L0_ENABLE_RELAXED_ALLOCATION_LIMITS=1
+      - GGML_SYCL_ENABLE_FLASH_ATTN=1
     command: >
       -m /models/models--unsloth--gemma-4-26B-A4B-it-GGUF/snapshots/<YOUR_SNAPSHOT_HASH>/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf
       --mmproj /models/models--unsloth--gemma-4-26B-A4B-it-GGUF/snapshots/<YOUR_SNAPSHOT_HASH>/mmproj-BF16.gguf
       --reasoning-budget 1024
       --port 8080
       --host 0.0.0.0
-      -n 512
-      --n-gpu-layers 99
+      --n-gpu-layers 999
+      --flash-attn on
       --lora /checkpoints/current_adapter.gguf
     ports:
       - "8080:8080"

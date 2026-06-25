@@ -66,8 +66,11 @@ def _extract_json(message: dict) -> str:
     if fence:
         return fence.group(1).strip()
 
-    # If thinking tags are still present, prefer the post-thinking content
-    post_thinking = re.search(r"</(?:antml:)?thinking>\s*(.+)", raw, re.DOTALL)
+    # If thinking tags are still present, prefer the post-thinking content.
+    # Handles </thinking>, </thinking>, and Gemma 4's <end_of_thinking>.
+    post_thinking = re.search(
+        r"(?:</(?:antml:)?thinking>|<end_of_thinking>)\s*(.+)", raw, re.DOTALL
+    )
     if post_thinking:
         candidate = post_thinking.group(1).strip()
         if candidate:
@@ -108,14 +111,28 @@ class LLMEvaluator:
                 response = client.post(
                     f"{self.base_url}/v1/chat/completions",
                     json={
-                        "messages": [{"role": "user", "content": prompt}],
+                        # Assistant prefill: the chat template builds
+                        #   <start_of_turn>model\n{
+                        # which means the "{" appears BEFORE <start_of_thinking> would
+                        # be inserted, so Gemma 4 skips the thinking phase entirely and
+                        # continues the JSON directly in content.
+                        "messages": [
+                            {"role": "user", "content": prompt},
+                            {"role": "assistant", "content": "{"},
+                        ],
                         "temperature": 0.1,
                         "top_p": 0.9,
                         "stream": False,
+                        "max_tokens": 1024,
                     },
                 )
                 response.raise_for_status()
-                raw = _extract_json(response.json()["choices"][0]["message"])
+                message = response.json()["choices"][0]["message"]
+                raw = _extract_json(message)
+                # llama.cpp returns only the continuation after the prefilled "{";
+                # restore it if the model did not include it in its returned content.
+                if raw and not raw.startswith("{"):
+                    raw = "{" + raw
 
             parsed = json.loads(raw)
             return self._build_evaluation(parsed)
